@@ -27,6 +27,7 @@ jobs:
           ./thavac.exe --help || true
           ./thavac.exe examples/01_hello_world.thv -o test_hello.exe
           ./test_hello.exe
+          ./thavac.exe examples/01_hello_world.thv --target win-arm64 -o test_hello_win_arm64.exe
 
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
