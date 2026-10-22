@@ -186,6 +186,69 @@ inline bool g_hasDLAttach = false;
 inline bool g_hasCLib = false;
 inline bool g_isLibraryMode = false;
 inline int g_optLevel = 0;
+inline std::string g_explicitCxx = "";
+
+enum class HostCXXType {
+    NONE,
+    GCC,      // g++ / c++
+    CLANG,    // clang++
+    MSVC      // cl.exe
+};
+
+struct DetectedCompiler {
+    HostCXXType type = HostCXXType::NONE;
+    std::string command = "";
+    std::string displayName = "";
+};
+
+inline bool probeCompilerCommand(const std::string& cmd) {
+#ifdef _WIN32
+    std::string testCmd = "where " + cmd + " >nul 2>nul";
+#else
+    std::string testCmd = "command -v " + cmd + " >/dev/null 2>&1";
+#endif
+    return (std::system(testCmd.c_str()) == 0);
+}
+
+inline DetectedCompiler detectHostCXXCompiler(const std::string& explicitCxx = "") {
+    std::string candidate = explicitCxx;
+    if (candidate.empty()) {
+        const char* envCxx = std::getenv("CXX");
+        if (envCxx && *envCxx) {
+            candidate = envCxx;
+        }
+    }
+
+    if (!candidate.empty()) {
+        if (probeCompilerCommand(candidate)) {
+            std::string lower = candidate;
+            for (char& c : lower) c = tolower((unsigned char)c);
+            if (lower.find("clang") != std::string::npos) {
+                return { HostCXXType::CLANG, candidate, "LLVM Clang (" + candidate + ")" };
+            } else if (lower == "cl" || lower == "cl.exe") {
+                return { HostCXXType::MSVC, candidate, "Microsoft Visual C++ (" + candidate + ")" };
+            } else {
+                return { HostCXXType::GCC, candidate, "GCC / G++ (" + candidate + ")" };
+            }
+        }
+    }
+
+    // Auto-detection probe in priority order: g++, clang++, c++, cl
+    if (probeCompilerCommand("g++")) {
+        return { HostCXXType::GCC, "g++", "MinGW-w64 / GCC (g++)" };
+    }
+    if (probeCompilerCommand("clang++")) {
+        return { HostCXXType::CLANG, "clang++", "LLVM Clang (clang++)" };
+    }
+    if (probeCompilerCommand("c++")) {
+        return { HostCXXType::GCC, "c++", "Standard POSIX C++ (c++)" };
+    }
+    if (probeCompilerCommand("cl")) {
+        return { HostCXXType::MSVC, "cl", "Microsoft Visual C++ (cl.exe)" };
+    }
+
+    return { HostCXXType::NONE, "", "" };
+}
 
 inline void parseDLMetadata(const std::string& content, const std::string& libPath, int line) {
     std::string libBasename = std::filesystem::path(libPath).filename().string();
@@ -5699,6 +5762,8 @@ int main(int argc, char* argv[]) {
             g_optLevel = 2;
         } else if (arg == "-O3" || arg == "--O3") {
             g_optLevel = 3;
+        } else if (arg == "--cxx" && i + 1 < argc) {
+            g_explicitCxx = argv[++i];
         } else if (inputFile.empty()) {
             inputFile = arg;
         }
@@ -7381,6 +7446,8 @@ int main(int argc, char* argv[]) {
 
     std::string optFlag = "-O" + std::to_string(g_optLevel == 0 ? 0 : g_optLevel);
     std::string compileCmd;
+    DetectedCompiler comp;
+
     if (isArm64Mode) {
         std::cout << "[Thava Compiler] Cross-compiling for Linux AArch64 (ARM64) via aarch64-linux-gnu-g++ (" << optFlag << ")...\n";
 #ifdef _WIN32
@@ -7388,34 +7455,69 @@ int main(int argc, char* argv[]) {
 #else
         compileCmd = "aarch64-linux-gnu-g++ " + optFlag + " -s \"" + tempCppFile + "\" -o \"" + outputFile + "\"";
 #endif
-    } else if (g_isLibraryMode) {
-        std::cout << "[Thava Compiler] Generating dynamic library (.thdl/.so) via g++ (-shared -fPIC " << optFlag << ")...\n";
-        compileCmd = "g++ -shared -fPIC " + optFlag + " -march=native -s -finput-charset=UTF-8 -fexec-charset=UTF-8 " + tempCppFile;
-        for (const auto& libPath : g_dlLibraries) {
-            compileCmd += " \"" + libPath + "\"";
-        }
-#ifdef _WIN32
-        compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
-#else
-        compileCmd += " -Wl,-rpath,'$ORIGIN' -Wl,-rpath,. -ldl";
-#endif
-        compileCmd += " -o \"" + outputFile + "\"";
+        comp.displayName = "aarch64-linux-gnu-g++";
     } else {
-#ifdef _WIN32
-        std::cout << "[Thava Compiler] Generating native code via MinGW-w64 (g++ optimized " << optFlag << " -march=native -s)...\n";
-#else
-        std::cout << "[Thava Compiler] Generating Linux ELF64 native code via g++ (" << optFlag << " -march=native -s)...\n";
-#endif
-        compileCmd = "g++ " + optFlag + " -march=native -s -finput-charset=UTF-8 -fexec-charset=UTF-8 " + tempCppFile;
-        for (const auto& libPath : g_dlLibraries) {
-            compileCmd += " \"" + libPath + "\"";
+        comp = detectHostCXXCompiler(g_explicitCxx);
+        if (comp.type == HostCXXType::NONE) {
+            std::cerr << "[Thava Compiler Error]: No C++ compiler (g++, clang++, or cl) detected on your system!\n"
+                      << "The transpiler backend (--cpp) requires a host C++17 compiler.\n\n"
+                      << "To resolve this:\n"
+                      << "  1. Install MinGW-w64 (GCC), LLVM Clang, or Visual Studio MSVC on your system and add to PATH.\n"
+                      << "  2. Or specify a custom compiler path using environment variable CXX or flag '--cxx <path>'.\n"
+                      << "  3. Or run without '--cpp' to use Thava's Zero-Dependency Native Backend directly!\n";
+            std::remove(tempCppFile.c_str());
+            return 1;
         }
+
+        std::cout << "[Thava Compiler] Using detected C++ compiler: " << comp.displayName << " (" << optFlag << ")...\n";
+
+        if (comp.type == HostCXXType::MSVC) {
+            std::string msvcOpt = (g_optLevel == 0) ? "/Od" : "/O2";
+            compileCmd = comp.command + " /nologo /std:c++17 /EHsc /utf-8 " + msvcOpt;
+            if (g_isLibraryMode) {
+                compileCmd += " /LD";
+            }
+            compileCmd += " \"" + tempCppFile + "\"";
+            for (const auto& libPath : g_dlLibraries) {
+                compileCmd += " \"" + libPath + "\"";
+            }
+            compileCmd += " gdi32.lib user32.lib kernel32.lib comctl32.lib comdlg32.lib";
+            compileCmd += " /Fe:\"" + outputFile + "\"";
+        } else {
+            std::string cxxFlags = comp.command + " -std=c++17 " + optFlag;
+            if (comp.type == HostCXXType::GCC) {
+                cxxFlags += " -finput-charset=UTF-8 -fexec-charset=UTF-8";
+            }
+            cxxFlags += " -march=native -s";
+
+            if (g_isLibraryMode) {
+                compileCmd = comp.command + " -shared -fPIC -std=c++17 " + optFlag;
+                if (comp.type == HostCXXType::GCC) {
+                    compileCmd += " -finput-charset=UTF-8 -fexec-charset=UTF-8";
+                }
+                compileCmd += " -march=native -s \"" + tempCppFile + "\"";
+                for (const auto& libPath : g_dlLibraries) {
+                    compileCmd += " \"" + libPath + "\"";
+                }
 #ifdef _WIN32
-        compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
+                compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
 #else
-        compileCmd += " -Wl,-rpath,'$ORIGIN' -Wl,-rpath,. -ldl";
+                compileCmd += " -Wl,-rpath,'$ORIGIN' -Wl,-rpath,. -ldl";
 #endif
-        compileCmd += " -o \"" + outputFile + "\"";
+                compileCmd += " -o \"" + outputFile + "\"";
+            } else {
+                compileCmd = cxxFlags + " \"" + tempCppFile + "\"";
+                for (const auto& libPath : g_dlLibraries) {
+                    compileCmd += " \"" + libPath + "\"";
+                }
+#ifdef _WIN32
+                compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
+#else
+                compileCmd += " -Wl,-rpath,'$ORIGIN' -Wl,-rpath,. -ldl";
+#endif
+                compileCmd += " -o \"" + outputFile + "\"";
+            }
+        }
     }
 
     int res = std::system(compileCmd.c_str());
@@ -7428,11 +7530,7 @@ int main(int argc, char* argv[]) {
             std::cout << "[Thava Compiler] Success! Executable: " << outputFile << "\n";
         }
     } else {
-#ifdef _WIN32
-        std::cerr << "[Thava Compiler] MinGW-w64 g++ call failed! (Intermediate C++ code saved at '" << tempCppFile << "')\n";
-#else
-        std::cerr << "[Thava Compiler] Linux g++ call failed! (Intermediate C++ code saved at '" << tempCppFile << "')\n";
-#endif
+        std::cerr << "[Thava Compiler] Compilation failed using " << comp.displayName << "! (Intermediate C++ code saved at '" << tempCppFile << "')\n";
         return 1;
     }
 

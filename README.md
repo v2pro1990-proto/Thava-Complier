@@ -217,7 +217,8 @@ Usage: thavac <input.thv> [options]
 | :--- | :--- |
 | `-o <filename>` | Specify the output executable or library filename. |
 | `--native` | Enforce direct machine code generation (PE32+ / ELF64). |
-| `--cpp` | Use the C++17 transpiler backend (invokes host C++ compiler). |
+| `--cpp` | Use the C++17 transpiler backend (auto-detects g++, clang++, or cl). |
+| `--cxx <compiler>` | Specify custom host C++ compiler command or path (also honors CXX env var). |
 | `--lib` | Build as a shared dynamic library (`.thdl` on Windows, `.so` on Linux). |
 | `--info <file.thdl>` | Inspect embedded metadata and exported function signatures. |
 | `-O0`, `-O1`, `-O2`, `-O3` | Set optimization level (dead code elimination, register caching, peephole). |
