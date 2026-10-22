@@ -1,7 +1,7 @@
 ---
 name: Feature Request
 about: Suggest an idea, syntax improvement, or contribute a new feature to Thava.
-title: "[FEATURE]:"
+title: "[FEATURE]: "
 labels: enhancement
 assignees: ''
 

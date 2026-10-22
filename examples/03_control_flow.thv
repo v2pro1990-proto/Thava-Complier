@@ -1,0 +1,33 @@
+# ------------------------------------------------------------------------------
+# Thava Example 03: Control Flow (if-elif-else, while, for-in-range)
+# ------------------------------------------------------------------------------
+
+func test_conditions(<int> score) {
+    if score >= 90 {
+        cons.out("Grade: A (Score: @{score})")
+    } elif score >= 75 {
+        cons.out("Grade: B (Score: @{score})")
+    } elif score >= 50 {
+        cons.out("Grade: C (Score: @{score})")
+    } else {
+        cons.out("Grade: F (Score: @{score})")
+    }
+}
+
+func test_loops() {
+    cons.out("Range for loop (0 to 4):")
+    for <int> i in range(5) {
+        cons.out("  Step @{i}")
+    }
+
+    cons.out("While loop countdown:")
+    <int> count = 3
+    while count > 0 {
+        cons.out("  T-minus @{count}")
+        count -= 1
+    }
+    cons.out("  Liftoff!")
+}
+
+test_conditions(85)
+test_loops()

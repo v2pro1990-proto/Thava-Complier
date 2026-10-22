@@ -1,0 +1,32 @@
+# ------------------------------------------------------------------------------
+# Thava Example 04: Collections (Lists, Tuples, Methods & Indexing)
+# ------------------------------------------------------------------------------
+
+func test_lists() {
+    # Dynamic list of numbers
+    <lst> numbers = [10, 20, 30]
+    cons.out("Initial list size: @{numbers.len()}")
+    cons.out("First element: @{numbers[0]}")
+    cons.out("Second element: @{numbers[1]}")
+
+    # Appending values dynamically
+    numbers.addval(40)
+    cons.out("After adding 40, size is: @{numbers.len()}")
+    cons.out("Fourth element: @{numbers[3]}")
+
+    # Modifying list elements
+    numbers[0] = 99
+    cons.out("Updated first element: @{numbers[0]}")
+
+    # Floating point lists
+    <lst> coordinates = [1.5, 2.5, 3.5]
+    cons.out("Coordinate Y: @{coordinates[1]}")
+
+    # String indexing and slicing
+    <str> text = "Thava Language"
+    cons.out("First letter: @{text[0]}")
+    <str> prefix = text.getsubstring(0, 5)
+    cons.out("Prefix: @{prefix}")
+}
+
+test_lists()

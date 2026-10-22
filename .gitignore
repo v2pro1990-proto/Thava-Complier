@@ -1,0 +1,44 @@
+# Binaries and executables
+*.exe
+*.dll
+*.so
+*.dylib
+*.thdl
+*.bin
+output
+
+# Object files and libraries
+*.o
+*.obj
+*.lib
+*.a
+
+# Temporary compiler artifacts
+_thava_temp.cpp
+*.pdb
+*.ilk
+
+# IDE, Visual Studio & Editor files
+.vs/
+*.sln.docstates
+*.user
+*.suo
+bin/
+obj/
+.vscode/
+.idea/
+
+# Operating System specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Sensitive and credential files
+*credential*
+*.env
+*secret*
+
+# Logs and test artifacts
+*.log

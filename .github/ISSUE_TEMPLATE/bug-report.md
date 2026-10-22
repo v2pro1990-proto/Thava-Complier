@@ -1,7 +1,7 @@
 ---
 name: Bug Report
 about: Create a report to help us improve the Thava compiler, runtime, or tools.
-title: "[BUG]:"
+title: "[BUG]: "
 labels: bug
 assignees: ''
 
@@ -37,11 +37,11 @@ What actually happened? Please paste compiler error output, panic trace, or runt
 [Paste logs/errors here]
 ```
 
-## 💻 Environment Information
+## Environment Information
 - **OS & Architecture**: [e.g. Windows 11 x64 / Windows ARM64 / Ubuntu 22.04 LTS]
 - **Compiler Backend**: [e.g. Native PE x86-64 / ARM64 / C++ Transpiler]
 - **Thava Compiler Version**: [e.g. Run `thavac --version` or git commit SHA]
 - **Toolchain / Dependencies (if any)**: [e.g. SDL3 3.4.18, GCC 13.2, MSVC 2022]
 
-## 📌 Additional Context
+## Additional Context
 Add any other context, screenshots, or memory dumps about the problem here.

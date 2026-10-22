@@ -1,0 +1,20 @@
+# ------------------------------------------------------------------------------
+# Thava Example 07: Consuming a Dynamic Library (.thdl)
+# Automatically imports metadata and signatures without header files.
+# Compile with: thavac use_plugin.thv -o use_plugin.exe
+# ------------------------------------------------------------------------------
+
+@dlattach "math_plugin"
+
+func main() {
+    <int> sum = add_numbers(25, 17)
+    cons.out("Sum from dynamic library: @{sum}")
+
+    <dbl> product = multiply_doubles(3.5, 4.0)
+    cons.out("Product from dynamic library: @{product}")
+
+    <dbl> sq = square_val(9.0)
+    cons.out("Square from dynamic library: @{sq}")
+}
+
+main()

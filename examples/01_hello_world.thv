@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------------------
+# Thava Example 01: Hello World & String Interpolation
+# ------------------------------------------------------------------------------
+
+func main() {
+    cons.out("Hello, World from Thava!")
+
+    <str> language = "Thava"
+    <int> release_year = 2026
+    <dbl> version = 1.0
+
+    # String interpolation using @{variable}
+    cons.out("Welcome to @{language} v@{version} (@{release_year})")
+}
+
+main()

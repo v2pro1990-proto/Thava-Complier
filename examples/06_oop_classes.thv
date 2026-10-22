@@ -1,0 +1,31 @@
+# ------------------------------------------------------------------------------
+# Thava Example 06: Object-Oriented Programming (Classes & locvar)
+# Note: Full class OOP is supported via the C++ transpiler (--cpp)
+# ------------------------------------------------------------------------------
+
+class Point {
+    public <dbl> x = 0.0
+    public <dbl> y = 0.0
+
+    public func init(<dbl> px, <dbl> py) {
+        locvar.x = px
+        locvar.y = py
+    }
+
+    public <dbl> func length_sq() {
+        return locvar.x * locvar.x + locvar.y * locvar.y
+    }
+
+    public func print_point() {
+        cons.out("Point: (@{locvar.x}, @{locvar.y})")
+    }
+}
+
+func main() {
+    <Point> p = Point(3.0, 4.0)
+    p.print_point()
+    <dbl> lsq = p.length_sq()
+    cons.out("Distance squared from origin: @{lsq}")
+}
+
+main()

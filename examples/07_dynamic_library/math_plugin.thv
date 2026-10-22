@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------------------
+# Thava Example 07: Dynamic Library Module (.thdl)
+# Compile with: thavac math_plugin.thv -o math_plugin.thdl --lib
+# ------------------------------------------------------------------------------
+
+<int> func add_numbers(<int> a, <int> b) {
+    return a + b
+}
+
+<dbl> func multiply_doubles(<dbl> x, <dbl> y) {
+    return x * y
+}
+
+<dbl> func square_val(<dbl> x) {
+    return x * x
+}
