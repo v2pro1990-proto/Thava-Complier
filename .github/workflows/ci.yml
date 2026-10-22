@@ -1,0 +1,117 @@
+name: CI Build & Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-x64:
+    name: Build Windows x86-64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile thavac for Windows x64
+        shell: bash
+        run: |
+          g++ -O3 -std=c++17 -Wall -Wextra -s src/thavac.cpp -Isrc -o thavac.exe
+
+      - name: Smoke test compiler
+        shell: bash
+        run: |
+          ./thavac.exe --help || true
+          ./thavac.exe examples/01_hello_world.thv -o test_hello.exe
+          ./test_hello.exe
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thavac-windows-x64
+          path: thavac.exe
+
+  build-linux:
+    name: Build Linux (x86-64 and ARM64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies and cross-compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential g++-aarch64-linux-gnu file
+
+      - name: Compile thavac for Linux x86-64
+        run: |
+          g++ -O3 -std=c++17 -Wall -Wextra -s src/thavac.cpp -Isrc -o thavac-linux-x64
+          chmod +x thavac-linux-x64
+
+      - name: Compile thavac for Linux ARM64 (aarch64)
+        run: |
+          aarch64-linux-gnu-g++ -O3 -std=c++17 -Wall -Wextra -s src/thavac.cpp -Isrc -o thavac-linux-arm64
+          chmod +x thavac-linux-arm64
+
+      - name: Smoke test Linux x86-64 compiler
+        run: |
+          ./thavac-linux-x64 examples/01_hello_world.thv -o test_hello
+          chmod +x test_hello
+          ./test_hello
+
+      - name: Smoke test Native ARM64 binary emitter
+        run: |
+          ./thavac-linux-x64 examples/01_hello_world.thv --arm64 -o test_hello_arm64
+          file test_hello_arm64 || true
+
+      - name: Upload Linux x86-64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thavac-linux-x64
+          path: thavac-linux-x64
+
+      - name: Upload Linux ARM64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thavac-linux-arm64
+          path: thavac-linux-arm64
+
+  release:
+    name: Publish Release
+    needs: [build-windows-x64, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Package release binaries
+        run: |
+          mkdir -p release-assets
+          cp thavac-windows-x64/thavac.exe release-assets/thavac-windows-x64.exe
+          cp thavac-linux-x64/thavac-linux-x64 release-assets/thavac-linux-x64
+          cp thavac-linux-arm64/thavac-linux-arm64 release-assets/thavac-linux-arm64
+          cd release-assets
+          tar -czvf thavac-linux-x64.tar.gz thavac-linux-x64
+          tar -czvf thavac-linux-arm64.tar.gz thavac-linux-arm64
+          zip thavac-windows-x64.zip thavac-windows-x64.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/thavac-windows-x64.zip
+            release-assets/thavac-linux-x64.tar.gz
+            release-assets/thavac-linux-arm64.tar.gz
+            release-assets/thavac-windows-x64.exe
+            release-assets/thavac-linux-x64
+            release-assets/thavac-linux-arm64
+          generate_release_notes: true
