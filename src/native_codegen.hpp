@@ -6094,6 +6094,68 @@ public:
             }
             return;
         }
+
+        if (auto raiseNode = dynamic_cast<RaiseErrorNode*>(node)) {
+            if (raiseNode->isCompileTime) return;
+
+            uint32_t offFmtRuntimeError = pe.addStringLiteralOffset("[Runtime Error (%s)]: %s\n");
+
+            currentFrameOffset -= 8;
+            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+            int32_t typeSlot = currentFrameOffset;
+            if (raiseNode->typeExpr) {
+                emitExpr(raiseNode->typeExpr.get());
+                enc.mov_mr_rbp(typeSlot, x86::RAX);
+            } else {
+                uint32_t offDefType = pe.addStringLiteralOffset("RuntimeError");
+                enc.lea_rip_rdata(x86::RAX, offDefType);
+                enc.mov_mr_rbp(typeSlot, x86::RAX);
+            }
+
+            currentFrameOffset -= 8;
+            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+            int32_t msgSlot = currentFrameOffset;
+            if (raiseNode->msgExpr) {
+                emitExpr(raiseNode->msgExpr.get());
+                enc.mov_mr_rbp(msgSlot, x86::RAX);
+            } else {
+                uint32_t offDefMsg = pe.addStringLiteralOffset("Runtime Error!");
+                enc.lea_rip_rdata(x86::RAX, offDefMsg);
+                enc.mov_mr_rbp(msgSlot, x86::RAX);
+            }
+
+            enc.lea_rip_rdata(x86::RCX, offFmtRuntimeError);
+            enc.mov_rm_rbp(x86::RDX, typeSlot);
+            enc.mov_rm_rbp(x86::R8, msgSlot);
+            enc.call_iat_func("printf");
+
+            enc.mov_ri64(x86::RCX, 1);
+            enc.call_iat_func("exit");
+            return;
+        }
+
+        if (auto throwNode = dynamic_cast<ThrowNode*>(node)) {
+            uint32_t offFmtThrow = pe.addStringLiteralOffset("[Runtime Exception]: %s\n");
+            currentFrameOffset -= 8;
+            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+            int32_t msgSlot = currentFrameOffset;
+            if (throwNode->expr) {
+                emitExpr(throwNode->expr.get());
+                enc.mov_mr_rbp(msgSlot, x86::RAX);
+            } else {
+                uint32_t offDefMsg = pe.addStringLiteralOffset("Runtime Exception occurred!");
+                enc.lea_rip_rdata(x86::RAX, offDefMsg);
+                enc.mov_mr_rbp(msgSlot, x86::RAX);
+            }
+
+            enc.lea_rip_rdata(x86::RCX, offFmtThrow);
+            enc.mov_rm_rbp(x86::RDX, msgSlot);
+            enc.call_iat_func("printf");
+
+            enc.mov_ri64(x86::RCX, 1);
+            enc.call_iat_func("exit");
+            return;
+        }
     }
 
     void emitUserFunction(FunctionDeclNode* func) {

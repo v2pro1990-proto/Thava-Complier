@@ -26,7 +26,7 @@ Welcome to the official language specification and technical documentation for *
    - [Loops (`for`, `range`, `while`)](#loops-for-range-while)
    - [Jump Statements (`break`, `continue`)](#jump-statements-break-continue)
    - [Scoped Context Blocks (`file.open`)](#scoped-context-blocks-fileopen)
-   - [Exception Handling (`try`, `except`, `throw`)](#exception-handling-try-except-throw)
+   - [Error Raising & Exception Handling (`raise_error`, `throw`, `try`, `except`)](#error-raising--exception-handling-raise_error-throw-try-except)
    - [Deferred Cleanup (`defer`)](#deferred-cleanup-defer)
 6. [Functions & Code Generation](#6-functions--code-generation)
    - [Function Declarations & Return Syntax](#function-declarations--return-syntax)
@@ -266,16 +266,81 @@ file.open("config.json", "r") as f {
 } # Closed automatically
 ```
 
-### Exception Handling (`try`, `except`, `throw`)
+### Error Raising & Exception Handling (`raise_error`, `throw`, `try`, `except`)
+
+Thava features a dual-layer error management system supporting both **compile-time semantic assertion failures** and **runtime exception handling**.
+
+#### 1. Raising Explicit Errors (`raise_error`)
+
+The `raise_error` construct allows developers to trigger fatal errors either statically during compilation or dynamically during program execution:
+
+```
+raise_error(kind, type, message)
+```
+
+* **`kind` (Evaluation Mode):**
+  * `c` or `compile`: **Compile-Time Error**. Evaluated during the compiler's semantic analysis and static type-checking pass. If reached or evaluated in static code, `thavac` immediately halts compilation with exit code `1` and outputs:
+    ```text
+    [Compilation Error (type)]: message at line <line_number>
+    ```
+    This is ideal for static assertion guards, architecture verification, and configuration invariants.
+  * `r` or `runtime`: **Runtime Error**. Evaluated at runtime when execution reaches the statement. Both the Native Machine Code backend and the C++ transpiler emit an error message and terminate the process with exit code `1`:
+    ```text
+    [Runtime Error (type)]: message
+    ```
+
+* **`type` (Error Category):** String expression indicating the error type (e.g. `"ValueError"`, `"TypeError"`, `"IndexError"`, `"SecurityError"`).
+* **`message` (Error Description):** String expression detailing the failure cause.
+
+##### Code Examples:
+
+```thava
+# Example A: Compile-Time Assertion (kind: c)
+# Halts thavac immediately during build time
+func verify_environment() {
+    # If a static rule or check fails:
+    raise_error(c, "PlatformError", "Direct hardware access is not permitted on this architecture")
+}
+
+# Example B: Runtime Validation (kind: r)
+# Halts application execution when triggered
+<dbl> func calculate_square_root(<dbl> value) {
+    if value < 0.0 {
+        raise_error(r, "ValueError", "Cannot compute square root of a negative number")
+    }
+    # Calculation continues if value >= 0.0
+    return c.sqrt(value)
+}
+
+func main() {
+    <dbl> res = calculate_square_root(-4.0)
+    # Output: [Runtime Error (ValueError)]: Cannot compute square root of a negative number
+}
+```
+
+#### 2. Throwing Exceptions (`throw` / `raise`)
+
+To throw an exception that can be caught by surrounding handler blocks, use `throw` or `raise`:
+
+```thava
+func process_file(<str> filepath) {
+    if not os.exists(filepath) {
+        throw "Target file was not found: " + filepath
+    }
+}
+```
+
+#### 3. Structured Exception Handling (`try`, `except`)
+
+The `try`-`except` block intercepts thrown exceptions and runtime errors:
+
 ```thava
 try {
-    if divisor == 0 {
-        throw "Division by zero attempted"
-    }
+    process_file("config.cfg")
 } except RuntimeError as e {
-    cons.out("Caught error: @{e}")
+    cons.out("Caught runtime error: @{e}")
 } except {
-    cons.out("Caught generic exception")
+    cons.out("Caught generic unhandled exception")
 }
 ```
 
