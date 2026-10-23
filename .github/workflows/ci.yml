@@ -123,15 +123,36 @@ jobs:
       - name: Package release binaries
         run: |
           mkdir -p release-assets
-          cp thavac-windows-x64/thavac.exe release-assets/thavac-windows-x64.exe
-          cp thavac-windows-arm64/thavac-windows-arm64.exe release-assets/thavac-windows-arm64.exe
-          cp thavac-linux-x64/thavac-linux-x64 release-assets/thavac-linux-x64
-          cp thavac-linux-arm64/thavac-linux-arm64 release-assets/thavac-linux-arm64
-          cd release-assets
-          tar -czvf thavac-linux-x64.tar.gz thavac-linux-x64
-          tar -czvf thavac-linux-arm64.tar.gz thavac-linux-arm64
-          zip thavac-windows-x64.zip thavac-windows-x64.exe
-          zip thavac-windows-arm64.zip thavac-windows-arm64.exe
+
+          # Package Windows x64
+          mkdir -p pkg-win-x64
+          cp thavac-windows-x64/thavac.exe pkg-win-x64/thavac.exe
+          cp LICENSE README.md pkg-win-x64/
+          cp -r examples docs workload pkg-win-x64/
+          (cd pkg-win-x64 && zip -r ../release-assets/thavac-windows-x64.zip .)
+
+          # Package Windows ARM64
+          mkdir -p pkg-win-arm64
+          cp thavac-windows-arm64/thavac-windows-arm64.exe pkg-win-arm64/thavac.exe
+          cp LICENSE README.md pkg-win-arm64/
+          cp -r examples docs workload pkg-win-arm64/
+          (cd pkg-win-arm64 && zip -r ../release-assets/thavac-windows-arm64.zip .)
+
+          # Package Linux x64
+          mkdir -p pkg-linux-x64
+          cp thavac-linux-x64/thavac-linux-x64 pkg-linux-x64/thavac
+          chmod +x pkg-linux-x64/thavac
+          cp LICENSE README.md pkg-linux-x64/
+          cp -r examples docs pkg-linux-x64/
+          (cd pkg-linux-x64 && zip -r ../release-assets/thavac-linux-x64.zip .)
+
+          # Package Linux ARM64
+          mkdir -p pkg-linux-arm64
+          cp thavac-linux-arm64/thavac-linux-arm64 pkg-linux-arm64/thavac
+          chmod +x pkg-linux-arm64/thavac
+          cp LICENSE README.md pkg-linux-arm64/
+          cp -r examples docs pkg-linux-arm64/
+          (cd pkg-linux-arm64 && zip -r ../release-assets/thavac-linux-arm64.zip .)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -139,11 +160,6 @@ jobs:
           files: |
             release-assets/thavac-windows-x64.zip
             release-assets/thavac-windows-arm64.zip
-            release-assets/thavac-linux-x64.tar.gz
-            release-assets/thavac-linux-arm64.tar.gz
-            release-assets/thavac-windows-x64.exe
-            release-assets/thavac-windows-arm64.exe
-            release-assets/thavac-linux-x64
-            release-assets/thavac-linux-arm64
-            workload/dist/Thava.VisualStudio.vsix
+            release-assets/thavac-linux-x64.zip
+            release-assets/thavac-linux-arm64.zip
           generate_release_notes: true
