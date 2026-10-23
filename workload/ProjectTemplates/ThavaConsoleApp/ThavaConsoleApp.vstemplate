@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VSTemplate Version="3.0.0" xmlns="http://schemas.microsoft.com/developer/vstemplate/2005" Type="Project">
+  <TemplateData>
+    <Name>Thava Console Application</Name>
+    <Description>A project for creating a native Console Application (.exe) with the Thava programming language. Supports direct x86-64/ARM64 machine code generation and C++17 transpilation.</Description>
+    <ProjectType>VC</ProjectType>
+    <ProjectSubType></ProjectSubType>
+    <SortOrder>10</SortOrder>
+    <CreateNewFolder>true</CreateNewFolder>
+    <DefaultName>ThavaConsoleApp</DefaultName>
+    <ProvideDefaultName>true</ProvideDefaultName>
+    <LocationField>Enabled</LocationField>
+    <EnableLocationBrowseButton>true</EnableLocationBrowseButton>
+    <Icon>__TemplateIcon.ico</Icon>
+    <LanguageTag>cpp</LanguageTag>
+    <PlatformTag>Windows</PlatformTag>
+    <ProjectTypeTag>Console</ProjectTypeTag>
+  </TemplateData>
+  <TemplateContent>
+    <Project TargetFileName="$projectname$.vcxproj" File="ThavaConsoleApp.vcxproj" ReplaceParameters="true">
+      <ProjectItem ReplaceParameters="true" TargetFileName="$projectname$.vcxproj.filters">ThavaConsoleApp.vcxproj.filters</ProjectItem>
+      <ProjectItem ReplaceParameters="true" OpenInEditor="true" TargetFileName="main.thv">main.thv</ProjectItem>
+    </Project>
+  </TemplateContent>
+</VSTemplate>

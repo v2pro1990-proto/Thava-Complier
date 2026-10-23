@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VSTemplate Version="3.0.0" xmlns="http://schemas.microsoft.com/developer/vstemplate/2005" Type="Item">
+  <TemplateData>
+    <DefaultName>Source.thv</DefaultName>
+    <Name>Thava Source File (.thv)</Name>
+    <Description>A Thava programming language source file (.thv).</Description>
+    <ProjectType>VC</ProjectType>
+    <SortOrder>10</SortOrder>
+    <Icon>__TemplateIcon.ico</Icon>
+  </TemplateData>
+  <TemplateContent>
+    <ProjectItem TargetFileName="$fileinputname$.thv" ReplaceParameters="true">Source.thv</ProjectItem>
+  </TemplateContent>
+</VSTemplate>

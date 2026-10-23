@@ -1,0 +1,278 @@
+{
+  "scopeName": "source.thava",
+  "name": "Thava",
+  "comment": "Thava Programming Language Syntax Grammar",
+  "fileTypes": [
+    "thv",
+    "thvh"
+  ],
+  "foldingStartMarker": "\\{\\s*$",
+  "foldingStopMarker": "^\\s*\\}",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#directives"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#functions"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.thava",
+          "begin": "#",
+          "end": "$",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.thava"
+            }
+          }
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.include.thava",
+          "match": "^\\s*(@(?:attach|cattach|dlattach))\\s+((?:<[^>]+>|\"[^\"]+\"))",
+          "captures": {
+            "1": {
+              "name": "keyword.control.directive.include.thava"
+            },
+            "2": {
+              "name": "string.quoted.other.include.thava"
+            }
+          }
+        },
+        {
+          "name": "keyword.control.directive.thava",
+          "match": "@(?:attach|cattach|dlattach)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.thava",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.thava"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.thava"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.thava",
+              "match": "\\\\(?:[nrt\\\\\"'0]|x[0-9a-fA-F]{2})"
+            },
+            {
+              "name": "meta.interpolation.thava",
+              "begin": "@\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.thava"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.thava"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.thava",
+          "match": "<(?:int|fl|dbl|bl|str|lst|tple|dict|multype|void|func)>",
+          "captures": {
+            "0": {
+              "name": "storage.type.primitive.thava"
+            }
+          }
+        },
+        {
+          "name": "entity.name.type.custom.thava",
+          "match": "<([A-Za-z_][A-Za-z0-9_]*)>",
+          "captures": {
+            "0": {
+              "name": "storage.type.user-defined.thava"
+            },
+            "1": {
+              "name": "entity.name.type.thava"
+            }
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.function.declaration.thava",
+          "match": "\\b(?:(inline|public|private|protected)\\s+)*(?:(<[A-Za-z_][A-Za-z0-9_]*>)\\s+)?(func|fdfunc|cfunc)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.thava"
+            },
+            "2": {
+              "name": "storage.type.return.thava"
+            },
+            "3": {
+              "name": "keyword.declaration.function.thava"
+            },
+            "4": {
+              "name": "entity.name.function.thava"
+            }
+          }
+        },
+        {
+          "name": "meta.class.declaration.thava",
+          "match": "\\b(class|struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.type.thava"
+            },
+            "2": {
+              "name": "entity.name.type.class.thava"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow.thava",
+          "match": "\\b(?:if|elif|else|while|for|in|return|break|continue|try|except|throw|raise_error|defer|as)\\b"
+        },
+        {
+          "name": "storage.modifier.thava",
+          "match": "\\b(?:func|fdfunc|cfunc|inline|class|struct|enum|public|private|protected)\\b"
+        },
+        {
+          "name": "variable.language.this.thava",
+          "match": "\\b(?:locvar|parvar)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.thava",
+          "match": "\\b(?:and|or|not|band|bor|bxor|bnot|bshl|bshr)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.io.thava",
+          "match": "\\b(?:cons\\.out|key\\.input|file\\.open)\\b"
+        },
+        {
+          "name": "support.class.namespace.thava",
+          "match": "\\b(?:os|time|clib|c)\\.(?:[A-Za-z_][A-Za-z0-9_]*)\\b"
+        },
+        {
+          "name": "support.function.builtin.thava",
+          "match": "\\b(?:range|len|typeof|rand|randint|randres|int|fl|dbl|str|bl|append|addval|removeval|delval|insert|pop|clear|keys|values|items|contains|replace|split|startswith|endswith|upper|lower|title|strip|find|count|join)(?=\\s*\\()"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.thava",
+          "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.thava",
+          "match": "\\bnone\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.thava",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.thava",
+          "match": "\\b[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.thava",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.thava",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.assignment.thava",
+          "match": "(?:\\+=|-=|\\*=|/=|%=|\\*\\*=|=)"
+        },
+        {
+          "name": "keyword.operator.comparison.thava",
+          "match": "(?:==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.thava",
+          "match": "(?:\\*\\*|//|\\+|-|\\*|/|%)"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.thava",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()"
+        }
+      ]
+    }
+  }
+}

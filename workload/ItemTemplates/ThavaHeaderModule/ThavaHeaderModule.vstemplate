@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VSTemplate Version="3.0.0" xmlns="http://schemas.microsoft.com/developer/vstemplate/2005" Type="Item">
+  <TemplateData>
+    <DefaultName>Module.thvh</DefaultName>
+    <Name>Thava Header Module (.thvh)</Name>
+    <Description>A reusable Thava module header file (.thvh) imported via @attach.</Description>
+    <ProjectType>VC</ProjectType>
+    <SortOrder>20</SortOrder>
+    <Icon>__TemplateIcon.ico</Icon>
+  </TemplateData>
+  <TemplateContent>
+    <ProjectItem TargetFileName="$fileinputname$.thvh" ReplaceParameters="true">Module.thvh</ProjectItem>
+  </TemplateContent>
+</VSTemplate>

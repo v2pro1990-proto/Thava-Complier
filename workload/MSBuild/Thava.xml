@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ProjectSchemaDefinitions
+  xmlns="http://schemas.microsoft.com/build/2009/properties"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+  <Rule
+    Name="ThavaPropertyPage"
+    PageTemplate="tool"
+    DisplayName="Thava Compiler"
+    SwitchPrefix=""
+    Order="10">
+
+    <Rule.Categories>
+      <Category Name="General" DisplayName="General" />
+      <Category Name="Optimization" DisplayName="Optimization" />
+      <Category Name="Transpiler" DisplayName="C++ Transpiler &amp; Host" />
+      <Category Name="CommandLine" DisplayName="Command Line" Subtype="CommandLine" />
+    </Rule.Categories>
+
+    <Rule.DataSource>
+      <DataSource Persistence="ProjectFile" ItemType="ThavaCompile" Label="" HasConfigurationCondition="true" />
+    </Rule.DataSource>
+
+    <StringProperty
+      Name="CompilerExecutable"
+      DisplayName="Thava Compiler Executable"
+      Description="Path to the Thava compiler executable (thavac.exe). Leave as default to use THAVA_SDK_DIR or system PATH."
+      Category="General"
+      Subcategory="Compiler"
+      F1Keyword="VC.Project.ThavaCompiler.CompilerExecutable" />
+
+    <EnumProperty
+      Name="EntryPointRole"
+      DisplayName="File Compilation Role"
+      Description="Controls whether this .thv file is compiled as a standalone entry point or skipped because it is included via @attach in another file."
+      Category="General">
+      <EnumValue
+        Name="Auto"
+        DisplayName="Auto-Detect (Skip if @attach'ed by another file)"
+        Description="Automatically skip standalone compilation if another .thv file in the project includes this file via @attach." />
+      <EnumValue
+        Name="EntryPoint"
+        DisplayName="Main Entry Point (Always compile)"
+        Description="Always compile this file into the project target output." />
+      <EnumValue
+        Name="Module"
+        DisplayName="Attached Module / Library (Skip standalone build)"
+        Description="Treat this file as an @attach module and do not compile it standalone." />
+    </EnumProperty>
+
+    <EnumProperty
+      Name="BackendMode"
+      DisplayName="Target Backend"
+      Description="Select the code generation backend for the Thava compiler."
+      Category="General">
+      <EnumValue
+        Name="Native"
+        DisplayName="Native Machine Code (--native)"
+        Description="Zero-dependency direct native machine code generation for host architecture." />
+      <EnumValue
+        Name="CppTranspiler"
+        DisplayName="C++17 Transpiler (--cpp)"
+        Description="Transpile to optimized C++17 and compile using the detected host C++ compiler." />
+      <EnumValue
+        Name="WinArm64"
+        DisplayName="Windows ARM64 Native PE32+ (--target win-arm64) [Experimental]"
+        Description="Emit native Windows ARM64 PE32+ (0xAA64) executable directly." />
+      <EnumValue
+        Name="LinuxElf64"
+        DisplayName="Linux x86-64 ELF64 (--backend elf)"
+        Description="Emit standalone Linux x86-64 ELF64 binary directly." />
+      <EnumValue
+        Name="LinuxArm64"
+        DisplayName="Linux AArch64 ELF64 (--arm64)"
+        Description="Emit standalone Linux AArch64 (ARM64) ELF64 binary directly." />
+    </EnumProperty>
+
+    <EnumProperty
+      Name="OutputBuildType"
+      DisplayName="Output Artifact Type"
+      Description="Build as a standalone executable (.exe) or a Thava Dynamic Library (.thdl)."
+      Category="General">
+      <EnumValue
+        Name="Application"
+        DisplayName="Executable Application (.exe)"
+        Description="Build a standalone executable binary." />
+      <EnumValue
+        Name="DynamicLibrary"
+        DisplayName="Thava Dynamic Library (.thdl) (--lib)"
+        Description="Build a dynamic library with embedded symbol metadata." />
+    </EnumProperty>
+
+    <StringProperty
+      Name="OutputFile"
+      DisplayName="Output File"
+      Description="The output file path (-o) produced by the Thava compiler."
+      Category="General"
+      Subtype="file" />
+
+    <EnumProperty
+      Name="OptimizationLevel"
+      DisplayName="Optimization Level"
+      Description="Select the AST and machine code optimization level (-O0 to -O3)."
+      Category="Optimization">
+      <EnumValue
+        Name="O0"
+        DisplayName="Disabled (-O0)"
+        Description="No optimizations. Fastest compilation for debugging." />
+      <EnumValue
+        Name="O1"
+        DisplayName="Peephole &amp; Constant Folding (-O1)"
+        Description="Compile-time constant folding and algebraic simplifications." />
+      <EnumValue
+        Name="O2"
+        DisplayName="AST Inlining &amp; Dead Code Elimination (-O2)"
+        Description="Expand inline functions and prune unreachable branches." />
+      <EnumValue
+        Name="O3"
+        DisplayName="Maximum Speed &amp; Instruction Scheduling (-O3)"
+        Description="Full AST optimization, memory-direct arithmetic, and register scheduling." />
+    </EnumProperty>
+
+    <EnumProperty
+      Name="HostCppCompiler"
+      DisplayName="Host C++ Compiler (--cxx)"
+      Description="Specify the host C++ compiler when using C++17 Transpiler mode or C attachments."
+      Category="Transpiler">
+      <EnumValue
+        Name="Auto"
+        DisplayName="Auto-Detect Host Compiler"
+        Description="Automatically probe g++, clang++, c++, or MSVC cl.exe." />
+      <EnumValue
+        Name="g++"
+        DisplayName="GNU C++ Compiler (g++)" />
+      <EnumValue
+        Name="clang++"
+        DisplayName="LLVM Clang++ Compiler (clang++)" />
+      <EnumValue
+        Name="cl"
+        DisplayName="Microsoft Visual C++ (cl.exe)" />
+    </EnumProperty>
+
+    <StringProperty
+      Name="AdditionalOptions"
+      DisplayName="Additional Options"
+      Description="Additional command-line flags passed directly to thavac.exe."
+      Category="CommandLine" />
+  </Rule>
+
+  <ItemType
+    Name="ThavaCompile"
+    DisplayName="Thava Compiler" />
+
+  <ContentType
+    Name="ThavaCompile"
+    DisplayName="Thava Source File"
+    ItemType="ThavaCompile" />
+
+  <ContentType
+    Name="ThavaHeader"
+    DisplayName="Thava Header Module"
+    ItemType="None" />
+
+  <FileExtension
+    Name="*.thv"
+    ContentType="ThavaCompile" />
+
+  <FileExtension
+    Name="*.thvh"
+    ContentType="ThavaHeader" />
+
+</ProjectSchemaDefinitions>

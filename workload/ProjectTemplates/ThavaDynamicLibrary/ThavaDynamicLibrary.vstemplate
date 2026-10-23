@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VSTemplate Version="3.0.0" xmlns="http://schemas.microsoft.com/developer/vstemplate/2005" Type="Project">
+  <TemplateData>
+    <Name>Thava Dynamic Library (.thdl)</Name>
+    <Description>A project for building a native Thava Dynamic Library (.thdl) with embedded binary symbol metadata for @dlattach linking.</Description>
+    <ProjectType>VC</ProjectType>
+    <ProjectSubType></ProjectSubType>
+    <SortOrder>20</SortOrder>
+    <CreateNewFolder>true</CreateNewFolder>
+    <DefaultName>ThavaLibrary</DefaultName>
+    <ProvideDefaultName>true</ProvideDefaultName>
+    <LocationField>Enabled</LocationField>
+    <EnableLocationBrowseButton>true</EnableLocationBrowseButton>
+    <Icon>__TemplateIcon.ico</Icon>
+    <LanguageTag>cpp</LanguageTag>
+    <PlatformTag>Windows</PlatformTag>
+    <ProjectTypeTag>Library</ProjectTypeTag>
+  </TemplateData>
+  <TemplateContent>
+    <Project TargetFileName="$projectname$.vcxproj" File="ThavaDynamicLibrary.vcxproj" ReplaceParameters="true">
+      <ProjectItem ReplaceParameters="true" TargetFileName="$projectname$.vcxproj.filters">ThavaDynamicLibrary.vcxproj.filters</ProjectItem>
+      <ProjectItem ReplaceParameters="true" OpenInEditor="true" TargetFileName="library.thv">library.thv</ProjectItem>
+    </Project>
+  </TemplateContent>
+</VSTemplate>

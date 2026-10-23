@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <PropertyGroup>
+    <ThavaSdkDir Condition="'$(ThavaSdkDir)' == '' and '$(THAVA_SDK_DIR)' != ''">$(THAVA_SDK_DIR)</ThavaSdkDir>
+    <ThavaSdkDir Condition="'$(ThavaSdkDir)' == '' and Exists('$(LocalAppData)\Programs\ThavaSDK\bin\thavac.exe')">$(LocalAppData)\Programs\ThavaSDK</ThavaSdkDir>
+    <ThavaSdkDir Condition="'$(ThavaSdkDir)' == '' and Exists('$(MSBuildThisFileDirectory)..\bin\thavac.exe')">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</ThavaSdkDir>
+    <ThavaCompilerDefaultExe Condition="'$(ThavaSdkDir)' != '' and Exists('$(ThavaSdkDir)\bin\thavac.exe')">$(ThavaSdkDir)\bin\thavac.exe</ThavaCompilerDefaultExe>
+    <ThavaCompilerDefaultExe Condition="'$(ThavaCompilerDefaultExe)' == ''">thavac.exe</ThavaCompilerDefaultExe>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <LocalDebuggerCommand Condition="'$(LocalDebuggerCommand)' == ''">$(TargetPath)</LocalDebuggerCommand>
+    <LocalDebuggerWorkingDirectory Condition="'$(LocalDebuggerWorkingDirectory)' == ''">$(ProjectDir)</LocalDebuggerWorkingDirectory>
+    <DebuggerFlavor Condition="'$(DebuggerFlavor)' == ''">WindowsLocalDebugger</DebuggerFlavor>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ThavaCompile>
+      <CompilerExecutable>$(ThavaCompilerDefaultExe)</CompilerExecutable>
+      <EntryPointRole>Auto</EntryPointRole>
+      <BackendMode Condition="'$(Platform)' != 'ARM64'">Native</BackendMode>
+      <BackendMode Condition="'$(Platform)' == 'ARM64'">WinArm64</BackendMode>
+      <OutputBuildType Condition="'$(TargetExt)' != '.thdl'">Application</OutputBuildType>
+      <OutputBuildType Condition="'$(TargetExt)' == '.thdl'">DynamicLibrary</OutputBuildType>
+      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+      <OptimizationLevel Condition="'$(Configuration)' == 'Debug'">O0</OptimizationLevel>
+      <OptimizationLevel Condition="'$(Configuration)' != 'Debug'">O3</OptimizationLevel>
+      <HostCppCompiler>Auto</HostCppCompiler>
+      <AdditionalOptions></AdditionalOptions>
+    </ThavaCompile>
+  </ItemDefinitionGroup>
+
+</Project>

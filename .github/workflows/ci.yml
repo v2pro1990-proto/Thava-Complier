@@ -145,4 +145,5 @@ jobs:
             release-assets/thavac-windows-arm64.exe
             release-assets/thavac-linux-x64
             release-assets/thavac-linux-arm64
+            workload/dist/Thava.VisualStudio.vsix
           generate_release_notes: true

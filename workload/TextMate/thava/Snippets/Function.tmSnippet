@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>content</key>
+	<string>&lt;${1:int}&gt; func ${2:my_function}(${3:&lt;int&gt; x}) {
+	${0:return 0}
+}</string>
+	<key>name</key>
+	<string>Function Declaration</string>
+	<key>scope</key>
+	<string>source.thava</string>
+	<key>tabTrigger</key>
+	<string>func</string>
+	<key>uuid</key>
+	<string>4A2B1C01-9D3E-4F11-A101-100000000001</string>
+</dict>
+</plist>

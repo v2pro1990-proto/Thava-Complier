@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>content</key>
+	<string>raise_error "${1:ValueError}", "${2:Invalid value provided}"</string>
+	<key>name</key>
+	<string>Raise Error</string>
+	<key>scope</key>
+	<string>source.thava</string>
+	<key>tabTrigger</key>
+	<string>raise</string>
+	<key>uuid</key>
+	<string>4A2B1C01-9D3E-4F11-A101-100000000005</string>
+</dict>
+</plist>

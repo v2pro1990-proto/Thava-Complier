@@ -1,0 +1,8 @@
+[$RootKey$\TextMate\Repositories]
+"Thava"="$PackageFolder$\Grammars"
+
+[$RootKey$\TextMate\LanguageConfiguration\GrammarMapping]
+"source.thava"="$PackageFolder$\Grammars\thava\syntaxes\language-configuration.json"
+
+[$RootKey$\TextMate\LanguageConfiguration\ContentTypeMapping]
+"code++.Thava"="$PackageFolder$\Grammars\thava\syntaxes\language-configuration.json"

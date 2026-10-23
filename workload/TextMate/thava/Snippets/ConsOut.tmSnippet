@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>content</key>
+	<string>cons.out("${1:Hello, Thava!}")</string>
+	<key>name</key>
+	<string>Console Output (cons.out)</string>
+	<key>scope</key>
+	<string>source.thava</string>
+	<key>tabTrigger</key>
+	<string>cout</string>
+	<key>uuid</key>
+	<string>4A2B1C01-9D3E-4F11-A101-100000000007</string>
+</dict>
+</plist>

@@ -1,0 +1,13 @@
+# ==========================================================
+# Dynamic Library: $projectname$.thdl
+# Exported functions are automatically embedded in metadata
+# and linked by consumer programs via @dlattach "$projectname$.thdl"
+# ==========================================================
+
+<int> func add_numbers(<int> a, <int> b) {
+    return a + b
+}
+
+<dbl> func multiply_doubles(<dbl> x, <dbl> y) {
+    return x * y
+}

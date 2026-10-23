@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>content</key>
+	<string>file.open("${1:data.txt}", "${2:r}") as ${3:f} {
+	&lt;str&gt; content = ${3:f}.read()
+	${0:cons.out(content)}
+}</string>
+	<key>name</key>
+	<string>File Open Scoped Block</string>
+	<key>scope</key>
+	<string>source.thava</string>
+	<key>tabTrigger</key>
+	<string>fopen</string>
+	<key>uuid</key>
+	<string>4A2B1C01-9D3E-4F11-A101-100000000006</string>
+</dict>
+</plist>

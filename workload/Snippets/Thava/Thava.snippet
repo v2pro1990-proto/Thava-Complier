@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CodeSnippets xmlns="http://schemas.microsoft.com/VisualStudio/2005/CodeSnippet">
+
+  <CodeSnippet Format="1.0.0">
+    <Header>
+      <Title>Thava Function (func)</Title>
+      <Shortcut>tfunc</Shortcut>
+      <Description>Declare a typed Thava function</Description>
+      <Author>Thava Team</Author>
+      <SnippetTypes>
+        <SnippetType>Expansion</SnippetType>
+      </SnippetTypes>
+    </Header>
+    <Snippet>
+      <Declarations>
+        <Literal><ID>ret</ID><Default>&lt;int&gt;</Default></Literal>
+        <Literal><ID>name</ID><Default>my_function</Default></Literal>
+        <Literal><ID>param</ID><Default>&lt;int&gt; x</Default></Literal>
+      </Declarations>
+      <Code Language="CPP"><![CDATA[$ret$ func $name$($param$) {
+    return 0
+}$end$]]></Code>
+    </Snippet>
+  </CodeSnippet>
+
+  <CodeSnippet Format="1.0.0">
+    <Header>
+      <Title>Thava Class (class)</Title>
+      <Shortcut>tclass</Shortcut>
+      <Description>Declare a Thava class with constructor and method</Description>
+      <Author>Thava Team</Author>
+      <SnippetTypes>
+        <SnippetType>Expansion</SnippetType>
+      </SnippetTypes>
+    </Header>
+    <Snippet>
+      <Declarations>
+        <Literal><ID>ClassName</ID><Default>MyClass</Default></Literal>
+      </Declarations>
+      <Code Language="CPP"><![CDATA[class $ClassName$ {
+    public <int> value = 0
+
+    public func init(<int> val) {
+        locvar.value = val
+    }
+
+    public func display() {
+        cons.out("Value: @{locvar.value}")
+    }
+}$end$]]></Code>
+    </Snippet>
+  </CodeSnippet>
+
+  <CodeSnippet Format="1.0.0">
+    <Header>
+      <Title>Thava For-In Loop (for)</Title>
+      <Shortcut>tfor</Shortcut>
+      <Description>Thava for-in loop over a range or collection</Description>
+      <Author>Thava Team</Author>
+      <SnippetTypes>
+        <SnippetType>Expansion</SnippetType>
+      </SnippetTypes>
+    </Header>
+    <Snippet>
+      <Declarations>
+        <Literal><ID>item</ID><Default>i</Default></Literal>
+        <Literal><ID>collection</ID><Default>range(10)</Default></Literal>
+      </Declarations>
+      <Code Language="CPP"><![CDATA[for <int> $item$ in $collection$ {
+    cons.out("@{$item$}")
+}$end$]]></Code>
+    </Snippet>
+  </CodeSnippet>
+
+  <CodeSnippet Format="1.0.0">
+    <Header>
+      <Title>Thava Try-Except Block (try)</Title>
+      <Shortcut>ttry</Shortcut>
+      <Description>Thava structured exception handling block</Description>
+      <Author>Thava Team</Author>
+      <SnippetTypes>
+        <SnippetType>Expansion</SnippetType>
+      </SnippetTypes>
+    </Header>
+    <Snippet>
+      <Declarations>
+        <Literal><ID>err</ID><Default>err</Default></Literal>
+      </Declarations>
+      <Code Language="CPP"><![CDATA[try {
+    $end$
+} except (<str> $err$) {
+    cons.out("Caught error: @{$err$}")
+}]]></Code>
+    </Snippet>
+  </CodeSnippet>
+
+  <CodeSnippet Format="1.0.0">
+    <Header>
+      <Title>Thava Raise Error (raise_error)</Title>
+      <Shortcut>traise</Shortcut>
+      <Description>Raise a typed runtime or compile-time error in Thava</Description>
+      <Author>Thava Team</Author>
+      <SnippetTypes>
+        <SnippetType>Expansion</SnippetType>
+      </SnippetTypes>
+    </Header>
+    <Snippet>
+      <Declarations>
+        <Literal><ID>type</ID><Default>ValueError</Default></Literal>
+        <Literal><ID>message</ID><Default>Invalid argument value</Default></Literal>
+      </Declarations>
+      <Code Language="CPP"><![CDATA[raise_error "$type$", "$message$"$end$]]></Code>
+    </Snippet>
+  </CodeSnippet>
+
+  <CodeSnippet Format="1.0.0">
+    <Header>
+      <Title>Thava Scoped File Open (file.open)</Title>
+      <Shortcut>tfopen</Shortcut>
+      <Description>Open a file with RAII automatic stream closing</Description>
+      <Author>Thava Team</Author>
+      <SnippetTypes>
+        <SnippetType>Expansion</SnippetType>
+      </SnippetTypes>
+    </Header>
+    <Snippet>
+      <Declarations>
+        <Literal><ID>path</ID><Default>data.txt</Default></Literal>
+        <Literal><ID>mode</ID><Default>r</Default></Literal>
+        <Literal><ID>handle</ID><Default>f</Default></Literal>
+      </Declarations>
+      <Code Language="CPP"><![CDATA[file.open("$path$", "$mode$") as $handle$ {
+    <str> content = $handle$.read()
+    cons.out(content)
+}$end$]]></Code>
+    </Snippet>
+  </CodeSnippet>
+
+</CodeSnippets>

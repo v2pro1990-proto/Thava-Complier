@@ -522,7 +522,14 @@ class Lexer {
 
 public:
     Lexer(std::string src, std::string curPath = "")
-        : source(std::move(src)), currentFilePath(std::move(curPath)) {}
+        : source(std::move(src)), currentFilePath(std::move(curPath)) {
+        if (source.size() >= 3 &&
+            static_cast<unsigned char>(source[0]) == 0xEF &&
+            static_cast<unsigned char>(source[1]) == 0xBB &&
+            static_cast<unsigned char>(source[2]) == 0xBF) {
+            source.erase(0, 3);
+        }
+    }
 
     std::vector<Token> scanTokens() {
         std::vector<Token> tokens;
@@ -802,6 +809,19 @@ public:
                                 exit(1);
                             }
 
+                            if (!isSys && !currentFilePath.empty()) {
+                                std::filesystem::path relP(cPath);
+                                if (relP.is_relative()) {
+                                    std::filesystem::path baseDir = std::filesystem::path(currentFilePath).parent_path();
+                                    if (!baseDir.empty()) {
+                                        std::filesystem::path fullC = baseDir / relP;
+                                        if (std::filesystem::exists(fullC)) {
+                                            std::error_code ec;
+                                            cPath = std::filesystem::weakly_canonical(fullC, ec).generic_string();
+                                        }
+                                    }
+                                }
+                            }
                             std::string incDirective = isSys ? ("<" + cPath + ">") : ("\"" + cPath + "\"");
                             if (!g_cAttachedSet.count(incDirective)) {
                                 g_cAttachedSet.insert(incDirective);
@@ -5686,6 +5706,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
 
 int main(int argc, char* argv[]) {
     std::string inputFile = "";
+    std::vector<std::string> inputFiles;
     std::string outputFile = "";
     bool explicitOutput = false;
 #ifdef _WIN32
@@ -5764,9 +5785,7 @@ int main(int argc, char* argv[]) {
             g_optLevel = 3;
         } else if (arg == "--cxx" && i + 1 < argc) {
             g_explicitCxx = argv[++i];
-        } else if (inputFile.empty()) {
-            inputFile = arg;
-        }
+        } else if (!arg.empty() && arg[0] != '-') { if (inputFile.empty()) inputFile = arg; inputFiles.push_back(arg); }
     }
 
     if (inputFile.empty()) {
@@ -5817,15 +5836,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::ifstream file(inputFile);
-    if (!file.is_open()) {
-        std::cerr << "Error: Cannot open file " << inputFile << "\n";
-        return 1;
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string source = buffer.str();
-
     // 1. Initialize global tables & include guard for @attach, @cattach & @dlattach
     g_attachedFiles.clear();
     g_cAttachedHeaders.clear();
@@ -5845,12 +5855,34 @@ int main(int argc, char* argv[]) {
     g_hasDLAttach = false;
     g_hasCLib = false;
 
-    std::error_code ec;
-    std::string normInput = std::filesystem::weakly_canonical(inputFile, ec).string();
-    g_attachedFiles.insert(normInput);
+    std::vector<Token> tokens;
+    int lastLine = 1;
+    for (const auto& inFile : inputFiles) {
+        std::error_code ec;
+        std::string normInput = std::filesystem::weakly_canonical(inFile, ec).string();
+        if (normInput.empty()) normInput = inFile;
+        if (g_attachedFiles.count(normInput)) {
+            continue;
+        }
+        std::ifstream file(inFile);
+        if (!file.is_open()) {
+            std::cerr << "Error: Cannot open file " << inFile << "\n";
+            return 1;
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        std::string source = buffer.str();
 
-    Lexer lexer(source, normInput);
-    auto tokens = lexer.scanTokens();
+        g_attachedFiles.insert(normInput);
+        Lexer lexer(source, normInput);
+        auto fileTokens = lexer.scanTokens();
+        if (!fileTokens.empty() && fileTokens.back().type == TokenType::EOF_TOKEN) {
+            lastLine = fileTokens.back().line;
+            fileTokens.pop_back();
+        }
+        tokens.insert(tokens.end(), fileTokens.begin(), fileTokens.end());
+    }
+    tokens.push_back({TokenType::EOF_TOKEN, "", lastLine});
 
     // Dynamic Library Mode (--lib): fallback to C++ transpiler only when @cattach or explicitCpp is specified
     // By default, native direct machine code emission is used!

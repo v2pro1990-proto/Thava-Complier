@@ -1,0 +1,19 @@
+# ==========================================================
+# Project: $projectname$
+# Created with Thava Visual Studio Workload & SDK
+# ==========================================================
+
+<int> func add_values(<int> a, <int> b) {
+    return a + b
+}
+
+func main() {
+    <str> name = "Developer"
+    <dbl> version = 1.0
+    <int> result = add_values(20, 22)
+
+    cons.out("Hello, @{name}! Welcome to Thava v@{version} on Visual Studio.")
+    cons.out("Computed result: 20 + 22 = @{result}")
+}
+
+main()

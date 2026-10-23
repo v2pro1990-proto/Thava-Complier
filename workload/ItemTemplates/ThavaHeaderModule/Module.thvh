@@ -1,0 +1,8 @@
+# ==========================================================
+# Header Module: $itemname$.thvh
+# Usage: @attach "$itemname$.thvh"
+# ==========================================================
+
+<int> func helper_$safeitemname$(<int> val) {
+    return val * 2
+}

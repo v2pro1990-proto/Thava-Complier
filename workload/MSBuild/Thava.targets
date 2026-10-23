@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <ItemGroup>
+    <PropertyPageSchema Include="$(MSBuildThisFileDirectory)Thava.xml" />
+    <AvailableItemName Include="ThavaCompile">
+      <Targets>ThavaBuild</Targets>
+    </AvailableItemName>
+  </ItemGroup>
+
+  <UsingTask
+    TaskName="Thava.Build.Tasks.ThavaCompileTask"
+    AssemblyFile="$(MSBuildThisFileDirectory)Thava.Build.Tasks.dll" />
+
+  <Target
+    Name="ThavaBuild"
+    BeforeTargets="BuildCompile;BuildLink"
+    Condition="'@(ThavaCompile)' != ''"
+    Inputs="@(ThavaCompile);$(MSBuildProjectFile)"
+    Outputs="$(OutDir)$(TargetName)$(TargetExt)">
+
+    <ThavaCompileTask
+      Sources="@(ThavaCompile)"
+      ProjectDir="$(ProjectDir)"
+      DefaultOutputFile="$(OutDir)$(TargetName)$(TargetExt)" />
+
+    <ItemGroup Condition="'$(TLogLocation)' != ''">
+      <_ThavaReadTlog Include="^%(ThavaCompile.FullPath)" Condition="'%(ThavaCompile.ExcludedFromBuild)' != 'true'" />
+      <_ThavaWriteTlog Include="^%(ThavaCompile.FullPath);$([MSBuild]::NormalizePath('$(ProjectDir)', '$(OutDir)$(TargetName)$(TargetExt)'))" Condition="'%(ThavaCompile.ExcludedFromBuild)' != 'true'" />
+    </ItemGroup>
+
+    <WriteLinesToFile
+      Condition="'$(TLogLocation)' != '' and '@(_ThavaReadTlog)' != ''"
+      File="$(TLogLocation)ThavaCompile.read.1u.tlog"
+      Lines="@(_ThavaReadTlog->MetaData('Identity')->ToUpperInvariant())"
+      Overwrite="true"
+      Encoding="Unicode" />
+
+    <WriteLinesToFile
+      Condition="'$(TLogLocation)' != '' and '@(_ThavaWriteTlog)' != ''"
+      File="$(TLogLocation)ThavaCompile.write.1u.tlog"
+      Lines="@(_ThavaWriteTlog->MetaData('Identity')->ToUpperInvariant())"
+      Overwrite="true"
+      Encoding="Unicode" />
+  </Target>
+
+  <Target Name="ThavaClean" AfterTargets="Clean" Condition="'@(ThavaCompile)' != ''">
+    <Delete Files="$(OutDir)$(TargetName)$(TargetExt)" TreatErrorsAsWarnings="true" />
+  </Target>
+
+</Project>

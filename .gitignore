@@ -1,6 +1,7 @@
 # Binaries and executables
 *.exe
 *.dll
+!workload/MSBuild/Thava.Build.Tasks.dll
 *.so
 *.dylib
 *.thdl
