@@ -92,6 +92,7 @@ public:
     uint32_t offDoubleTen = 0;
     uint32_t offDoubleMaxRand = 0;
 
+    std::map<std::string, size_t> osImportLabels;
     bool initialized = false;
 
     Arm64WinRuntime(arm64::Encoder& e, PeEmitter& p)
@@ -152,6 +153,17 @@ public:
     void init() {
         if (initialized) return;
         initialized = true;
+
+        for (const char* name : {"GetCurrentProcessId", "Sleep", "GetLocalTime",
+                                 "GetFileAttributesA", "GetFileAttributesExA",
+                                 "GetActiveProcessorCount"}) {
+            pe.addImport("kernel32.dll", name);
+            osImportLabels.emplace(name, enc.createLabel());
+        }
+        for (const char* name : {"system", "_chdir", "_mkdir", "_rmdir", "remove",
+                                 "rename", "getenv", "_getcwd", "time"}) {
+            osImportLabels.emplace(name, enc.createLabel());
+        }
 
         offFmtStrNL = pe.addStringLiteralOffset("%s\n");
         offFmtIntNL = pe.addStringLiteralOffset("%lld\n");
@@ -831,21 +843,25 @@ public:
         arm64::emitRandChoice(enc, lblRandChoice, lblRand, offEmptyStr);
         arm64::emitDictFind(enc, lblDictFind, lblStrCmpEq);
         emitFileHelpers();
+        for (const auto& entry : osImportLabels) {
+            enc.bindLabel(entry.second);
+            tailCallImport(entry.first.c_str());
+        }
     }
 
 private:
-    void loadCrtAddress(const char* name) {
+    void loadImportAddress(const char* name) {
         enc.adr_data(arm64::X16, pe.getFuncIatOffsetInRdata(name));
         enc.ldr_imm(arm64::X16, arm64::X16, 0);
     }
 
     void callCrt(const char* name) {
-        loadCrtAddress(name);
+        loadImportAddress(name);
         enc.blr(arm64::X16);
     }
 
-    void tailCallCrt(const char* name) {
-        loadCrtAddress(name);
+    void tailCallImport(const char* name) {
+        loadImportAddress(name);
         enc.br(arm64::X16);
     }
 
@@ -894,16 +910,16 @@ private:
 
     void emitFileHelpers() {
         enc.bindLabel(lblFileOpen);
-        tailCallCrt("fopen");
+        tailCallImport("fopen");
         enc.bindLabel(lblFileClose);
-        tailCallCrt("fclose");
+        tailCallImport("fclose");
 
         // write(file, buffer, length) -> fwrite(buffer, 1, length, file)
         enc.bindLabel(lblFileWrite);
         enc.mov_rr(arm64::X3, arm64::X0);
         enc.mov_rr(arm64::X0, arm64::X1);
         enc.movz(arm64::X1, 1, 0);
-        tailCallCrt("fwrite");
+        tailCallImport("fwrite");
 
         emitNumberToString(lblIntToStr, offFmtIntString);
         emitNumberToString(lblFileFmtDouble, offFmtFloat);

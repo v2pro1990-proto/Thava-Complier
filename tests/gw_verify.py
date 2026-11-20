@@ -18,6 +18,9 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
             "membership_rand": "true false true false true false true -4 true only",
             "file_arm64": "[alpha][17]\n18\n4 [2.5][true]"}
 
+if run_windows_arm64:
+    expected["os_time_arm64"] = "windows true [] true true true true true true 3 -1 true true true true 0"
+
 with tempfile.TemporaryDirectory() as tmp:
     for target in targets:
         for case, line in expected.items():

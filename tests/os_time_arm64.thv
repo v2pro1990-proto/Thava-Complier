@@ -1,0 +1,27 @@
+<str> platform = os.name()
+<int> pid = os.getpid()
+<int> cpus = os.cpu_count()
+<str> cwd = os.getcwd()
+<str> absentEnv = os.getenv("THAVA_TEST_VARIABLE_NOT_SET_12BA6D6")
+<bl> created = os.mkdir("arm64-sandbox")
+<bl> directory = os.is_dir("arm64-sandbox")
+<bl> entered = os.chdir("arm64-sandbox")
+file.open("old.txt", "wb") as f {
+    f.write("ABC")
+}
+<bl> renamed = os.rename("old.txt", "new.txt")
+<bl> exists = os.exists("new.txt")
+<bl> regular = os.is_file("new.txt")
+<int> size = os.getsize("new.txt")
+<int> missingSize = os.getsize("missing.txt")
+<bl> removed = os.remove("new.txt")
+<bl> left = os.chdir("..")
+<bl> removedDir = os.rmdir("arm64-sandbox")
+<int> stamp = time.timestamp()
+<int> year = time.year()
+<int> month = time.month()
+<int> millis = time.millis()
+<int> slept = time.sleep(1)
+<bl> processOK = pid > 0 and cpus > 0 and cwd.len() > 0
+<bl> timeOK = stamp > 0 and year >= 2025 and month >= 1 and month <= 12 and millis >= 0 and millis < 1000
+cons.out("@{platform} @{processOK} [@{absentEnv}] @{created} @{directory} @{entered} @{renamed} @{exists} @{regular} @{size} @{missingSize} @{removed} @{left} @{removedDir} @{timeOK} @{slept}")

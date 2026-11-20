@@ -316,11 +316,33 @@ public:
         return false;
     }
 
+    static bool hasWindowsOsMethod(const std::string& name) {
+        static const std::set<std::string> methods = {
+            "name", "system", "getpid", "cpu_count", "getcwd", "chdir", "mkdir",
+            "rmdir", "remove", "rename", "exists", "is_file", "is_dir", "getsize",
+            "getenv", "sleep"
+        };
+        return methods.count(name) != 0;
+    }
+
+    static int windowsTimeField(const std::string& name) {
+        // Byte offsets of the WORD fields in SYSTEMTIME.
+        static const std::map<std::string, int> offsets = {
+            {"year", 0}, {"month", 2}, {"day", 6}, {"hour", 8}, {"minute", 10},
+            {"second", 12}, {"millis", 14}
+        };
+        auto field = offsets.find(name);
+        return field == offsets.end() ? -1 : field->second;
+    }
+
     // Features that only the Linux ARM64 runtime can service (syscalls/helpers
     // that the Windows ARM64 runtime does not provide yet).
     static const char* linuxOnlyFeature(ASTNode* n) {
-        if (dynamic_cast<OsMethodNode*>(n) || dynamic_cast<TimeMethodNode*>(n))
-            return "os.* / time.*";
+        if (auto os = dynamic_cast<OsMethodNode*>(n); os && !hasWindowsOsMethod(os->method))
+            return "this os.* method";
+        if (auto time = dynamic_cast<TimeMethodNode*>(n); time && time->method != "timestamp" &&
+            time->method != "sleep" && windowsTimeField(time->method) < 0)
+            return "this time.* method";
         return nullptr;
     }
 
@@ -2113,6 +2135,7 @@ public:
 
         // 20. os.* (Linux AArch64 syscalls)
         if (auto os = dynamic_cast<OsMethodNode*>(node)) {
+            if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) return emitWindowsOs(os);
             if (os->method == "name") {
                 uint32_t off = emitter.addStringLiteralOffset("linux");
                 enc.adr_data(arm64::X0, off);
@@ -2293,6 +2316,7 @@ public:
 
         // 21. time.* (timestamp/sleep)
         if (auto tm = dynamic_cast<TimeMethodNode*>(node)) {
+            if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) return emitWindowsTime(tm);
             if (tm->method == "timestamp") {
                 enc.sub_rri(arm64::SP, arm64::SP, 32);
                 enc.add_rri(arm64::X0, arm64::SP, 16);
@@ -2328,6 +2352,150 @@ public:
         }
 
         return ThavaType::UNKNOWN;
+    }
+
+    void emitWindowsImport(const std::string& name) {
+        enc.bl(runtime.osImportLabels.at(name));
+    }
+
+    void emitWindowsSleep(const std::vector<ASTPtr>& args) {
+        if (!args.empty()) {
+            compileExpression(args[0].get());
+            auto skip = enc.createLabel();
+            enc.cmp_ri(arm64::X0, 0);
+            enc.b_cond(arm64::LE, skip);
+            enc.mov_ri64(arm64::X9, 0xfffffffe);
+            enc.cmp_rr(arm64::X0, arm64::X9);
+            enc.b_cond(arm64::HI, skip);
+            emitWindowsImport("Sleep");
+            enc.bindLabel(skip);
+        }
+        enc.movz(arm64::X0, 0, 0);
+    }
+
+    ThavaType emitWindowsOs(OsMethodNode* os) {
+        const auto& name = os->method;
+        const size_t required = name == "rename" ? 2 :
+            (name == "name" || name == "sleep" || name == "getpid" ||
+             name == "cpu_count" || name == "getcwd" ? 0 : 1);
+        if (os->args.size() < required) {
+            std::cerr << "[ARM64 Codegen Error]: os." << name << " requires "
+                      << required << " argument(s).\n";
+            exit(1);
+        }
+        if (name == "name") {
+            enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("windows"));
+            return ThavaType::STRING;
+        }
+        if (name == "sleep") {
+            emitWindowsSleep(os->args);
+            return ThavaType::INT;
+        }
+        if (name == "getpid" || name == "cpu_count") {
+            if (name == "cpu_count") enc.movz(arm64::X0, 0xffff, 0);
+            emitWindowsImport(name == "getpid" ? "GetCurrentProcessId" : "GetActiveProcessorCount");
+            return ThavaType::INT;
+        }
+        if (name == "getcwd" || name == "getenv") {
+            if (name == "getcwd") {
+                enc.movz(arm64::X0, 0, 0);
+                enc.movz(arm64::X1, 0, 0);
+                emitWindowsImport("_getcwd");
+            } else {
+                compileExpression(os->args.at(0).get());
+                emitWindowsImport("getenv");
+            }
+            auto found = enc.createLabel();
+            enc.cbnz(arm64::X0, found);
+            enc.adr_data(arm64::X0, runtime.offEmptyStr);
+            enc.bindLabel(found);
+            return ThavaType::STRING;
+        }
+        if (name == "getsize") {
+            compileExpression(os->args.at(0).get());
+            enc.sub_rri(arm64::SP, arm64::SP, 48);
+            enc.movz(arm64::X1, 0, 0);
+            enc.mov_rr(arm64::X2, arm64::SP);
+            emitWindowsImport("GetFileAttributesExA");
+            auto missing = enc.createLabel(), done = enc.createLabel();
+            enc.cbz(arm64::X0, missing);
+            // WIN32_FILE_ATTRIBUTE_DATA ends with nFileSizeHigh and nFileSizeLow.
+            enc.ldr_imm(arm64::X9, arm64::SP, 28);
+            enc.lsl_ri(arm64::X0, arm64::X9, 32);
+            enc.lsr_ri(arm64::X9, arm64::X9, 32);
+            enc.orr_rrr(arm64::X0, arm64::X0, arm64::X9);
+            enc.b(done);
+            enc.bindLabel(missing);
+            enc.movn(arm64::X0, 0, 0);
+            enc.bindLabel(done);
+            enc.add_rri(arm64::SP, arm64::SP, 48);
+            return ThavaType::INT;
+        }
+        if (name == "exists" || name == "is_file" || name == "is_dir") {
+            compileExpression(os->args.at(0).get());
+            emitWindowsImport("GetFileAttributesA");
+            auto valid = enc.createLabel(), done = enc.createLabel();
+            enc.mov_ri64(arm64::X9, 0xffffffff);
+            enc.cmp_rr(arm64::X0, arm64::X9);
+            enc.b_cond(arm64::NE, valid);
+            enc.movz(arm64::X0, 0, 0);
+            enc.b(done);
+            enc.bindLabel(valid);
+            if (name == "exists") enc.movz(arm64::X0, 1, 0);
+            else {
+                enc.movz(arm64::X9, 0x10, 0); // FILE_ATTRIBUTE_DIRECTORY
+                enc.and_rrr(arm64::X0, arm64::X0, arm64::X9);
+                enc.cmp_ri(arm64::X0, 0);
+                enc.cset(arm64::X0, name == "is_dir" ? arm64::NE : arm64::EQ);
+            }
+            enc.bindLabel(done);
+            return ThavaType::BOOL;
+        }
+
+        static const std::map<std::string, std::string> crtMethods = {
+            {"chdir", "_chdir"}, {"mkdir", "_mkdir"}, {"rmdir", "_rmdir"},
+            {"remove", "remove"}, {"rename", "rename"}, {"system", "system"}
+        };
+        compileExpression(os->args.at(0).get());
+        if (name == "rename") {
+            enc.sub_rri(arm64::SP, arm64::SP, 16);
+            enc.str_imm(arm64::X0, arm64::SP, 0);
+            compileExpression(os->args.at(1).get());
+            enc.mov_rr(arm64::X1, arm64::X0);
+            enc.ldr_imm(arm64::X0, arm64::SP, 0);
+            enc.add_rri(arm64::SP, arm64::SP, 16);
+        }
+        emitWindowsImport(crtMethods.at(name));
+        if (name == "system") {
+            enc.lsl_ri(arm64::X0, arm64::X0, 32);
+            enc.asr_ri(arm64::X0, arm64::X0, 32);
+            return ThavaType::INT;
+        }
+        enc.cmp_ri(arm64::X0, 0);
+        enc.cset(arm64::X0, arm64::EQ);
+        return ThavaType::BOOL;
+    }
+
+    ThavaType emitWindowsTime(TimeMethodNode* time) {
+        if (time->method == "sleep") {
+            emitWindowsSleep(time->args);
+        } else if (time->method == "timestamp") {
+            enc.movz(arm64::X0, 0, 0);
+            emitWindowsImport("time");
+            enc.lsl_ri(arm64::X0, arm64::X0, 32);
+            enc.asr_ri(arm64::X0, arm64::X0, 32);
+        } else {
+            enc.sub_rri(arm64::SP, arm64::SP, 16);
+            enc.mov_rr(arm64::X0, arm64::SP);
+            emitWindowsImport("GetLocalTime");
+            const auto field = windowsTimeField(time->method);
+            enc.ldrb_imm(arm64::X0, arm64::SP, field);
+            enc.ldrb_imm(arm64::X9, arm64::SP, field + 1);
+            enc.lsl_ri(arm64::X9, arm64::X9, 8);
+            enc.orr_rrr(arm64::X0, arm64::X0, arm64::X9);
+            enc.add_rri(arm64::SP, arm64::SP, 16);
+        }
+        return ThavaType::INT;
     }
 
     // ==========================================
