@@ -9,7 +9,10 @@ import tempfile
 fixtures = Path(__file__).resolve().parent
 windows = os.name == "nt"
 compiler = Path(sys.argv[1]).resolve()
+run_windows_arm64 = "--run-windows-arm64" in sys.argv[2:]
 targets = ("pe", "cpp", "pe-arm64") if windows else ("elf", "arm64")
+if run_windows_arm64:
+    targets = ("pe-arm64",)
 expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8"}
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -26,10 +29,13 @@ with tempfile.TemporaryDirectory() as tmp:
                     header = struct.unpack_from("<I", data, 0x3C)[0]
                     assert data[header:header + 6] == b"PE\0\0\x64\xaa"
                     print(target, case, opt, "PE ARM64 header OK", flush=True)
-                    continue
+                    if not run_windows_arm64:
+                        continue
                 runner = ["qemu-aarch64"] if target == "arm64" else []
-                result = subprocess.run(runner + [str(output)], cwd=tmp, check=True,
-                                        stdout=subprocess.PIPE, text=True)
+                result = subprocess.run(runner + [str(output)], cwd=tmp,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                print(result.stdout, end="", flush=True)
+                result.check_returncode()
                 lines = [s for s in result.stdout.splitlines() if s and not s.startswith("[Thava Native]")]
                 assert lines == [line], (target, case, opt, lines)
                 print(target, case, opt, line, flush=True)
