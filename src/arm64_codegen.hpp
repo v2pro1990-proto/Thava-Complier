@@ -321,12 +321,6 @@ public:
     static const char* linuxOnlyFeature(ASTNode* n) {
         if (dynamic_cast<RandCallNode*>(n))
             return "rand()/randint()/randres()";
-        if (auto sm = dynamic_cast<StrMethodNode*>(n); sm && sm->method == "title")
-            return "string title";
-        if (dynamic_cast<StrAdvMethodNode*>(n))
-            return "string methods (find/count/replace/split/join)";
-        if (dynamic_cast<StrSplitNode*>(n))
-            return "string split";
         if (dynamic_cast<InNode*>(n))
             return "'in' expressions";
         if (dynamic_cast<DictNode*>(n) || dynamic_cast<DictMethodNode*>(n))
@@ -1007,7 +1001,7 @@ public:
 
         // 7. CallNode (Function invocation)
         if (auto call = dynamic_cast<CallNode*>(node)) {
-            // Built-in min()/max() — unless the program defines its own function with that name
+            // Built-in min()/max() â€” unless the program defines its own function with that name
             if ((call->name == "min" || call->name == "max") && functions.find(call->name) == functions.end()) {
                 if (call->args.size() != 2) {
                     std::cerr << "[ARM64 Codegen Error]: " << call->name

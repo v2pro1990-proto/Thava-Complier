@@ -1,0 +1,19 @@
+<str> source = "cab-ab-ab"
+<str> needle = "ab"
+<str> missing = "xx"
+<str> empty = ""
+<int> found = source.find(needle)
+<int> absent = source.find(missing)
+<int> count = source.count(needle)
+<int> beginning = source.find(empty)
+<str> replaced = source.replace(needle, "XY")
+<str> same = source.replace(missing, "XY")
+<str> removed = source.replace(needle, empty)
+<str> words = "alpha beta"
+<str> title = words.title()
+<str> csv = "one,,three,"
+<str> separator = ","
+<str> joiner = "|"
+<lst> parts = csv.split(separator)
+<str> joined = joiner.join(parts)
+cons.out("@{found} @{absent} @{count} @{beginning} [@{replaced}][@{same}][@{removed}][@{title}][@{joined}]")

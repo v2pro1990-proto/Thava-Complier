@@ -789,5 +789,13 @@ public:
         arm64::emitCaseConvert(enc, lblStrLower, false, lblStrLen, lblMalloc, offEmptyStr);
         arm64::emitCaseConvert(enc, lblStrUpper, true, lblStrLen, lblMalloc, offEmptyStr);
         arm64::emitStrStrip(enc, lblStrStrip, lblStrLen, lblMalloc, lblMemCpy, offEmptyStr);
+        arm64::emitStrTitle(enc, lblStrTitle, lblStrLower, offEmptyStr);
+        arm64::emitStrFind(enc, lblStrFind, lblStrLen);
+        arm64::emitStrStartsWith(enc, lblStrStartsWith, lblStrLen);
+        arm64::emitStrEndsWith(enc, lblStrEndsWith, lblStrLen);
+        arm64::emitStrCount(enc, lblStrCount, lblStrFind, lblStrLen);
+        arm64::emitStrReplace(enc, lblStrReplace, lblStrLen, lblStrFind, lblMalloc, lblMemCpy, offEmptyStr);
+        arm64::emitStrSplit(enc, lblStrSplit, lblStrLen, lblStrFind, lblMalloc, lblMemCpy, offEmptyStr);
+        arm64::emitStrJoin(enc, lblStrJoin, lblStrLen, lblMalloc, lblMemCpy, offEmptyStr);
     }
 };
