@@ -1710,9 +1710,28 @@ public:
         // 15. rand()/randint()/randres()
         if (auto rc = dynamic_cast<RandCallNode*>(node)) {
             if (rc->funcName == "randres" && !rc->args.empty()) {
-                compileExpression(rc->args[0].get());
-                enc.bl(runtime.lblRandChoice);
-                return ThavaType::STRING;
+                ASTNode* list = rc->args[0].get();
+                compileExpression(list);
+                if (rc->weightExpr) {
+                    ASTNode* weights = rc->weightExpr.get();
+                    enc.sub_rri(arm64::SP, arm64::SP, 16);
+                    enc.str_imm(arm64::X0, arm64::SP, 0);
+                    compileExpression(weights);
+                    const auto type = elemTypeOfIndexedList(weights);
+                    if (type != ThavaType::INT && type != ThavaType::FLOAT && type != ThavaType::DOUBLE) {
+                        std::cerr << "[ARM64 Codegen Error]: randres() requires numeric weights.\n";
+                        exit(1);
+                    }
+                    enc.mov_rr(arm64::X1, arm64::X0);
+                    enc.ldr_imm(arm64::X0, arm64::SP, 0);
+                    enc.add_rri(arm64::SP, arm64::SP, 16);
+                    enc.movz(arm64::X2, type != ThavaType::INT, 0);
+                    enc.bl(runtime.lblWeightedChoice);
+                } else {
+                    enc.bl(runtime.lblRandChoice);
+                }
+                auto resultType = elemTypeOfIndexedList(list);
+                return resultType == ThavaType::UNKNOWN ? ThavaType::STRING : resultType;
             }
             if (rc->funcName == "randint") {
                 if (rc->args.size() == 2) {

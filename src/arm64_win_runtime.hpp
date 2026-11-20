@@ -65,6 +65,7 @@ public:
     size_t lblAtoD = 0;
     size_t lblSeedRand = 0;
     size_t lblRand = 0;
+    size_t lblWeightedChoice = 0;
     size_t lblRandChoice = 0;
     size_t lblGetenv = 0;
     size_t lblDictFind = 0;
@@ -90,6 +91,7 @@ public:
     uint32_t offStrDashC = 0;
     uint32_t offStrProcEnviron = 0;
     uint32_t offDoubleTen = 0;
+    uint32_t offWeightMismatch = 0;
     uint32_t offDoubleMaxRand = 0;
 
     std::map<std::string, size_t> osImportLabels;
@@ -132,6 +134,7 @@ public:
         lblAtoD          = enc.createLabel();
         lblSeedRand      = enc.createLabel();
         lblRand          = enc.createLabel();
+        lblWeightedChoice = enc.createLabel();
         lblRandChoice    = enc.createLabel();
         lblGetenv        = enc.createLabel();
         lblDictFind      = enc.createLabel();
@@ -177,6 +180,7 @@ public:
         offFmtScanLine  = pe.addStringLiteralOffset(" %1023[^\n]");
         offStrListOpen  = pe.addStringLiteralOffset("[");
         offStrListComma = pe.addStringLiteralOffset(", ");
+        offWeightMismatch = pe.addStringLiteralOffset("Runtime Error: randres() weight count must match list size!\n");
         offDoubleMaxRand = pe.addDoubleLiteralOffset(32767.0);
         offEmptyStr = pe.addStringLiteralOffset("");
         offFmtIntString = pe.addStringLiteralOffset("%lld");
@@ -841,6 +845,8 @@ public:
         arm64::emitStrCmpEq(enc, lblStrCmpEq);
         arm64::emitListIn(enc, lblListIn, lblStrCmpEq);
         arm64::emitRandChoice(enc, lblRandChoice, lblRand, offEmptyStr);
+        arm64::emitWeightedChoice(enc, lblWeightedChoice, lblRand, lblRandChoice,
+                                  lblPrintStr, lblExit, offWeightMismatch);
         arm64::emitDictFind(enc, lblDictFind, lblStrCmpEq);
         emitFileHelpers();
         for (const auto& entry : osImportLabels) {

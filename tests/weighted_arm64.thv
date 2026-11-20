@@ -1,0 +1,9 @@
+<lst> options = ["pick", "ignore", "never"]
+<lst> weights = [3, 0, -2]
+<str> choice = <str>randres(options, weight=weights)
+<lst> numbers = [7, 20]
+<lst> decimals = [1.25, 0.0]
+<int> number = <int>randres(numbers, weight=decimals)
+<lst> one = ["fallback"]
+<str> fallback = <str>randres(one, weight=[0])
+cons.out("@{choice} @{number} @{fallback}")

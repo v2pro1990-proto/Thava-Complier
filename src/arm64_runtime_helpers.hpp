@@ -1029,4 +1029,106 @@ inline void emitDictFind(Encoder& enc, size_t lblDictFind, size_t lblStrCmpEq) {
     enc.ret();
 }
 
+
+// X0 = list, X1 = weights, X2 = weights are stored as double bits.
+inline void emitWeightedChoice(Encoder& enc, size_t entry, size_t rand,
+                               size_t choice, size_t print, size_t exitLabel,
+                               uint32_t mismatchMessage) {
+    enc.bindLabel(entry);
+    auto empty = enc.createLabel(), mismatch = enc.createLabel();
+    auto totalLoop = enc.createLabel(), selectLoop = enc.createLabel();
+    auto weightReady = enc.createLabel(), skipTotal = enc.createLabel();
+    auto draw = enc.createLabel(), fallback = enc.createLabel();
+    auto chosen = enc.createLabel(), selectReady = enc.createLabel();
+    auto next = enc.createLabel();
+
+    enc.ldr_imm(X3, X0, 0);
+    enc.cbz(X3, empty);
+    enc.ldr_imm(X4, X1, 0);
+    enc.cmp_rr(X3, X4);
+    enc.b_cond(NE, mismatch);
+
+    enc.stp_pre(FP, LR, SP, -64);
+    enc.mov_rr(FP, SP);
+    enc.str_imm(X0, FP, 16);
+    enc.str_imm(X1, FP, 24);
+    enc.str_imm(X2, FP, 32);
+    enc.str_imm(X3, FP, 40);
+    enc.movz(X4, 0, 0);
+    enc.fmov_dx(D2, X4);
+    enc.fmov_dx(D3, X4);
+    enc.add_rri(X1, X1, 8);
+    enc.bindLabel(totalLoop);
+    enc.ldr_reg(X5, X1, X4);
+    enc.fmov_dx(D0, X5);
+    enc.cbnz(X2, weightReady);
+    enc.scvtf_dr(D0, X5);
+    enc.bindLabel(weightReady);
+    enc.fcmp_dd(D0, D3);
+    enc.b_cond(LE, skipTotal);
+    enc.b_cond(VS, skipTotal);
+    enc.fadd_ddd(D2, D2, D0);
+    enc.bindLabel(skipTotal);
+    enc.add_rri(X4, X4, 8);
+    enc.sub_rri(X3, X3, 1);
+    enc.cbnz(X3, totalLoop);
+    enc.fcmp_dd(D2, D3);
+    enc.b_cond(GT, draw);
+    enc.b(fallback);
+
+    enc.bindLabel(draw);
+    enc.fstr_imm(D2, FP, 48);
+    enc.bl(rand);
+    enc.scvtf_dr(D0, X0);
+    enc.movz(X9, 32768, 0);
+    enc.scvtf_dr(D1, X9);
+    enc.fdiv_ddd(D0, D0, D1);
+    enc.fldr_imm(D2, FP, 48);
+    enc.fmul_ddd(D2, D2, D0); // target in [0,total)
+    enc.movz(X4, 0, 0);
+    enc.fmov_dx(D3, X4);
+    enc.ldr_imm(X1, FP, 24);
+    enc.add_rri(X1, X1, 8);
+    enc.ldr_imm(X2, FP, 32);
+    enc.ldr_imm(X3, FP, 40);
+    enc.bindLabel(selectLoop);
+    enc.ldr_reg(X5, X1, X4);
+    enc.fmov_dx(D0, X5);
+    enc.cbnz(X2, selectReady);
+    enc.scvtf_dr(D0, X5);
+    enc.bindLabel(selectReady);
+    enc.fcmp_dd(D0, D3);
+    enc.b_cond(LE, next);
+    enc.b_cond(VS, next);
+    enc.fcmp_dd(D2, D0);
+    enc.b_cond(LT, chosen);
+    enc.fsub_ddd(D2, D2, D0);
+    enc.bindLabel(next);
+    enc.add_rri(X4, X4, 8);
+    enc.sub_rri(X3, X3, 1);
+    enc.cbnz(X3, selectLoop);
+    enc.bindLabel(fallback);
+    enc.ldr_imm(X0, FP, 16);
+    enc.ldp_post(FP, LR, SP, 64);
+    enc.b(choice);
+
+    enc.bindLabel(chosen);
+    enc.ldr_imm(X0, FP, 16);
+    enc.add_rri(X0, X0, 8);
+    enc.ldr_reg(X0, X0, X4);
+    enc.ldp_post(FP, LR, SP, 64);
+    enc.ret();
+
+    enc.bindLabel(empty);
+    enc.b(choice);
+
+    enc.bindLabel(mismatch);
+    enc.stp_pre(FP, LR, SP, -16);
+    enc.mov_rr(FP, SP);
+    enc.adr_data(X0, mismatchMessage);
+    enc.bl(print);
+    enc.movz(X0, 1, 0);
+    enc.bl(exitLabel);
+}
+
 } // namespace arm64

@@ -23,7 +23,10 @@ if run_windows_arm64:
 
 with tempfile.TemporaryDirectory() as tmp:
     for target in targets:
-        for case, line in expected.items():
+        cases = dict(expected)
+        if target in ("arm64", "pe-arm64", "cpp"):
+            cases["weighted_arm64"] = "pick 7 fallback"
+        for case, line in cases.items():
             output = Path(tmp) / (case + (".exe" if windows else ""))
             for opt in (["-O0", "-O3"] if case == "gw" and target != "cpp" else ["-O0"]):
                 subprocess.run([str(compiler), str(fixtures / (case + ".thv")), "--backend",

@@ -73,6 +73,7 @@ public:
     size_t lblAtoi = 0;
     size_t lblAtoD = 0;
     size_t lblRand = 0;
+    size_t lblWeightedChoice = 0;
     size_t lblRandChoice = 0;
     size_t lblGetenv = 0;
     size_t lblDictFind = 0;
@@ -96,6 +97,7 @@ public:
     uint32_t offStrDashC = 0;
     uint32_t offStrProcEnviron = 0;
     uint32_t offDoubleTen = 0;
+    uint32_t offWeightMismatch = 0;
     uint32_t offDoubleMaxRand = 0;
     uint32_t offFileReadErr = 0;
     uint32_t offStrQuoteNL = 0;
@@ -140,6 +142,7 @@ public:
         lblAtoi         = enc.createLabel();
         lblAtoD         = enc.createLabel();
         lblRand         = enc.createLabel();
+        lblWeightedChoice = enc.createLabel();
         lblRandChoice   = enc.createLabel();
         lblGetenv       = enc.createLabel();
         lblDictFind     = enc.createLabel();
@@ -175,6 +178,7 @@ public:
         offStrDashC        = elf.addStringLiteralOffset("-c");
         offStrProcEnviron  = elf.addStringLiteralOffset("/proc/self/environ");
         offDoubleTen       = elf.addDoubleLiteralOffset(10.0);
+        offWeightMismatch = elf.addStringLiteralOffset("Runtime Error: randres() weight count must match list size!\n");
         offDoubleMaxRand   = elf.addDoubleLiteralOffset(32767.0);
         offFileReadErr     = elf.addStringLiteralOffset("[Runtime Error (RuntimeError)]: Cannot open file '");
         offStrQuoteNL      = elf.addStringLiteralOffset("'\n");
@@ -240,6 +244,8 @@ public:
         emitAtoD();
         emitRand();
         emitRandChoice();
+        arm64::emitWeightedChoice(enc, lblWeightedChoice, lblRand, lblRandChoice,
+                                  lblPrintStr, lblExit, offWeightMismatch);
         emitGetenv();
         emitDictFind();
         emitFileMake();
