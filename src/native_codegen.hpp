@@ -3582,7 +3582,7 @@ public:
             } else { // rand()
                 enc.call_iat_func("rand");
                 enc.cvtsi2sd(x86::XMM0, x86::RAX);
-                uint32_t cOff = pe.addDoubleLiteralOffset(32767.0);
+                uint32_t cOff = pe.addDoubleLiteralOffset(std::is_same_v<TEmitter, ElfEmitter> ? 2147483647.0 : 32767.0);
                 enc.movsd_rip_rdata(x86::XMM1, cOff);
                 enc.divsd_rr(x86::XMM0, x86::XMM1);
                 return ThavaType::DOUBLE;

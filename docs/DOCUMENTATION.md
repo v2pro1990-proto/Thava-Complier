@@ -886,7 +886,7 @@ Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section c
    - Emits standalone PE32+ `.exe` executables with `IMAGE_FILE_MACHINE_ARM64` (`0xAA64`) for Windows on ARM (Snapdragon X Elite, Surface Pro ARM).
    - Resolves IAT thunk slots via relative `ADR` + `LDR` + `BLR` to invoke standard Windows C runtime functions (`msvcrt.dll` `printf`, `exit`).
    - AAPCS64 Win64 compliant frame layouts and stack discipline.
-   - Console input works here too: `key.input`, `key.input.lower` and `key.input.upper` read one line with `msvcrt` `scanf(" %1023[^\n]")` and parse it with `_atoi64` / `atof`. String helpers for case conversion, trimming, search, replacement, split and join are shared with Linux ARM64. List and string membership (`in`), `rand()`, `randint()` and unweighted `randres()` are supported. Dictionaries, file I/O and `os.*` / `time.*` remain Linux-ARM64-only and are rejected on this target.
+   - Console input works here too: `key.input`, `key.input.lower` and `key.input.upper` read one line with `msvcrt` `scanf(" %1023[^\n]")` and parse it with `_atoi64` / `atof`. String helpers for case conversion, trimming, search, replacement, split and join are shared with Linux ARM64. List and string membership (`in`), `rand()`, `randint()` and unweighted `randres()` are supported. Dictionaries use the same ARM64 runtime helpers on Linux and Windows. File I/O and `os.*` / `time.*` remain Linux-ARM64-only and are rejected on this target.
 5. **C++17 Transpiler Fallback (Active):**
    - Automatic fallback when complex native C++ template headers are attached via `@cattach`.
 

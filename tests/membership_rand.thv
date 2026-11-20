@@ -17,5 +17,5 @@
 <int> roll = randint(-2, 3)
 <bl> rollRange = roll >= -2 and roll <= 3
 <lst> single = ["only"]
-<str> picked = randres(single)
+<str> picked = <str>randres(single)
 cons.out("@{substring} @{noSubstring} @{number} @{noNumber} @{word} @{noWord} @{sampleRange} @{fixed} @{rollRange} @{picked}")
