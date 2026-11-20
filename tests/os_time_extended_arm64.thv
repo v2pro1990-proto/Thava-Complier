@@ -23,4 +23,9 @@ file.open("listing-arm64/beta.txt", "w") as f {
 <str> wantBeta = "beta.txt"
 <bl> hasAlpha = wantAlpha in names
 <bl> hasBeta = wantBeta in names
-cons.out("@{shape} @{assigned} @{value} @{cleared} [@{empty}] @{invalid} @{names.len()} @{hasAlpha} @{hasBeta} @{missing.len()}")
+<str> first = names[0]
+<bl> indexOK = first == wantAlpha or first == wantBeta
+if false {
+    os.showmessagebox("info", "Thava", "Windows ARM64", "ok")
+}
+cons.out("@{shape} @{assigned} @{value} @{cleared} [@{empty}] @{invalid} @{names.len()} @{hasAlpha} @{hasBeta} @{missing.len()} @{indexOK}")

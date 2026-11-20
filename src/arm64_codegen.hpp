@@ -221,9 +221,15 @@ public:
         enc.add_rri(arm64::SP, arm64::SP, 16);
     }
 
+    static bool isListDir(ASTNode* n) {
+        const auto* os = dynamic_cast<OsMethodNode*>(n);
+        return os && os->method == "listdir";
+    }
+
     // Element type of `base[i]`: known from the list variable's declaration, or
     // inferred from a list literal such as `[1.5, 2.5][i]`.
     ThavaType elemTypeOfIndexedList(ASTNode* base) {
+        if (isListDir(base)) return ThavaType::STRING;
         if (auto v = dynamic_cast<VarNode*>(base)) {
             auto it = listElemTypes.find(v->getName());
             if (it != listElemTypes.end()) return it->second;
@@ -3183,7 +3189,7 @@ public:
                     listElemTypes[vdecl->varName] = lastCollectionElemType;
                 } else if (auto sp = dynamic_cast<StrAdvMethodNode*>(vdecl->initExpr.get())) {
                     if (sp->method == "split") listElemTypes[vdecl->varName] = ThavaType::STRING;
-                } else if (dynamic_cast<FileMethodNode*>(vdecl->initExpr.get())) {
+                } else if (dynamic_cast<FileMethodNode*>(vdecl->initExpr.get()) || isListDir(vdecl->initExpr.get())) {
                     listElemTypes[vdecl->varName] = ThavaType::STRING;
                 } else if (listElemTypes.find(vdecl->varName) == listElemTypes.end()) {
                     listElemTypes[vdecl->varName] = ThavaType::INT;
@@ -3204,6 +3210,7 @@ public:
                     if (t == ThavaType::DOUBLE || t == ThavaType::FLOAT) doubleBitsToInt();
                     narrowIntX0(globalEnv->getCustomType(assign->name));
                 }
+                if (isListDir(assign->expr.get())) listElemTypes[assign->name] = ThavaType::STRING;
                 emitGlobalBase(arm64::X9);
                 enc.str_imm(arm64::X0, arm64::X9, globalVarSlots.at(assign->name));
                 return;
@@ -3215,7 +3222,7 @@ public:
             ThavaType vt = compileExpression(assign->expr.get());
             if (dynamic_cast<CollectionNode*>(assign->expr.get())) {
                 listElemTypes[assign->name] = lastCollectionElemType;
-            } else if (dynamic_cast<FileMethodNode*>(assign->expr.get())) {
+            } else if (dynamic_cast<FileMethodNode*>(assign->expr.get()) || isListDir(assign->expr.get())) {
                 listElemTypes[assign->name] = ThavaType::STRING;
             }
 

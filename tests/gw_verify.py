@@ -20,7 +20,7 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
 
 if run_windows_arm64:
     expected["os_time_arm64"] = "windows true [] true true true true true true 3 -1 true true true true 0"
-    expected["os_time_extended_arm64"] = "true true example true [] false 2 true true 0"
+    expected["os_time_extended_arm64"] = "true true example true [] false 2 true true 0 true"
 
 with tempfile.TemporaryDirectory() as tmp:
     if run_windows_arm64:

@@ -5892,6 +5892,7 @@ ASTPtr parseThavaExpression(const std::string& src) {
 // native backends know whether `list[i]` must be unboxed as int, double or string.
 static ThavaType inferCollectionElemType(ASTNode* expr, std::shared_ptr<Environment> env) {
     if (!expr) return ThavaType::UNKNOWN;
+    if (auto os = dynamic_cast<OsMethodNode*>(expr); os && os->method == "listdir") return ThavaType::STRING;
     if (auto coll = dynamic_cast<CollectionNode*>(expr)) {
         ThavaType found = ThavaType::UNKNOWN;
         for (auto& el : coll->getElements()) {
