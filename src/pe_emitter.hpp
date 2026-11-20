@@ -399,14 +399,16 @@ public:
         uint32_t rdataVirtualSize = (uint32_t)rdataBytes.size();
         uint32_t rdataRawSize     = (uint32_t)alignUp(rdataVirtualSize == 0 ? 1 : rdataVirtualSize, FILE_ALIGN);
 
-        // Reloc section (if isDll)
+        // ARM64 images use ASLR. The emitted code is position-independent, so an
+        // ABSOLUTE-only relocation block suffices when no addresses need fixing.
+        const bool hasRelocations = isDll || isArm64;
         std::vector<uint8_t> relocBytes;
         uint32_t relocRva = 0;
         uint32_t relocVirtualSize = 0;
         uint32_t relocRawSize = 0;
         uint32_t relocRawOffset = 0;
 
-        if (isDll) {
+        if (hasRelocations) {
             appendVal<uint32_t>(relocBytes, textRva); // VirtualAddress = 0x1000
             appendVal<uint32_t>(relocBytes, 12);      // SizeOfBlock = 12
             appendVal<uint16_t>(relocBytes, 0);       // Entry 0: IMAGE_REL_BASED_ABSOLUTE
@@ -419,13 +421,13 @@ public:
         uint32_t headersSize   = FILE_ALIGN; // 0x200 bytes fits DOS + PE + 3 Sections
         uint32_t textRawOffset = headersSize;
         uint32_t rdataRawOffset = textRawOffset + textRawSize;
-        if (isDll) {
+        if (hasRelocations) {
             relocRawOffset = rdataRawOffset + rdataRawSize;
         }
 
         uint32_t sizeOfImage = SEC_ALIGN + alignUp(textVirtualSize == 0 ? 1 : textVirtualSize, SEC_ALIGN)
                                          + alignUp(rdataVirtualSize == 0 ? 1 : rdataVirtualSize, SEC_ALIGN);
-        if (isDll) {
+        if (hasRelocations) {
             sizeOfImage += alignUp(relocVirtualSize == 0 ? 1 : relocVirtualSize, SEC_ALIGN);
         }
 
@@ -451,7 +453,7 @@ public:
         // 3. COFF File Header
         size_t coffOffset = peOffset + 4;
         writeVal<uint16_t>(peFile, coffOffset + 0,  isArm64 ? 0xAA64 : 0x8664);  // ARM64 (0xAA64) vs AMD64 (0x8664)
-        writeVal<uint16_t>(peFile, coffOffset + 2,  isDll ? 3 : 2); // 3 sections (.text, .rdata, .reloc) if DLL
+        writeVal<uint16_t>(peFile, coffOffset + 2,  hasRelocations ? 3 : 2); // .text, .rdata, optional .reloc
         writeVal<uint32_t>(peFile, coffOffset + 4,  0);       // TimeDateStamp
         writeVal<uint32_t>(peFile, coffOffset + 8,  0);       // PointerToSymbolTable
         writeVal<uint32_t>(peFile, coffOffset + 12, 0);       // NumberOfSymbols
@@ -471,18 +473,18 @@ public:
         writeVal<uint64_t>(peFile, optOffset + 24, IMAGE_BASE);// ImageBase
         writeVal<uint32_t>(peFile, optOffset + 32, SEC_ALIGN);// SectionAlignment = 0x1000
         writeVal<uint32_t>(peFile, optOffset + 36, FILE_ALIGN);// FileAlignment = 0x200
-        writeVal<uint16_t>(peFile, optOffset + 40, 6);        // MajorOperatingSystemVersion
+        writeVal<uint16_t>(peFile, optOffset + 40, isArm64 ? 10 : 6);        // MajorOperatingSystemVersion
         writeVal<uint16_t>(peFile, optOffset + 42, 0);        // MinorOperatingSystemVersion
         writeVal<uint16_t>(peFile, optOffset + 44, 0);        // MajorImageVersion
         writeVal<uint16_t>(peFile, optOffset + 46, 0);        // MinorImageVersion
-        writeVal<uint16_t>(peFile, optOffset + 48, 6);        // MajorSubsystemVersion
+        writeVal<uint16_t>(peFile, optOffset + 48, isArm64 ? 10 : 6);        // MajorSubsystemVersion
         writeVal<uint16_t>(peFile, optOffset + 50, 0);        // MinorSubsystemVersion
         writeVal<uint32_t>(peFile, optOffset + 52, 0);        // Win32VersionValue
         writeVal<uint32_t>(peFile, optOffset + 56, sizeOfImage); // SizeOfImage
         writeVal<uint32_t>(peFile, optOffset + 60, headersSize); // SizeOfHeaders
         writeVal<uint32_t>(peFile, optOffset + 64, 0);        // CheckSum
         writeVal<uint16_t>(peFile, optOffset + 68, 3);        // Subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI
-        writeVal<uint16_t>(peFile, optOffset + 70, isDll ? 0x8140 : 0x8100); // DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
+        writeVal<uint16_t>(peFile, optOffset + 70, hasRelocations ? 0x8140 : 0x8100); // DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
         writeVal<uint64_t>(peFile, optOffset + 72, 0x100000); // StackReserve = 1MB
         writeVal<uint64_t>(peFile, optOffset + 80, 0x1000);   // StackCommit = 4KB
         writeVal<uint64_t>(peFile, optOffset + 88, 0x100000); // HeapReserve = 1MB
@@ -500,7 +502,7 @@ public:
         writeVal<uint32_t>(peFile, optOffset + 124, idtSizeCached);
 
         // Entry 5: Base Relocation Table
-        if (isDll) {
+        if (hasRelocations) {
             writeVal<uint32_t>(peFile, optOffset + 152, relocRva);
             writeVal<uint32_t>(peFile, optOffset + 156, relocVirtualSize);
         }
@@ -539,8 +541,8 @@ public:
             writeVal<uint32_t>(peFile, secHdrOffset + 36, 0xC0000040); // INITIALIZED_DATA | READ | WRITE
         }
 
-        // Section 3: .reloc (if isDll)
-        if (isDll) {
+        // Section 3: .reloc
+        if (hasRelocations) {
             secHdrOffset += 40;
             uint8_t name[8] = { '.', 'r', 'e', 'l', 'o', 'c', 0, 0 };
             std::memcpy(&peFile[secHdrOffset + 0], name, 8);
@@ -565,8 +567,8 @@ public:
         appendBytes(peFile, rdataBytes.data(), rdataBytes.size());
         while (peFile.size() < rdataRawOffset + rdataRawSize) peFile.push_back(0);
 
-        // Write .reloc section payload if DLL
-        if (isDll) {
+        // Write .reloc section payload
+        if (hasRelocations) {
             peFile.resize(relocRawOffset);
             appendBytes(peFile, relocBytes.data(), relocBytes.size());
             while (peFile.size() < relocRawOffset + relocRawSize) peFile.push_back(0);
