@@ -58,6 +58,9 @@ jobs:
         run: |
           cl.exe /O2 /std:c++17 /EHsc /utf-8 src\thavac.cpp /Isrc /Fe:thavac-windows-arm64.exe
 
+      - name: Diagnose Windows ARM64 image loading
+        run: python tests/gw_arm_loader_probe.py
+
       - name: Execute global-write fixture on Windows ARM64
         run: python tests/gw_verify.py ./thavac-windows-arm64.exe --run-windows-arm64
 
