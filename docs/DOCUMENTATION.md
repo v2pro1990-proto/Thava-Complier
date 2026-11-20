@@ -882,7 +882,7 @@ Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section c
    - Generates pure 32-bit fixed-width A64 instructions with zero external assembler or linker dependencies.
    - Universal 64KB page alignment (`PAGE_ALIGN = 0x10000`) for seamless execution across all standard Linux distributions, Android kernels, and macOS/Apple Silicon VMs.
 4. **Windows ARM64 (Experimental):**
-   - The global-write fixture (`_t5/gw.thv`) compiles for this target. Its PE machine field has been verified as `0xAA64`. Execution on Windows ARM64 hardware is still pending.
+   - The global-write fixture (`_t5/gw.thv`) compiles for this target. Its PE machine field has been verified as `0xAA64`. GitHub Actions runs this fixture natively on Windows ARM64 at -O0 and -O3 and checks its output.
    - Emits standalone PE32+ `.exe` executables with `IMAGE_FILE_MACHINE_ARM64` (`0xAA64`) for Windows on ARM (Snapdragon X Elite, Surface Pro ARM).
    - Resolves IAT thunk slots via relative `ADR` + `LDR` + `BLR` to invoke standard Windows C runtime functions (`msvcrt.dll` `printf`, `exit`).
    - AAPCS64 Win64 compliant frame layouts and stack discipline.
