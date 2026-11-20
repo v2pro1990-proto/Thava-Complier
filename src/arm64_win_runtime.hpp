@@ -295,6 +295,8 @@ public:
         enc.mov_rr(arm64::FP, arm64::SP);
         enc.sub_rri(arm64::SP, arm64::SP, 16);
 
+        // Windows ARM64 passes variadic floating-point arguments in integer registers.
+        enc.fmov_xd(arm64::X1, arm64::D0);
         enc.adr_data(arm64::X0, offFmtFloat);
         enc.adr_data(arm64::X16, iatPrintf);
         enc.ldr_imm(arm64::X16, arm64::X16, 0);
@@ -312,6 +314,8 @@ public:
         enc.mov_rr(arm64::FP, arm64::SP);
         enc.sub_rri(arm64::SP, arm64::SP, 16);
 
+        // Windows ARM64 passes variadic floating-point arguments in integer registers.
+        enc.fmov_xd(arm64::X1, arm64::D0);
         enc.adr_data(arm64::X0, offFmtFloatNL);
         enc.adr_data(arm64::X16, iatPrintf);
         enc.ldr_imm(arm64::X16, arm64::X16, 0);
