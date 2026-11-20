@@ -495,12 +495,12 @@ public:
         writeVal<uint64_t>(peFile, optOffset + 24, IMAGE_BASE);// ImageBase
         writeVal<uint32_t>(peFile, optOffset + 32, SEC_ALIGN);// SectionAlignment = 0x1000
         writeVal<uint32_t>(peFile, optOffset + 36, FILE_ALIGN);// FileAlignment = 0x200
-        writeVal<uint16_t>(peFile, optOffset + 40, isArm64 ? 10 : 6);        // MajorOperatingSystemVersion
-        writeVal<uint16_t>(peFile, optOffset + 42, 0);        // MinorOperatingSystemVersion
+        writeVal<uint16_t>(peFile, optOffset + 40, 6);        // MajorOperatingSystemVersion
+        writeVal<uint16_t>(peFile, optOffset + 42, isArm64 ? 2 : 0); // MinorOperatingSystemVersion
         writeVal<uint16_t>(peFile, optOffset + 44, 0);        // MajorImageVersion
         writeVal<uint16_t>(peFile, optOffset + 46, 0);        // MinorImageVersion
-        writeVal<uint16_t>(peFile, optOffset + 48, isArm64 ? 10 : 6);        // MajorSubsystemVersion
-        writeVal<uint16_t>(peFile, optOffset + 50, 0);        // MinorSubsystemVersion
+        writeVal<uint16_t>(peFile, optOffset + 48, 6);        // MajorSubsystemVersion
+        writeVal<uint16_t>(peFile, optOffset + 50, isArm64 ? 2 : 0); // MinorSubsystemVersion
         writeVal<uint32_t>(peFile, optOffset + 52, 0);        // Win32VersionValue
         writeVal<uint32_t>(peFile, optOffset + 56, sizeOfImage); // SizeOfImage
         writeVal<uint32_t>(peFile, optOffset + 60, headersSize); // SizeOfHeaders
