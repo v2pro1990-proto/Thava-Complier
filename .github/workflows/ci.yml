@@ -62,9 +62,10 @@ jobs:
         shell: pwsh
         run: |
           ./thavac-windows-arm64.exe tests/gw.thv --target win-arm64 -o gw.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error::ARM64 compiler exited $LASTEXITCODE"; exit 1 }
+          $PSNativeCommandUseErrorActionPreference = $false
           $output = ./gw.exe
-          if ($LASTEXITCODE -ne 0 -or $output -notcontains '4 3 AB new 9') { throw "Unexpected output: $output" }
+          if ($LASTEXITCODE -ne 0 -or $output -notcontains '4 3 AB new 9') { Write-Output "::error::ARM64 program status $LASTEXITCODE output [$output]"; exit 1 }
           $output
 
       - name: Upload Windows ARM64 artifact
