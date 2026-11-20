@@ -52,3 +52,37 @@ with tempfile.TemporaryDirectory() as folder:
         target = folder / (label + '.exe')
         target.write_bytes(variant)
         probe(target)
+
+    (folder / 'reference.c').write_text(
+        'int entry(void) { return 0; }\n', encoding='ascii')
+    subprocess.run(['cl.exe', '/nologo', '/c', 'reference.c'], cwd=folder, check=True)
+    subprocess.run(['link.exe', '/nologo', '/nodefaultlib', '/entry:entry',
+                    '/subsystem:console', '/out:reference.exe', 'reference.obj'],
+                   cwd=folder, check=True)
+    reference = folder / 'reference.exe'
+    probe(reference)
+    for image in (folder / 'no-imports.exe', reference):
+        print(image.name, flush=True)
+        subprocess.run(['dumpbin.exe', '/headers', str(image)], check=True)
+
+    bare = bytearray((folder / 'no-imports.exe').read_bytes())
+    reloc = offset(struct.unpack_from('<I', bare, optional+152)[0])
+    text_raw = sections[0][3]
+    # Put a real absolute image VA in the last aligned word of .text.
+    text_slot = sections[0][2] - 8
+    struct.pack_into('<Q', bare, text_raw+text_slot, struct.unpack_from('<Q', bare, optional+24)[0])
+    struct.pack_into('<I', bare, optional+240+8, sections[0][2])
+    struct.pack_into('<H', bare, reloc+8, 0xa000 | text_slot)
+    probe_path = folder / 'dir64.exe'
+    probe_path.write_bytes(bare)
+    probe(probe_path)
+
+    ref_data = reference.read_bytes()
+    ref_opt = struct.unpack_from('<I', ref_data, 60)[0] + 24
+    for label, field, width in [('dll-characteristics', 70, 2), ('versions', 40, 12),
+                                ('linker-version', 2, 2), ('image-base', 24, 8)]:
+        variant = bytearray(bare)
+        variant[optional+field:optional+field+width] = ref_data[ref_opt+field:ref_opt+field+width]
+        path = folder / (label + '.exe')
+        path.write_bytes(variant)
+        probe(path)
