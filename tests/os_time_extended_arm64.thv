@@ -1,0 +1,26 @@
+<str> date = time.date()
+<str> stamp = time.now()
+<str> clock = time.now("time")
+<str> pattern = "yyyy/mm/dd hh:mm:ss"
+<str> formatted = time.now(pattern)
+<bl> shape = date.len() == 10 and stamp.len() == 19 and clock.len() == 8 and formatted.len() == 19
+<str> key = "THAVA_CI_ARM64_ENV"
+<bl> assigned = os.setenv(key, "example")
+<str> value = os.getenv(key)
+<bl> cleared = os.setenv(key, "")
+<str> empty = os.getenv(key)
+<bl> invalid = os.setenv("NO=KEY", "bad")
+os.mkdir("listing-arm64")
+file.open("listing-arm64/alpha.txt", "w") as f {
+    f.write("a")
+}
+file.open("listing-arm64/beta.txt", "w") as f {
+    f.write("b")
+}
+<lst> names = os.listdir("listing-arm64")
+<lst> missing = os.listdir("no-directory-arm64")
+<str> wantAlpha = "alpha.txt"
+<str> wantBeta = "beta.txt"
+<bl> hasAlpha = wantAlpha in names
+<bl> hasBeta = wantBeta in names
+cons.out("@{shape} @{assigned} @{value} @{cleared} [@{empty}] @{invalid} @{names.len()} @{hasAlpha} @{hasBeta} @{missing.len()}")

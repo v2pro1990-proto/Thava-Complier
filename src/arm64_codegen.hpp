@@ -320,7 +320,7 @@ public:
         static const std::set<std::string> methods = {
             "name", "system", "getpid", "cpu_count", "getcwd", "chdir", "mkdir",
             "rmdir", "remove", "rename", "exists", "is_file", "is_dir", "getsize",
-            "getenv", "sleep"
+            "getenv", "sleep", "listdir", "setenv", "showmessagebox"
         };
         return methods.count(name) != 0;
     }
@@ -341,7 +341,8 @@ public:
         if (auto os = dynamic_cast<OsMethodNode*>(n); os && !hasWindowsOsMethod(os->method))
             return "this os.* method";
         if (auto time = dynamic_cast<TimeMethodNode*>(n); time && time->method != "timestamp" &&
-            time->method != "sleep" && windowsTimeField(time->method) < 0)
+            time->method != "sleep" && time->method != "now" && time->method != "date" &&
+            windowsTimeField(time->method) < 0)
             return "this time.* method";
         return nullptr;
     }
@@ -2394,9 +2395,10 @@ public:
 
     ThavaType emitWindowsOs(OsMethodNode* os) {
         const auto& name = os->method;
-        const size_t required = name == "rename" ? 2 :
+        const size_t required = name == "showmessagebox" ? 4 :
+            (name == "rename" || name == "setenv") ? 2 :
             (name == "name" || name == "sleep" || name == "getpid" ||
-             name == "cpu_count" || name == "getcwd" ? 0 : 1);
+             name == "cpu_count" || name == "getcwd" || name == "listdir" ? 0 : 1);
         if (os->args.size() < required) {
             std::cerr << "[ARM64 Codegen Error]: os." << name << " requires "
                       << required << " argument(s).\n";
@@ -2429,6 +2431,32 @@ public:
             enc.adr_data(arm64::X0, runtime.offEmptyStr);
             enc.bindLabel(found);
             return ThavaType::STRING;
+        }
+        if (name == "listdir") {
+            if (os->args.empty()) enc.adr_data(arm64::X0, runtime.offDot);
+            else compileExpression(os->args[0].get());
+            enc.bl(runtime.lblListDir);
+            return ThavaType::LIST;
+        }
+        if (name == "showmessagebox") {
+            enc.sub_rri(arm64::SP, arm64::SP, 32);
+            for (int i = 0; i < 4; ++i) {
+                const auto type = compileExpression(os->args[i].get());
+                if ((i == 0 || i == 3) && type == ThavaType::STRING)
+                    enc.bl(i == 0 ? runtime.lblMessageIcon : runtime.lblMessageButtons);
+                enc.str_imm(arm64::X0, arm64::SP, i * 8);
+            }
+            enc.movz(arm64::X0, 0, 0);
+            enc.ldr_imm(arm64::X1, arm64::SP, 16); // content
+            enc.ldr_imm(arm64::X2, arm64::SP, 8);  // title
+            enc.ldr_imm(arm64::X3, arm64::SP, 0);
+            enc.ldr_imm(arm64::X9, arm64::SP, 24);
+            enc.orr_rrr(arm64::X3, arm64::X3, arm64::X9);
+            enc.mov_ri64(arm64::X9, 0x40000); // MB_TOPMOST
+            enc.orr_rrr(arm64::X3, arm64::X3, arm64::X9);
+            enc.add_rri(arm64::SP, arm64::SP, 32);
+            emitWindowsImport("MessageBoxA");
+            return ThavaType::INT;
         }
         if (name == "getsize") {
             compileExpression(os->args.at(0).get());
@@ -2476,13 +2504,17 @@ public:
             {"remove", "remove"}, {"rename", "rename"}, {"system", "system"}
         };
         compileExpression(os->args.at(0).get());
-        if (name == "rename") {
+        if (name == "rename" || name == "setenv") {
             enc.sub_rri(arm64::SP, arm64::SP, 16);
             enc.str_imm(arm64::X0, arm64::SP, 0);
             compileExpression(os->args.at(1).get());
             enc.mov_rr(arm64::X1, arm64::X0);
             enc.ldr_imm(arm64::X0, arm64::SP, 0);
             enc.add_rri(arm64::SP, arm64::SP, 16);
+        }
+        if (name == "setenv") {
+            enc.bl(runtime.lblSetEnv);
+            return ThavaType::BOOL;
         }
         emitWindowsImport(crtMethods.at(name));
         if (name == "system") {
@@ -2496,6 +2528,13 @@ public:
     }
 
     ThavaType emitWindowsTime(TimeMethodNode* time) {
+        if (time->method == "date" || time->method == "now") {
+            if (time->args.empty()) enc.movz(arm64::X0, 0, 0);
+            else compileExpression(time->args[0].get());
+            enc.adr_data(arm64::X1, runtime.offTimeDefault[time->method == "date"]);
+            enc.bl(runtime.lblTimeFormat);
+            return ThavaType::STRING;
+        }
         if (time->method == "sleep") {
             emitWindowsSleep(time->args);
         } else if (time->method == "timestamp") {

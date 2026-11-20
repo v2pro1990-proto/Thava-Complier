@@ -63,6 +63,11 @@ public:
     size_t lblInputLine = 0;
     size_t lblAtoi = 0;
     size_t lblAtoD = 0;
+    size_t lblTimeFormat = 0;
+    size_t lblListDir = 0;
+    size_t lblSetEnv = 0;
+    size_t lblMessageIcon = 0;
+    size_t lblMessageButtons = 0;
     size_t lblSeedRand = 0;
     size_t lblRand = 0;
     size_t lblWeightedChoice = 0;
@@ -94,6 +99,13 @@ public:
     uint32_t offWeightMismatch = 0;
     uint32_t offDoubleMaxRand = 0;
 
+    struct TimeToken { int field; uint32_t token; uint32_t format; };
+    std::vector<TimeToken> timeTokens;
+    uint32_t offDirWildcard = 0, offDot = 0, offDotDot = 0, offEquals = 0;
+    std::vector<std::pair<uint32_t, int>> messageIcons, messageButtons;
+    uint32_t offTimeDefault[2]{};
+    uint32_t offTimeAliases[3]{};
+    uint32_t offTimePatterns[3]{};
     std::map<std::string, size_t> osImportLabels;
     bool initialized = false;
 
@@ -132,6 +144,11 @@ public:
         lblInputLine     = enc.createLabel();
         lblAtoi          = enc.createLabel();
         lblAtoD          = enc.createLabel();
+        lblTimeFormat    = enc.createLabel();
+        lblListDir       = enc.createLabel();
+        lblSetEnv        = enc.createLabel();
+        lblMessageIcon   = enc.createLabel();
+        lblMessageButtons = enc.createLabel();
         lblSeedRand      = enc.createLabel();
         lblRand          = enc.createLabel();
         lblWeightedChoice = enc.createLabel();
@@ -159,7 +176,8 @@ public:
 
         for (const char* name : {"GetCurrentProcessId", "Sleep", "GetLocalTime",
                                  "GetFileAttributesA", "GetFileAttributesExA",
-                                 "GetActiveProcessorCount"}) {
+                                 "GetActiveProcessorCount", "FindFirstFileA",
+                                 "FindNextFileA", "FindClose"}) {
             pe.addImport("kernel32.dll", name);
             osImportLabels.emplace(name, enc.createLabel());
         }
@@ -167,6 +185,46 @@ public:
                                  "rename", "getenv", "_getcwd", "time"}) {
             osImportLabels.emplace(name, enc.createLabel());
         }
+
+        osImportLabels.emplace("MessageBoxA", enc.createLabel());
+        pe.addImport("msvcrt.dll", "_putenv");
+        pe.addImport("msvcrt.dll", "_strdup");
+        offDirWildcard = pe.addStringLiteralOffset("\\*");
+        offDot = pe.addStringLiteralOffset(".");
+        offDotDot = pe.addStringLiteralOffset("..");
+        offEquals = pe.addStringLiteralOffset("=");
+        for (const auto& entry : std::initializer_list<std::pair<const char*, int>>{
+                {"warning", 0x30}, {"information", 0x40}, {"infomation", 0x40},
+                {"info", 0x40}, {"question", 0x20}, {"error", 0x10}})
+            messageIcons.emplace_back(pe.addStringLiteralOffset(entry.first), entry.second);
+        for (const auto& entry : std::initializer_list<std::pair<const char*, int>>{
+                {"ok/cancel", 1}, {"okcancel", 1}, {"yes/no/cancel", 3},
+                {"yesnocancel", 3}, {"yes/no", 4}, {"yesno", 4},
+                {"retry/cancel", 5}, {"retrycancel", 5}})
+            messageButtons.emplace_back(pe.addStringLiteralOffset(entry.first), entry.second);
+
+        offTimeDefault[0] = pe.addStringLiteralOffset("%Y-%m-%d %H:%M:%S");
+        offTimeDefault[1] = pe.addStringLiteralOffset("%Y-%m-%d");
+        offTimeAliases[0] = pe.addStringLiteralOffset("datetime");
+        offTimeAliases[1] = pe.addStringLiteralOffset("date");
+        offTimeAliases[2] = pe.addStringLiteralOffset("time");
+        offTimePatterns[0] = offTimeDefault[0];
+        offTimePatterns[1] = offTimeDefault[1];
+        offTimePatterns[2] = pe.addStringLiteralOffset("%H:%M:%S");
+        const auto addTokens = [&](int field, const char* format,
+                                   std::initializer_list<const char*> tokens) {
+            const auto formatOffset = pe.addStringLiteralOffset(format);
+            for (const auto* token : tokens)
+                timeTokens.push_back({field, pe.addStringLiteralOffset(token), formatOffset});
+        };
+        addTokens(0, "%04d", {"%Y", "yyyy", "YYYY"});
+        addTokens(10, ":%02d", {":mm", ":MM"});
+        addTokens(10, "%02d:", {"mm:", "MM:"});
+        addTokens(2, "%02d", {"%m", "mm", "MM"});
+        addTokens(6, "%02d", {"%d", "dd", "DD"});
+        addTokens(8, "%02d", {"%H", "hh", "HH"});
+        addTokens(10, "%02d", {"%M"});
+        addTokens(12, "%02d", {"%S", "ss", "SS"});
 
         offFmtStrNL = pe.addStringLiteralOffset("%s\n");
         offFmtIntNL = pe.addStringLiteralOffset("%lld\n");
@@ -849,6 +907,11 @@ public:
                                   lblPrintStr, lblExit, offWeightMismatch);
         arm64::emitDictFind(enc, lblDictFind, lblStrCmpEq);
         emitFileHelpers();
+        emitTimeFormat();
+        emitListDir();
+        emitSetEnv();
+        emitMessageFlag(lblMessageIcon, messageIcons);
+        emitMessageFlag(lblMessageButtons, messageButtons);
         for (const auto& entry : osImportLabels) {
             enc.bindLabel(entry.second);
             tailCallImport(entry.first.c_str());
@@ -869,6 +932,211 @@ private:
     void tailCallImport(const char* name) {
         loadImportAddress(name);
         enc.br(arm64::X16);
+    }
+
+    void emitListDir() {
+        using namespace arm64;
+        enc.bindLabel(lblListDir);
+        // 336 bytes for WIN32_FIND_DATAA at FP+64, with file names at byte 44.
+        enc.stp_pre(FP, LR, SP, -400);
+        enc.mov_rr(FP, SP);
+        enc.adr_data(X1, offDirWildcard);
+        enc.bl(lblStrConcat);
+        enc.str_imm(X0, FP, 16);
+        enc.add_rri(X1, FP, 64);
+        callCrt("FindFirstFileA");
+        enc.str_imm(X0, FP, 24); // search handle
+        enc.ldr_imm(X0, FP, 16);
+        callCrt("free");
+        enc.movz(X0, 16, 0);
+        enc.bl(lblMalloc);
+        enc.str_imm(X0, FP, 32); // result list
+        enc.movz(X9, 0, 0);
+        enc.str_imm(X9, FP, 40); // count
+        enc.movz(X9, 1, 0);
+        enc.str_imm(X9, FP, 48); // capacity
+        auto loop = enc.createLabel(), next = enc.createLabel();
+        auto store = enc.createLabel(), done = enc.createLabel(), oom = enc.createLabel();
+        enc.ldr_imm(X0, FP, 24);
+        enc.movn(X9, 0, 0);
+        enc.cmp_rr(X0, X9);
+        enc.b_cond(EQ, done);
+
+        enc.bindLabel(loop);
+        for (auto dot : {offDot, offDotDot}) {
+            enc.add_rri(X0, FP, 108);
+            enc.adr_data(X1, dot);
+            enc.bl(lblStrCmpEq);
+            enc.cbnz(X0, next);
+        }
+        enc.add_rri(X0, FP, 108);
+        callCrt("_strdup");
+        enc.cbz(X0, oom);
+        enc.str_imm(X0, FP, 56);
+        enc.ldr_imm(X9, FP, 40);
+        enc.ldr_imm(X1, FP, 48);
+        enc.cmp_rr(X9, X1);
+        enc.b_cond(LT, store);
+        enc.add_rrr(X1, X1, X1);
+        enc.str_imm(X1, FP, 48);
+        enc.add_rri(X1, X1, 1);
+        enc.lsl_ri(X1, X1, 3);
+        enc.ldr_imm(X0, FP, 32);
+        callCrt("realloc");
+        enc.cbz(X0, oom);
+        enc.str_imm(X0, FP, 32);
+        enc.bindLabel(store);
+        enc.ldr_imm(X9, FP, 40);
+        enc.ldr_imm(X10, FP, 32);
+        enc.ldr_imm(X11, FP, 56);
+        enc.lsl_ri(X12, X9, 3);
+        enc.add_rrr(X10, X10, X12);
+        enc.str_imm(X11, X10, 8);
+        enc.add_rri(X9, X9, 1);
+        enc.str_imm(X9, FP, 40);
+
+        enc.bindLabel(next);
+        enc.ldr_imm(X0, FP, 24);
+        enc.add_rri(X1, FP, 64);
+        callCrt("FindNextFileA");
+        enc.cbnz(X0, loop);
+        enc.ldr_imm(X0, FP, 24);
+        callCrt("FindClose");
+
+        enc.bindLabel(done);
+        enc.ldr_imm(X0, FP, 32);
+        enc.ldr_imm(X9, FP, 40);
+        enc.str_imm(X9, X0, 0);
+        enc.ldp_post(FP, LR, SP, 400);
+        enc.ret();
+
+        enc.bindLabel(oom);
+        enc.movz(X0, 1, 0);
+        enc.bl(lblExit);
+    }
+
+    void emitSetEnv() {
+        using namespace arm64;
+        enc.bindLabel(lblSetEnv);
+        enc.stp_pre(FP, LR, SP, -48);
+        enc.mov_rr(FP, SP);
+        enc.str_imm(X0, FP, 16); // key
+        enc.str_imm(X1, FP, 24); // value
+        auto invalid = enc.createLabel(), done = enc.createLabel();
+        enc.ldrb_imm(X9, X0, 0);
+        enc.cbz(X9, invalid);
+        enc.adr_data(X1, offEquals);
+        enc.bl(lblStrFind);
+        enc.cmp_ri(X0, 0);
+        enc.b_cond(GE, invalid);
+
+        enc.ldr_imm(X0, FP, 16);
+        enc.adr_data(X1, offEquals);
+        enc.bl(lblStrConcat);
+        enc.str_imm(X0, FP, 32);
+        enc.ldr_imm(X1, FP, 24);
+        enc.bl(lblStrConcat);
+        enc.str_imm(X0, FP, 40);
+        callCrt("_putenv");
+        enc.cmp_ri(X0, 0);
+        enc.cset(X9, EQ);
+        enc.str_imm(X9, FP, 16);
+        enc.ldr_imm(X0, FP, 40);
+        callCrt("free");
+        enc.ldr_imm(X0, FP, 32);
+        callCrt("free");
+        enc.ldr_imm(X0, FP, 16);
+        enc.b(done);
+        enc.bindLabel(invalid);
+        enc.movz(X0, 0, 0);
+        enc.bindLabel(done);
+        enc.ldp_post(FP, LR, SP, 48);
+        enc.ret();
+    }
+
+    void emitMessageFlag(size_t entry, const std::vector<std::pair<uint32_t, int>>& flags) {
+        using namespace arm64;
+        enc.bindLabel(entry);
+        enc.stp_pre(FP, LR, SP, -32);
+        enc.mov_rr(FP, SP);
+        enc.bl(lblStrLower);
+        enc.str_imm(X0, FP, 16);
+        auto done = enc.createLabel();
+        for (const auto& flag : flags) {
+            enc.ldr_imm(X0, FP, 16);
+            enc.adr_data(X1, flag.first);
+            enc.bl(lblStrCmpEq);
+            auto next = enc.createLabel();
+            enc.cbz(X0, next);
+            enc.movz(X0, flag.second, 0);
+            enc.b(done);
+            enc.bindLabel(next);
+        }
+        enc.movz(X0, 0, 0);
+        enc.bindLabel(done);
+        enc.str_imm(X0, FP, 24);
+        enc.ldr_imm(X0, FP, 16);
+        callCrt("free");
+        enc.ldr_imm(X0, FP, 24);
+        enc.ldp_post(FP, LR, SP, 32);
+        enc.ret();
+    }
+
+    // X0 holds the caller's format and X1 holds the default format.
+    void emitTimeFormat() {
+        using namespace arm64;
+        enc.bindLabel(lblTimeFormat);
+        enc.stp_pre(FP, LR, SP, -80);
+        enc.mov_rr(FP, SP);
+
+        auto defaultFormat = enc.createLabel(), formatReady = enc.createLabel();
+        enc.cbz(X0, defaultFormat);
+        enc.ldrb_imm(X9, X0, 0);
+        enc.cbz(X9, defaultFormat);
+        enc.str_imm(X0, FP, 16);
+        for (size_t i = 0; i < 3; ++i) {
+            enc.ldr_imm(X0, FP, 16);
+            enc.adr_data(X1, offTimeAliases[i]);
+            enc.bl(lblStrCmpEq);
+            auto next = enc.createLabel();
+            enc.cbz(X0, next);
+            enc.adr_data(X0, offTimePatterns[i]);
+            enc.b(formatReady);
+            enc.bindLabel(next);
+        }
+        enc.ldr_imm(X0, FP, 16);
+        enc.b(formatReady);
+        enc.bindLabel(defaultFormat);
+        enc.mov_rr(X0, X1);
+        enc.bindLabel(formatReady);
+        enc.str_imm(X0, FP, 16);
+
+        enc.add_rri(X0, FP, 32);
+        callCrt("GetLocalTime");
+        bool ownsFormat = false;
+        for (const auto& token : timeTokens) {
+            enc.add_rri(X0, FP, 48);
+            enc.adr_data(X1, token.format);
+            enc.ldrb_imm(X2, FP, 32 + token.field);
+            enc.ldrb_imm(X9, FP, 33 + token.field);
+            enc.lsl_ri(X9, X9, 8);
+            enc.orr_rrr(X2, X2, X9);
+            callCrt("sprintf");
+            enc.ldr_imm(X0, FP, 16);
+            enc.adr_data(X1, token.token);
+            enc.add_rri(X2, FP, 48);
+            enc.bl(lblStrReplace);
+            if (ownsFormat) {
+                enc.str_imm(X0, FP, 24);
+                enc.ldr_imm(X0, FP, 16);
+                callCrt("free");
+                enc.ldr_imm(X0, FP, 24);
+            }
+            enc.str_imm(X0, FP, 16);
+            ownsFormat = true;
+        }
+        enc.ldp_post(FP, LR, SP, 80);
+        enc.ret();
     }
 
     // Convert the bits in X0 using the Windows ARM64 variadic calling convention.
