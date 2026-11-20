@@ -2,6 +2,7 @@
 
 #include "pe_emitter.hpp"
 #include "arm64_encoder.hpp"
+#include "arm64_string_helpers.hpp"
 #include <string>
 #include <cstdint>
 
@@ -159,6 +160,7 @@ public:
         offFmtScanLine  = pe.addStringLiteralOffset(" %1023[^\n]");
         offStrListOpen  = pe.addStringLiteralOffset("[");
         offStrListComma = pe.addStringLiteralOffset(", ");
+        offEmptyStr = pe.addStringLiteralOffset("");
         offStrListClose = pe.addStringLiteralOffset("]\n");
     }
 
@@ -779,5 +781,13 @@ public:
             enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 64);
             enc.ret();
         }
+        enc.bindLabel(lblMemCpy);
+        enc.adr_data(arm64::X16, pe.getFuncIatOffsetInRdata("memcpy"));
+        enc.ldr_imm(arm64::X16, arm64::X16, 0);
+        enc.br(arm64::X16);
+
+        arm64::emitCaseConvert(enc, lblStrLower, false, lblStrLen, lblMalloc, offEmptyStr);
+        arm64::emitCaseConvert(enc, lblStrUpper, true, lblStrLen, lblMalloc, offEmptyStr);
+        arm64::emitStrStrip(enc, lblStrStrip, lblStrLen, lblMalloc, lblMemCpy, offEmptyStr);
     }
 };

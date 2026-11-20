@@ -321,8 +321,8 @@ public:
     static const char* linuxOnlyFeature(ASTNode* n) {
         if (dynamic_cast<RandCallNode*>(n))
             return "rand()/randint()/randres()";
-        if (dynamic_cast<StrMethodNode*>(n))
-            return "string methods (upper/lower/title/strip)";
+        if (auto sm = dynamic_cast<StrMethodNode*>(n); sm && sm->method == "title")
+            return "string title";
         if (dynamic_cast<StrAdvMethodNode*>(n))
             return "string methods (find/count/replace/split/join)";
         if (dynamic_cast<StrSplitNode*>(n))

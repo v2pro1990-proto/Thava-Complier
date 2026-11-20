@@ -13,7 +13,7 @@ run_windows_arm64 = "--run-windows-arm64" in sys.argv[2:]
 targets = ("pe", "cpp", "pe-arm64") if windows else ("elf", "arm64")
 if run_windows_arm64:
     targets = ("pe-arm64",)
-expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8"}
+expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][abc-19][Ab C][][][][][AbC-19]"}
 
 with tempfile.TemporaryDirectory() as tmp:
     for target in targets:

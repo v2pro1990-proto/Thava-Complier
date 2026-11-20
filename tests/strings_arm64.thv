@@ -1,0 +1,12 @@
+<str> mixed = "AbC-19"
+<str> padded = " \tAb C\r\n"
+<str> spaces = " \t\r\n"
+<str> empty = ""
+<str> upper = mixed.upper()
+<str> lower = mixed.lower()
+<str> stripped = padded.strip()
+<str> whitespace = spaces.strip()
+<str> emptyUpper = empty.upper()
+<str> emptyLower = empty.lower()
+<str> emptyStrip = empty.strip()
+cons.out("[@{upper}][@{lower}][@{stripped}][@{whitespace}][@{emptyUpper}][@{emptyLower}][@{emptyStrip}][@{mixed}]")
