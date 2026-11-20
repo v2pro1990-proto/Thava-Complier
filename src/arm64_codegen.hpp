@@ -877,6 +877,15 @@ public:
                 return ThavaType::DOUBLE;
             }
 
+            if ((op == "==" || op == "!=") && lt == ThavaType::STRING && rt == ThavaType::STRING) {
+                enc.bl(runtime.lblStrCmpEq);
+                if (op == "!=") {
+                    enc.cmp_ri(arm64::X0, 0);
+                    enc.cset(arm64::X0, arm64::EQ);
+                }
+                return ThavaType::BOOL;
+            }
+
             // String concatenation: <str> + <str>
             if (op == "+" && lt == ThavaType::STRING && rt == ThavaType::STRING) {
                 enc.mov_rr(arm64::X2, arm64::X0); // s2
