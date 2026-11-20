@@ -1,0 +1,9 @@
+<dict> scores = {"a": 1, "b": 2}
+func change() {
+    global <dict> scores
+    scores["b"] = 8
+    scores.del("a")
+}
+change()
+<str> k = "b"
+cons.out("@{scores.len()} @{scores.get(k)}")

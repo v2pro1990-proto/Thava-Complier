@@ -22,6 +22,7 @@ Welcome to the official language specification and technical documentation for *
    - [String Manipulation & Interpolation](#string-manipulation--interpolation)
 5. [Statements & Control Flow](#5-statements--control-flow)
    - [Variable Declarations & Assignments](#variable-declarations--assignments)
+   - [Global Variables](#global-variables)
    - [Branching (`if`, `elif`, `else`)](#branching-if-elif-else)
    - [Loops (`for`, `range`, `while`)](#loops-for-range-while)
    - [Jump Statements (`break`, `continue`)](#jump-statements-break-continue)
@@ -147,6 +148,12 @@ Thava provides explicit type casting using either `<target_type>(expr)` or `<tar
 <str> as_string = <str>(number) # "42"
 ```
 
+Casting a `<dbl>` to `<str>` renders up to six decimal places with trailing zeros (and a bare trailing dot) removed — `0.333333`, `7`, `99.99`, `-3.25`, `1234.5678`, `123456.789` — identically on all three backends. Integer magnitudes print their full digits with no fraction, including values past `int64` range (`1e18`, `1e19`, `1e20` all match byte for byte on every backend):
+```thava
+cons.out(<str>(1.0 / 3.0))   # 0.333333
+cons.out(<str>(2.0 * 3.5))   # 7
+```
+
 ---
 
 ## 4. Expressions & Operators
@@ -167,6 +174,8 @@ Thava provides explicit type casting using either `<target_type>(expr)` or `<tar
 * `bnot` : Bitwise NOT (`bnot a`).
 * `<<`   : Bitwise shift left (`x << 2`).
 * `>>`   : Bitwise shift right (`x >> 2`).
+* `bshl` : Keyword alias of `<<` (`a bshl b`).
+* `bshr` : Keyword alias of `>>` (`a bshr b`).
 
 ### Logical & Comparison Operators
 * `and`, `or`, `not` : Boolean logical conjunction, disjunction, and negation.
@@ -200,6 +209,75 @@ cons.out("Player score is: @{score} points (@{score + 5} next level)")
 <int> x = 100
 x += 25
 x *= 2
+```
+Compound assignment also works on strings, where `+=` concatenates:
+```thava
+<str> greeting = "Hello"
+greeting += ", "
+greeting += name      # "Hello, <name>"
+```
+`+=` on an `<int>`/`<dbl>` accepts a list element (`total += xs[i]`) on every backend, including `--cpp`. Operators that have no meaning on strings (`-=`, `/=`, `%=`) are rejected at compile time.
+
+#### Function-Level Scoping
+Blocks do **not** open a new scope: a variable declared inside `if`, `while` or `for` lives until the end of the enclosing function (or until the end of the program at top level).
+```thava
+func scan() {
+    for <int> i in range(0, 3) {
+        <int> last = i
+    }
+    cons.out(last) # Legal: 2
+}
+```
+
+### Global Variables
+A variable declared at the top level of the program is a **global**. Globals are visible from every function, method and constructor:
+```thava
+<int> counter = 0
+<lst> names = ["ada", "alan"]
+
+<int> func size() -> <int> {
+    return names.len()   # reading a global: supported
+}
+
+class Report {
+    <int> rows;
+    func Report() {
+        locvar.rows = size()
+    }
+    <int> func total() {
+        return counter + locvar.rows   # reading a global from a method
+    }
+}
+```
+
+Reading a global (including `.len()`, indexing `names[i]`, and passing it to a function) works identically on all three backends: native x86-64, native ARM64 and `--cpp`.
+
+To write a global inside a function, method or constructor, declare it in that body before the first write. The type must match the top-level declaration, including integer width. Reading a global needs no declaration. A parameter or local variable with the same name cannot also be declared global in that body.
+
+```thava
+<int> counter = 2
+<lst> names = ["ada"]
+func update() {
+    global <int> counter
+    global <lst> names
+    counter **= 2
+    names[0] = "alan"
+    names.addval("grace")
+}
+update()
+cons.out("@{counter} @{names[0]}")  # 4 alan
+```
+
+The declaration also permits mutation of a global dictionary on backends with dictionary support. For example, after `global <dict> scores`, both `scores["k"] = 1` and `scores.del("k")` update the top-level dictionary. Each called function that writes a global needs its own declaration. Integer globals support `+=`, `-=`, `*=`, `/=`, `%=` and `**=`. Floating-point globals support arithmetic compound assignments except `%=`. Strings support assignment and `+=`. For native global lists, use indexed assignment to replace an element and single-argument `addval(value)` to append.
+
+Top-level code may of course assign globals freely, and a local variable or parameter that shadows a global is assignable as usual:
+```thava
+<int> total = 0
+total = 5              # legal: top-level assignment
+
+func work(<int> total) {
+    total += 1         # legal: the parameter shadows the global
+}
 ```
 
 ### Branching (`if`, `elif`, `else`)
@@ -525,6 +603,28 @@ When loading a Thava dynamic library (`.thdl` or `.so`), the compiler reads embe
 # Functions declared in math_lib are now available with full static typing!
 ```
 
+Import resolution depends on the target:
+
+- **Windows PE x86-64** loads the `.thdl`/`.dll` at run time through the Windows loader (IAT thunks), exactly like before.
+- **`--backend cpp`** keeps its dynamic linking through the host compiler.
+- **Native Linux ELF64 (x86-64 and AArch64)** are zero-libc, so the generated program carries its own loader: at start-up it maps the `.so` with `mmap`, applies the module's relocations, runs its top-level initializer once, and calls the exports through the mapped image. The library is **not** inlined, so — exactly like on Windows — the `.so` has to exist at run time; the executable itself stays a single self-contained file. The `.so` is located by its absolute path at compile time, so the directory you run the executable from does not matter.
+
+The loader first opens the absolute path recorded at compile time and, if that fails (for example a binary built on Windows and run under Linux), retries the plain file name in the current directory.
+
+Several libraries can be attached at once: every attached library gets its own fixed window (`0x10000000`, `0x14000000`, ...) while the executable keeps `0x400000`. Attaching the same library twice is de-duplicated. If a library cannot be mapped the program prints
+```
+[Thava Runtime] cannot load library '/path/to/thava_math.so'
+```
+and exits with status 1. The library must have been produced by a compiler that writes export offsets (`--lib`), because the loader enters an export at `load base + .text offset + function offset`:
+```
+error: dynamic library 'lib/thava_math.so' exports no offsets; rebuild it with --lib using this compiler.
+```
+A library built for another architecture is rejected at compile time, so a stray `thava_math.so` for the wrong target cannot be loaded by accident:
+```
+error: dynamic library 'thava_math.so' was built for 'x86-64-elf', but this target is 'arm64-elf'.
+```
+The same mechanism handles `@attach <lib.thdl>` / `@attach <lib.so>` on those targets.
+
 ### C/C++ Interoperability (`@cattach`, `cfunc`, `c.`)
 To call external C libraries or C++ headers, attach the header and declare signatures with `cfunc`:
 ```thava
@@ -535,6 +635,12 @@ To call external C libraries or C++ headers, attach the header and declare signa
 
 <dbl> val = c.sin(1.57) # Explicit C namespace invocation
 ```
+The `c.` namespace is only assumed when the program does **not** declare its own variable named `c`. If it does, `c.field` and `c.method(...)` are ordinary member access, so a variable called `c` behaves like any other:
+```thava
+<Car> c = Car()
+cons.out("speed = @{c.speed}")
+c.drive(10)
+```
 
 ---
 
@@ -543,12 +649,13 @@ To call external C libraries or C++ headers, attach the header and declare signa
 Thava comes equipped with built-in standard modules that provide essential runtime and operating system capabilities.
 
 ### `cons` (Console I/O)
-* `cons.out(arg1, arg2, ...)`: Formats and writes expressions separated by spaces, terminated with a newline to standard output. Supports string interpolation using `@{expression}` syntax.
+* `cons.out(expr)`: Writes exactly one expression to standard output, followed by a newline. To combine text and values, use one string literal with interpolation (`@{expression}`) — `cons.out` takes a single argument, not a comma-separated list.
+* `cons.clear()`: Clears the terminal screen and moves the cursor to the top-left corner (ANSI `ESC[2J ESC[H`). Takes no arguments and is only valid as a statement.
 
 ```thava
 <str> name = "World"
 <int> count = 42
-cons.out("Hello", name, "Count:", count)
+cons.out("Hello @{name}, count: @{count}")
 cons.out("Interpolated: @{name} has @{count * 2} items")
 ```
 
@@ -642,6 +749,29 @@ Thava variables of string and collection types feature built-in methods with sea
 * `lst.count(<multype> val) -> <int>`: Counts occurrences of `val`.
 * `lst.clear()`: Empties the list.
 
+**Element typing and indexed access.** A list's element type is inferred from its declaration (`<lst> xs = [1, 2]` → `<int>`, `[1.5, 2.5]` → `<dbl>`, `["a"]` → `<str>`), and `xs[i]` evaluates to that type. This holds inside functions and methods, for globals and for lists passed as parameters, on all three backends (native x86-64, native ARM64 and `--cpp`):
+```thava
+<lst> rates = [1.5, 2.5, 3.5]
+<dbl> func rate(<int> i) -> <dbl> {
+    return rates[i]   # 2.5 for i = 1
+}
+```
+A `<lst>`/`<tple>` **parameter** has no declared element type, so it takes the element type of the lists the function, method or constructor is called with. That is what makes `param[i]`, comparisons such as `param[i] > param[j]` and stores such as `param[i] = value` behave like they do at the call site:
+```thava
+func heapify(<lst> arr, <int> n, <int> i) {
+    if arr[i] > arr[0] {
+        <dbl> swap = arr[i]
+        arr[i] = arr[0]
+        arr[0] = swap
+    }
+}
+
+<lst> data = [12.0, -1.5, 9.8]
+heapify(data, 3, 2)   # inside heapify, arr[i] is <dbl>
+```
+Several call sites may pass different lists; the types are merged like list literals merge them — a `<dbl>` list anywhere makes the parameter `<dbl>`, `<str>` wins over `<int>`, otherwise it is `<int>`. A parameter that is never called keeps the old default (`<int>`) so existing programs compile unchanged.
+Indexing a bare literal (`[1.5, 2.5][1]`) works too: the element type is taken from the literal itself, so it behaves the same on every backend.
+
 ### Dictionary Operations (`<dict>`)
 * `d.len() -> <int>`: Returns number of key-value pairs.
 * `d.keys() -> <lst>`: Returns a list containing all keys.
@@ -724,6 +854,16 @@ Usage: thavac <source.thv> [-o <output_binary>] [--arch x86_64|arm64] [--backend
 ### Embedded Binary Metadata Format
 When generating dynamic libraries (`--lib`), `thavac` embeds an internal metadata section bounded by `__THAVA_METADATA_START__` and `__THAVA_METADATA_END__`. When another Thava program links against the library using `@dlattach`, the compiler automatically discovers and types every exported symbol without requiring separate header files or `.meta` companion files.
 
+Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section carries what the zero-libc loaders need to enter the module:
+
+* `machine:<id>` — the target the library was built for (`x86-64-elf`, `arm64-elf`, `x86-64-pe`, `arm64-pe`). Attaching a library of another target is a compile error instead of a crash.
+* `image:0x...` — the base address the library was linked for (`0x400000`).
+* `text:0x...` — image offset of the library's `.text`.
+* `data:0x...` — image offset of its data section.
+* `init:0x...` — offset of the module initializer (its top-level statements), if the library has any.
+* `|off:0x...` on a `func:` line — offset of that export inside `.text`.
+* `reloc:0x...,0x...` — image offsets of the 8-byte absolute words the loader must relocate (the module's internal function-pointer slots). Code itself is position independent: all data references are PC-relative.
+
 ---
 
 ## 13. Target Platforms & ARM64 Architecture
@@ -735,14 +875,18 @@ When generating dynamic libraries (`--lib`), `thavac` embeds an internal metadat
 2. **Linux x86-64 (Active):**
    - Emits standalone ELF64 executables and `.so` shared objects.
    - Program headers, dynamic symbols, PLT/GOT tables, and GNU hash tables are emitted directly.
+   - Produced executables are already marked executable (`chmod +x` is applied automatically), so they can be run straight away.
+   - The zero-libc runtime formats `<dbl>` values itself (up to six decimal places, trailing zeros trimmed), so `<str>(dbl)` and string concatenation of doubles are byte-identical with the other backends.
 3. **Linux AArch64 / ARM64 (Active):**
    - Emits standalone ELF64 executables for 64-bit ARM architecture (`EM_AARCH64` = 183 / 0xB7).
    - Generates pure 32-bit fixed-width A64 instructions with zero external assembler or linker dependencies.
    - Universal 64KB page alignment (`PAGE_ALIGN = 0x10000`) for seamless execution across all standard Linux distributions, Android kernels, and macOS/Apple Silicon VMs.
-4. **Windows ARM64 (Active / Experimental):**
+4. **Windows ARM64 (Experimental):**
+   - The global-write fixture (`_t5/gw.thv`) compiles for this target. Its PE machine field has been verified as `0xAA64`. Execution on Windows ARM64 hardware is still pending.
    - Emits standalone PE32+ `.exe` executables with `IMAGE_FILE_MACHINE_ARM64` (`0xAA64`) for Windows on ARM (Snapdragon X Elite, Surface Pro ARM).
    - Resolves IAT thunk slots via relative `ADR` + `LDR` + `BLR` to invoke standard Windows C runtime functions (`msvcrt.dll` `printf`, `exit`).
    - AAPCS64 Win64 compliant frame layouts and stack discipline.
+   - Console input works here too: `key.input`, `key.input.lower` and `key.input.upper` read one line with `msvcrt` `scanf(" %1023[^\n]")` and parse it with `_atoi64` / `atof`. String methods (`upper/lower/title/strip`, `find`, `replace`, `split`, `join`), `rand()`, dicts and file I/O are still Linux-ARM64-only and are rejected at compile time on this target.
 5. **C++17 Transpiler Fallback (Active):**
    - Automatic fallback when complex native C++ template headers are attached via `@cattach`.
 

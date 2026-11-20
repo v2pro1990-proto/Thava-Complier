@@ -11,19 +11,20 @@
 #include <cctype>
 #include <filesystem>
 #include <unordered_set>
+#include <chrono>
 
 // ==========================================
 // 1. LEXER (Lexical Analysis)
 // ==========================================
 enum class TokenType {
-    TYPE_INT, TYPE_FL, TYPE_DBL, TYPE_BL, TYPE_STR, TYPE_LST, TYPE_TPLE, TYPE_MULTYPE, TYPE_DICT, TYPE_VOID, TYPE_FUNC, TYPE_CUSTOM,
+    TYPE_INT, TYPE_INT64, TYPE_INT16, TYPE_FL, TYPE_DBL, TYPE_BL, TYPE_STR, TYPE_LST, TYPE_TPLE, TYPE_MULTYPE, TYPE_DICT, TYPE_VOID, TYPE_FUNC, TYPE_CUSTOM,
     INT_LIT, FLOAT_LIT, BOOL_LIT, STR_LIT, NONE_LIT, IDENTIFIER,
     ASSIGN, PLUS_ASSIGN, MINUS_ASSIGN, STAR_ASSIGN, SLASH_ASSIGN, MODULO_ASSIGN, POW_ASSIGN,
     PLUS, MINUS, STAR, SLASH, MODULO, FLOOR_DIV, POW,
     EQ, NOT_EQ, AND, OR, NOT, BAND, BOR, BXOR, BNOT, BSHL, BSHR,
     LBRACKET, RBRACKET, LBRACE, RBRACE, LPAREN, RPAREN, DOT,
     COMMA, COLON, LESS, LESS_EQ, GREATER, GREATER_EQ, ARROW,
-    IF, ELIF, ELSE, WHILE, FOR, IN, FUNC, FDFUNC, CFUNC, CLASS, ENUM, STRUCT, LOCVAR, PARVAR, RETURN, BREAK, CONTINUE, CONS_OUT, KEY_INPUT, AS, FILE_OPEN, TRY, EXCEPT, THROW, RAISE_ERROR, INLINE, DEFER, PUBLIC, PRIVATE, PROTECTED, EOF_TOKEN
+    IF, ELIF, ELSE, WHILE, FOR, IN, FUNC, FDFUNC, CFUNC, CLASS, ENUM, STRUCT, LOCVAR, PARVAR, RETURN, BREAK, CONTINUE, CONS_OUT, CONS_CLEAR, KEY_INPUT, AS, FILE_OPEN, TRY, EXCEPT, THROW, RAISE_ERROR, INLINE, DEFER, PUBLIC, PRIVATE, PROTECTED, EOF_TOKEN
 };
 
 struct Token {
@@ -41,6 +42,33 @@ inline bool g_hasTryExcept = false;
 inline bool g_hasDict = false;
 inline std::unordered_set<std::string> g_isCFunc;
 inline std::set<std::string> g_classNames;
+
+// `c.<name>` is the C-interop namespace (see the C/C++ interoperability section).
+// A program may also declare its own variable named `c`; then `c.<name>` must be
+// ordinary member access. Detected once from the token stream and also applied to
+// the snippets parsed for `@{...}` interpolation.
+inline bool g_cNameIsVariable = false;
+
+inline bool detectCNameVariable(const std::vector<Token>& toks) {
+    auto isTypeTok = [](TokenType t) {
+        return t == TokenType::TYPE_INT || t == TokenType::TYPE_INT64 || t == TokenType::TYPE_INT16 ||
+               t == TokenType::TYPE_FL || t == TokenType::TYPE_DBL || t == TokenType::TYPE_BL ||
+               t == TokenType::TYPE_STR || t == TokenType::TYPE_LST || t == TokenType::TYPE_TPLE ||
+               t == TokenType::TYPE_MULTYPE || t == TokenType::TYPE_DICT || t == TokenType::TYPE_FUNC ||
+               t == TokenType::TYPE_CUSTOM;
+    };
+    for (size_t i = 1; i + 1 < toks.size(); ++i) {
+        if (toks[i].type != TokenType::IDENTIFIER || toks[i].lexeme != "c") continue;
+        // `<<type>> c ...` : a builtin type or the closing '>' of a class type.
+        if (!isTypeTok(toks[i - 1].type) && toks[i - 1].type != TokenType::GREATER) continue;
+        // Declarator followed by an initializer, a parameter list or a field list.
+        TokenType nt = toks[i + 1].type;
+        if (nt == TokenType::ASSIGN || nt == TokenType::COMMA || nt == TokenType::RPAREN ||
+            nt == TokenType::IDENTIFIER)
+            return true;
+    }
+    return false;
+}
 
 // ==========================================
 // 1.5. TYPE SYSTEM & DYNAMIC LIBRARIES (Thava Types & Dynamic Libraries)
@@ -105,9 +133,20 @@ struct StructInfo {
 };
 inline std::unordered_map<std::string, StructInfo> g_structs;
 
+// Set when the source uses features the native x86-64 backend cannot emit
+// (classes, try/except) so that backend can fail loudly instead of
+// silently generating a program that ignores them.
+inline bool g_usesNativeUnsupportedFeature = false;
+
+inline std::string cppIntName(const std::string& width) {
+    if (width == "int64") return "long long";
+    if (width == "int16") return "short";
+    return "int"; // <int> is 32-bit by default
+}
+
 inline std::string cppTypeNameFor(ThavaType type, const std::string& customName = "") {
     switch (type) {
-        case ThavaType::INT: return "long long";
+        case ThavaType::INT: return cppIntName(customName);
         case ThavaType::FLOAT: return "float";
         case ThavaType::DOUBLE: return "double";
         case ThavaType::BOOL: return "bool";
@@ -128,11 +167,14 @@ inline std::string cppTypeNameFor(ThavaType type, const std::string& customName 
 
 inline std::string cppParamTypeNameFor(ThavaType type, const std::string& customName = "") {
     switch (type) {
-        case ThavaType::INT: return "long long";
+        case ThavaType::INT: return cppIntName(customName);
         case ThavaType::FLOAT: return "float";
         case ThavaType::DOUBLE: return "double";
         case ThavaType::BOOL: return "bool";
-        case ThavaType::STRING: return "const std::string&";
+        // Strings are passed by value: assigning to a string parameter only
+        // rebinds the local copy (same as the native backends, where a string
+        // is a pointer and reassigning it never mutates the caller's value).
+        case ThavaType::STRING: return "std::string";
         case ThavaType::LIST:
         case ThavaType::MULTYPE: return "std::vector<ThavaValue>&";
         case ThavaType::TUPLE: return "const std::vector<ThavaValue>&";
@@ -166,7 +208,17 @@ inline bool isCompatible(ThavaType dest, ThavaType src) {
 }
 
 inline std::map<std::string, ThavaType> g_funcReturnTypes;
+// Declared integer width of each function's return type: "" = <int> (32-bit),
+// "int64" = <int64>, "int16" = <int16>. Used by the native backends to narrow
+// returned integer values to the declared width.
+inline std::map<std::string, std::string> g_funcReturnWidths;
 inline std::map<std::string, std::vector<ThavaType>> g_funcParamTypes;
+// Element type of each list/tuple parameter, inferred from the call sites that
+// pass a list whose element type is known (see noteListParamElemType). The native
+// backends read this so `param[i]` inside a function is boxed exactly like `arg[i]`
+// at the call site; without it a <lst> parameter fell back to <int> and double
+// elements were read as their raw bit patterns.
+inline std::map<std::string, std::vector<ThavaType>> g_funcListParamElem;
 inline std::map<std::string, size_t> g_funcMinArgs;
 inline std::map<std::string, std::vector<std::vector<Token>>> g_funcDefaultArgTokens;
 
@@ -177,12 +229,54 @@ struct DLFunctionInfo {
     std::vector<std::string> paramNames;
     std::string libPath;
     std::string libBasename;
+    uint32_t libTextRva = 0;   // image offset of the library's .text
+    uint32_t funcOffset = 0;   // offset of the export inside that .text
+    bool hasOffset = false;
 };
 
 inline std::map<std::string, DLFunctionInfo> g_dlFunctions;
 inline std::vector<std::string> g_dlLibraries;
 inline std::set<std::string> g_dlLibrariesSet;
 inline bool g_hasDLAttach = false;
+// Cross-compiling from Windows for a Linux target: prefer the .so over a sibling
+// .thdl/.dll when "@dlattach <name>" has to pick an extension.
+inline bool g_dlPreferSo = false;
+
+// Export table of a dynamic library built by this compiler: the image offset of
+// its .text, the offset of each exported function, the 8-byte absolute words the
+// runtime loader must relocate, and the optional module initializer. The
+// zero-libc backends (ELF64 x86-64 and ELF64 AArch64) map the library themselves
+// instead of relying on a system dynamic linker.
+struct DLLibraryInfo {
+    std::string path;
+    std::string basename;      // fallback the loader tries in the current directory
+    std::string machine;       // "x86-64-elf", "arm64-elf", ... (empty = legacy library)
+    uint64_t imageBase = 0x400000;  // base the library was linked for
+    uint32_t textRva = 0;
+    uint32_t dataRva = 0;
+    uint32_t initOffset = 0;
+    bool hasInit = false;
+    bool hasOffsets = false;
+    std::vector<uint32_t> relocs;   // image offsets of 8-byte absolute words
+};
+
+inline std::map<std::string, DLLibraryInfo> g_dlLibraryInfos;
+
+// Extra zero-filled tail left after each mapped image: it becomes the module's heap,
+// so a library can never hand out addresses that overlap the next window.
+inline constexpr int64_t kDLHeapSlack = 0x30000;
+
+// Every attached library gets its own fixed window; the executable keeps 0x400000.
+inline uint64_t dlLoadBaseForPath(const std::string& path) {
+    static const uint64_t DL_BASE = 0x10000000;
+    static const uint64_t DL_STRIDE = 0x4000000;
+    size_t idx = 0;
+    for (const auto& p : g_dlLibraries) {
+        if (p == path) return DL_BASE + idx * DL_STRIDE;
+        ++idx;
+    }
+    return DL_BASE;
+}
 inline bool g_hasCLib = false;
 inline bool g_isLibraryMode = false;
 inline int g_optLevel = 0;
@@ -261,12 +355,34 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
         std::string lineStr = rawLine.substr(first, last - first + 1);
 
         if (lineStr.empty() || lineStr[0] == '#') continue;
+
+        DLLibraryInfo& libInfo = g_dlLibraryInfos[libPath];
+        if (libInfo.path.empty()) libInfo.path = libPath;
+        if (libInfo.basename.empty()) libInfo.basename = libBasename;
+        if (lineStr.rfind("image:", 0) == 0) { libInfo.imageBase = std::strtoull(lineStr.c_str() + 6, nullptr, 0); continue; }
+        if (lineStr.rfind("text:", 0) == 0)  { libInfo.textRva = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); libInfo.hasOffsets = true; continue; }
+        if (lineStr.rfind("machine:", 0) == 0) { libInfo.machine = lineStr.substr(8); continue; }
+        if (lineStr.rfind("data:", 0) == 0)  { libInfo.dataRva = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); continue; }
+        if (lineStr.rfind("init:", 0) == 0)  { libInfo.initOffset = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); libInfo.hasInit = true; continue; }
+        if (lineStr.rfind("reloc:", 0) == 0) {
+            std::stringstream rStream(lineStr.substr(6));
+            std::string entry;
+            while (std::getline(rStream, entry, ',')) {
+                size_t f = entry.find_first_not_of(" \t");
+                if (f == std::string::npos) continue;
+                libInfo.relocs.push_back((uint32_t)std::strtoul(entry.c_str() + f, nullptr, 0));
+            }
+            continue;
+        }
+
         if (lineStr.rfind("func:", 0) != 0) continue;
 
         std::string fname = "";
         ThavaType retType = ThavaType::VOID;
         std::vector<ThavaType> paramTypes;
         std::vector<std::string> paramNames;
+        uint32_t funcOffset = 0;
+        bool hasOffset = false;
 
         std::stringstream lineStream(lineStr);
         std::string part;
@@ -275,6 +391,9 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
                 fname = part.substr(5);
             } else if (part.rfind("ret:", 0) == 0) {
                 retType = stringToType(part.substr(4));
+            } else if (part.rfind("off:", 0) == 0) {
+                funcOffset = (uint32_t)std::strtoul(part.c_str() + 4, nullptr, 0);
+                hasOffset = true;
             } else if (part.rfind("params:", 0) == 0) {
                 std::string pStr = part.substr(7);
                 if (!pStr.empty()) {
@@ -303,6 +422,9 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
             info.paramNames = paramNames;
             info.libPath = libPath;
             info.libBasename = libBasename;
+            info.libTextRva = g_dlLibraryInfos[libPath].textRva;
+            info.funcOffset = funcOffset;
+            info.hasOffset = hasOffset;
 
             g_dlFunctions[fname] = info;
             g_funcReturnTypes[fname] = retType;
@@ -318,15 +440,21 @@ inline std::string resolveAndLoadDL(const std::string& rawPath, const std::strin
 
     bool hasExt = rawPath.find('.') != std::string::npos;
     if (!hasExt) {
+        if (g_dlPreferSo) {
+            candidates.push_back(rawPath + ".so");
+            candidates.push_back(rawPath + ".thdl");
+            candidates.push_back(rawPath + ".dll");
+        } else {
 #ifdef _WIN32
-        candidates.push_back(rawPath + ".thdl");
-        candidates.push_back(rawPath + ".dll");
-        candidates.push_back(rawPath + ".so");
+            candidates.push_back(rawPath + ".thdl");
+            candidates.push_back(rawPath + ".dll");
+            candidates.push_back(rawPath + ".so");
 #else
-        candidates.push_back(rawPath + ".so");
-        candidates.push_back(rawPath + ".thdl");
-        candidates.push_back(rawPath + ".dll");
+            candidates.push_back(rawPath + ".so");
+            candidates.push_back(rawPath + ".thdl");
+            candidates.push_back(rawPath + ".dll");
 #endif
+        }
     }
 
     std::string foundPath = "";
@@ -557,6 +685,8 @@ public:
                 if (!isAtEnd() && peek() == '>') {
                     advance(); // Skip '>'
                     if (typeStr == "int") tokens.push_back({TokenType::TYPE_INT, "<int>", line});
+                    else if (typeStr == "int64") tokens.push_back({TokenType::TYPE_INT64, "<int64>", line});
+                    else if (typeStr == "int16") tokens.push_back({TokenType::TYPE_INT16, "<int16>", line});
                     else if (typeStr == "fl" || typeStr == "float") tokens.push_back({TokenType::TYPE_FL, "<fl>", line});
                     else if (typeStr == "dbl" || typeStr == "double") tokens.push_back({TokenType::TYPE_DBL, "<dbl>", line});
                     else if (typeStr == "bl" || typeStr == "bool") tokens.push_back({TokenType::TYPE_BL, "<bl>", line});
@@ -638,6 +768,7 @@ public:
                     return false;
                 };
                 if (text == "cons" && tryConsumeLiteral(".out")) text = "cons.out";
+                else if (text == "cons" && tryConsumeLiteral(".clear")) text = "cons.clear";
                 else if (text == "key" && tryConsumeLiteral(".input")) {
                     text = "key.input";
                     if (tryConsumeLiteral(".upper")) text = "key.input.upper";
@@ -708,6 +839,7 @@ public:
                 else if (text == "private") tokens.push_back({TokenType::PRIVATE, text, line});
                 else if (text == "protected") tokens.push_back({TokenType::PROTECTED, text, line});
                 else if (text == "cons.out") tokens.push_back({TokenType::CONS_OUT, text, line});
+                else if (text == "cons.clear") tokens.push_back({TokenType::CONS_CLEAR, text, line});
                 else if (text == "key.input") tokens.push_back({TokenType::KEY_INPUT, text, line});
                 else if (text == "file.open") {
                     tokens.push_back({TokenType::FILE_OPEN, text, line});
@@ -1038,12 +1170,16 @@ inline MemberLookupResult lookupMethod(const std::string& className, const std::
 // ==========================================
 struct Environment {
     std::unordered_map<std::string, ThavaType> variables;
+    std::string functionName;
+    std::unordered_set<std::string> writableGlobals;
+    // Names declared at the top level of the program (true globals).
+    std::map<std::string, bool> globals;
     std::unordered_map<std::string, std::string> customTypes;
     std::string currentClassName = "";
     std::string currentBaseClassName = "";
     std::shared_ptr<Environment> parent;
     
-    Environment(std::shared_ptr<Environment> p = nullptr) : parent(p) {}
+    Environment(std::shared_ptr<Environment> p = nullptr) : functionName(p ? p->functionName : ""), parent(p) {}
     
     bool count(const std::string& name) const {
         if (variables.count(name)) return true;
@@ -1096,6 +1232,188 @@ struct Environment {
 // ==========================================
 // 3. ABSTRACT SYNTAX TREE (AST NODES)
 // ==========================================
+// ============================================================
+// Compiler diagnostics
+// ------------------------------------------------------------
+// Errors are reported as:
+//   error: <message>
+//     --> file.thv:12
+//    12 | <the source line>
+//       |    ^
+//     hint: what to check
+// ============================================================
+namespace diag {
+
+    inline std::string& primaryFile()  { static std::string f; return f; }
+    inline std::vector<std::string>& primaryLines() { static std::vector<std::string> l; return l; }
+    inline int& tokenLine() { static int n = 0; return n; }
+    inline std::string& tokenText() { static std::string t; return t; }
+    inline int& prevTokenLine() { static int n = 0; return n; }
+    inline std::string& prevTokenText() { static std::string t; return t; }
+
+    inline void loadSource(const std::string& path, const std::string& src) {
+        primaryFile() = path;
+        primaryLines().clear();
+        std::string cur;
+        for (char c : src) {
+            if (c == '\n') { primaryLines().push_back(cur); cur.clear(); }
+            else if (c != '\r') cur += c;
+        }
+        if (!cur.empty()) primaryLines().push_back(cur);
+    }
+
+    inline std::string hintFor(const std::string& msg) {
+        auto has = [&](const char* s) { return msg.find(s) != std::string::npos; };
+        if (has("Unterminated string"))
+            return "Close the string literal with a closing quote.";
+        if (has("Missing ')'") || has("Missing closing ')'") || has("Missing ')'"))
+            return "A ')' is missing: count the '(' and ')' of this expression.";
+        if (has("Missing '('"))
+            return "A '(' is missing right after the function or keyword name.";
+        if (has("Missing ']'") || has("Missing closing ']'"))
+            return "A ']' is missing: index syntax is name[index].";
+        if (has("Missing '}'") || has("Expected '}'"))
+            return "A '}' is missing: every '{' block must be closed.";
+        if (has("Expected '{'"))
+            return "The body of if/while/for must start with '{'.";
+        if (has("Missing loop variable"))
+            return "for loops look like: for <int> i = 0; i < n; i = i + 1 { ... }  (or: for i in 0..n { ... })";
+        if (has("not declared") || has("Not declared") || has("undeclared") || has("Undeclared"))
+            return "Declare the name before using it, e.g. <int> x = 0";
+        if (has("Unknown type") || has("unknown type"))
+            return "Valid type tags: <int> <fl> <dbl> <str> <lst> <dict> <bl> <void>";
+        if (has("type") || has("Type"))
+            return "The value type does not match the declared type; use an explicit cast such as <dbl>value or to_int(value).";
+        if (has("Unexpected") || has("unexpected"))
+            return "Check the previous line: a bracket, ')' or keyword is probably missing.";
+        if (has("cons.clear"))
+            return "cons.clear() takes no argument: write cons.clear()";
+        if (has("min") || has("max"))
+            return "min()/max() need exactly two arguments of the same numeric type: min(a, b)";
+        return "";
+    }
+
+    inline void emitErrorLine(const std::string& raw);
+
+    class Streambuf : public std::streambuf {
+        std::string pending;
+    protected:
+        int_type overflow(int_type ch) override {
+            if (ch == traits_type::eof()) return traits_type::not_eof(ch);
+            char c = traits_type::to_char_type(ch);
+            if (c == '\n') { emitErrorLine(pending); pending.clear(); }
+            else pending.push_back(c);
+            return ch;
+        }
+        std::streamsize xsputn(const char* s, std::streamsize n) override {
+            for (std::streamsize i = 0; i < n; ++i) overflow((unsigned char)s[i]);
+            return n;
+        }
+        int sync() override { return 0; }
+    };
+
+    inline void emitErrorLine(const std::string& raw) {
+        if (raw.empty()) return;
+        bool isError = raw.find("Error") != std::string::npos ||
+                       raw.find("error") != std::string::npos;
+        if (!isError) {
+            std::fputs(raw.c_str(), stderr);
+            std::fputc('\n', stderr);
+            return;
+        }
+
+        // Split "Prefix: message" and "[Prefix]: message"
+        std::string prefix = "error";
+        std::string msg = raw;
+        size_t bracket = raw.find("]: ");
+        size_t colon = raw.find(": ");
+        if (bracket != std::string::npos && (colon == std::string::npos || bracket < colon)) {
+            prefix = raw.substr(0, bracket + 1);
+            msg = raw.substr(bracket + 2);
+        } else if (colon != std::string::npos) {
+            prefix = raw.substr(0, colon);
+            msg = raw.substr(colon + 2);
+        }
+
+        // Extract the reported line number
+        int lineNo = 0;
+        size_t where = msg.find("at line ");
+        if (where == std::string::npos) where = msg.find("line ");
+        if (where != std::string::npos) {
+            size_t p = msg.find_first_of("0123456789", where);
+            if (p != std::string::npos) {
+                size_t e = msg.find_first_not_of("0123456789", p);
+                try { lineNo = std::stoi(msg.substr(p, e - p)); } catch (...) { lineNo = 0; }
+            }
+        }
+
+        std::string clean = msg;
+        while (!clean.empty() && (clean.front() == ' ' || clean.front() == '\t')) clean.erase(clean.begin());
+        size_t tail = clean.find(" at line ");
+        if (tail != std::string::npos && lineNo > 0) clean = clean.substr(0, tail);
+        while (!clean.empty() && (clean.back() == '\n' || clean.back() == '\r')) clean.pop_back();
+
+        // A "Missing ..." error points at where parsing stopped; the real culprit is
+        // usually the token before it, so prefer the previous token in that case.
+        std::string caretToken = tokenText();
+        if (lineNo > 0 && prevTokenLine() > 0 && clean.find("Missing") != std::string::npos) {
+            lineNo = prevTokenLine();
+            caretToken = prevTokenText();
+        }
+
+        // Codegen errors carry no line number: locate the quoted identifier from the
+        // message in the source so the user still gets file:line context.
+        if (lineNo == 0 && !primaryLines().empty()) {
+            std::string quoted;
+            size_t q1 = clean.find('\'');
+            if (q1 != std::string::npos) {
+                size_t q2 = clean.find('\'', q1 + 1);
+                if (q2 != std::string::npos && q2 > q1 + 1) quoted = clean.substr(q1 + 1, q2 - q1 - 1);
+            }
+            if (quoted.empty()) {
+                size_t d1 = clean.find('"');
+                if (d1 != std::string::npos) {
+                    size_t d2 = clean.find('"', d1 + 1);
+                    if (d2 != std::string::npos && d2 > d1 + 1) quoted = clean.substr(d1 + 1, d2 - d1 - 1);
+                }
+            }
+            if (!quoted.empty()) {
+                for (size_t i = 0; i < primaryLines().size(); ++i) {
+                    if (primaryLines()[i].find(quoted) != std::string::npos) {
+                        lineNo = (int)i + 1;
+                        caretToken = quoted;
+                        break;
+                    }
+                }
+            }
+        }
+
+        std::string out;
+        out += "error: " + clean + "\n";
+        if (lineNo > 0) {
+            std::string file = primaryFile().empty() ? std::string("<input>") : primaryFile();
+            out += "  --> " + file + ":" + std::to_string(lineNo) + "\n";
+        }
+        if (lineNo > 0 && lineNo <= (int)primaryLines().size()) {
+            const std::string& src = primaryLines()[lineNo - 1];
+            std::string num = std::to_string(lineNo);
+            std::string pad(num.size(), ' ');
+            out += "  " + num + " | " + src + "\n";
+            size_t col = std::string::npos;
+            if (!caretToken.empty()) col = src.find(caretToken);
+            if (col == std::string::npos) col = src.find_first_not_of(" \t");
+            if (col == std::string::npos) col = 0;
+            out += "  " + pad + " | " + std::string(col, ' ') + "^\n";
+        }
+        if (lineNo > 0) {
+            std::string hint = hintFor(clean);
+            if (!hint.empty()) out += "  hint: " + hint + "\n";
+        }
+        out += "\n";
+        std::fputs(out.c_str(), stderr);
+    }
+}
+
 struct ASTNode {
     virtual ~ASTNode() = default;
     virtual std::string generateCode() = 0;
@@ -1141,6 +1459,22 @@ public:
     ThavaType getType(std::shared_ptr<Environment>) override { return type; }
 };
 
+// Names declared at the top level of the program: the C++ backend emits them once
+// at file scope, so they are prefixed to avoid clashing with C library names
+// (log, abs, index, ...) and references are rewritten to match.
+static std::unordered_set<std::string> g_cppTopLevelGlobals;
+// Variables declared in the function/method body currently being generated: a
+// local with the same name as a global shadows it.
+static std::unordered_set<std::string> g_cppCurrentLocals;
+
+static bool cppIsGlobalRef(const std::string& n) {
+    return g_cppTopLevelGlobals.count(n) > 0 && !g_cppCurrentLocals.count(n);
+}
+
+static std::string cppVarRef(const std::string& n) {
+    return cppIsGlobalRef(n) ? "thava_g_" + n : n;
+}
+
 class VarNode : public ASTNode {
     std::string name;
 public:
@@ -1148,7 +1482,7 @@ public:
     const std::string& getName() const { return name; }
     std::string generateCode() override {
         if (g_funcReturnTypes.count(name)) return "thava_func_" + name;
-        return name;
+        return cppVarRef(name);
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
         if (env->count(name)) return env->get(name);
@@ -1374,6 +1708,53 @@ public:
     }
 };
 
+// Thava is function-scoped, so the C++ backend must declare every local at the top
+// of its function instead of inside the block where it appears. Names collected
+// here are emitted by thavaCppBodyCode() and their declaration site becomes an
+// assignment.
+static std::unordered_set<std::string> g_cppHoisted;
+std::string thavaCppBodyCode(const std::vector<ASTPtr>& body, const std::string& indent,
+                             const std::vector<std::pair<ThavaType, std::string>>& params);
+
+// Every top-level variable declaration, with its type, made visible to functions.
+static std::map<std::string, std::pair<ThavaType, std::string>> g_globalVars;
+static std::shared_ptr<Environment> g_programEnv;
+
+// Is this name declared by the local scope chain (parameter/local variable) rather
+// than being one of the program's top-level variables?
+static bool declaredInLocalScope(std::shared_ptr<Environment> env, const std::string& name) {
+    for (auto e = env; e; e = e->parent) {
+        if (g_programEnv && e.get() == g_programEnv.get()) break;
+        if (e->variables.count(name)) return true;
+    }
+    return false;
+}
+
+static bool canWriteGlobal(std::shared_ptr<Environment> env, const std::string& name) {
+    for (auto scope = env; scope && scope != g_programEnv; scope = scope->parent)
+        if (scope->writableGlobals.count(name)) return true;
+    return false;
+}
+
+static void rejectGlobalWrite(std::shared_ptr<Environment> env, const std::string& name,
+                              const std::string& where) {
+    if (where.empty() || !g_globalVars.count(name) || declaredInLocalScope(env, name) ||
+        canWriteGlobal(env, name)) return;
+    std::cerr << "[Static Type Error]: Cannot modify global variable '" << name
+              << "' inside '" << where << "'. Declare global <type> " << name << " first.\n";
+    exit(1);
+}
+
+class GlobalDeclNode : public ASTNode {
+public:
+    ThavaType type;
+    std::string customType, name;
+    GlobalDeclNode(ThavaType t, std::string ct, std::string n)
+        : type(t), customType(std::move(ct)), name(std::move(n)) {}
+    std::string generateCode() override { return ""; }
+    ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::VOID; }
+};
+
 class VarDeclNode : public ASTNode {
 public:
     ThavaType varType;
@@ -1384,10 +1765,34 @@ public:
     VarDeclNode(ThavaType t, std::string n, ASTPtr expr, std::string ct = "") 
         : varType(t), customTypeName(std::move(ct)), varName(std::move(n)), initExpr(std::move(expr)) {}
 
+    std::string cppTypeName() const {
+        switch (varType) {
+            case ThavaType::INT: return cppIntName(customTypeName);
+            case ThavaType::FLOAT: return "float";
+            case ThavaType::DOUBLE: return "double";
+            case ThavaType::BOOL: return "bool";
+            case ThavaType::STRING: return "std::string";
+            case ThavaType::LIST:
+            case ThavaType::TUPLE:
+            case ThavaType::MULTYPE: return "std::vector<ThavaValue>";
+            case ThavaType::DICT: return "ThavaDict";
+            case ThavaType::CUSTOM:
+                if (g_structs.count(customTypeName) || g_enums.count(customTypeName)) {
+                    return customTypeName;
+                }
+                return "thava_class_" + customTypeName;
+            default: return "auto";
+        }
+    }
+
     std::string generateCode() override {
+        if (cppIsGlobalRef(varName) || g_cppHoisted.count(varName)) {
+            if (initExpr) return cppVarRef(varName) + " = " + initExpr->generateCode() + ";";
+            return std::string();
+        }
         std::string cppType;
         switch (varType) {
-            case ThavaType::INT: cppType = "long long"; break;
+            case ThavaType::INT: cppType = cppIntName(customTypeName); break;
             case ThavaType::FLOAT: cppType = "float"; break;
             case ThavaType::DOUBLE: cppType = "double"; break;
             case ThavaType::BOOL: cppType = "bool"; break;
@@ -1424,14 +1829,18 @@ public:
         : name(std::move(n)), expr(std::move(e)), op(std::move(o)) {}
 
     std::string generateCode() override {
-        if (op == "=") return name + " = " + expr->generateCode() + ";";
-        if (op == "+=") return name + " += " + expr->generateCode() + ";";
-        if (op == "-=") return name + " -= " + expr->generateCode() + ";";
-        if (op == "*=") return name + " *= " + expr->generateCode() + ";";
-        if (op == "/=") return name + " = _thava_div(" + name + ", " + expr->generateCode() + ");";
-        if (op == "%=") return name + " = _thava_mod(" + name + ", " + expr->generateCode() + ");";
-        if (op == "**=") return name + " = _thava_pow(" + name + ", " + expr->generateCode() + ");";
-        return name + " " + op + " " + expr->generateCode() + ";";
+        const std::string n = cppVarRef(name);
+        if (op == "=") return n + " = " + expr->generateCode() + ";";
+        // Expanded form: the right-hand side may be a ThavaValue (e.g. a list
+        // element), and both `lhs += rhs` and `lhs = lhs + rhs` need the mixed
+        // ThavaValue/number operators to resolve the element's type.
+        if (op == "+=") return n + " = " + n + " + " + expr->generateCode() + ";";
+        if (op == "-=") return n + " = " + n + " - " + expr->generateCode() + ";";
+        if (op == "*=") return n + " = " + n + " * " + expr->generateCode() + ";";
+        if (op == "/=") return n + " = _thava_div(" + n + ", " + expr->generateCode() + ");";
+        if (op == "%=") return n + " = _thava_mod(" + n + ", " + expr->generateCode() + ");";
+        if (op == "**=") return n + " = _thava_pow(" + n + ", " + expr->generateCode() + ");";
+        return n + " " + op + " " + expr->generateCode() + ";";
     }
     ThavaType getType(std::shared_ptr<Environment>) override {
         return ThavaType::UNKNOWN;
@@ -1696,6 +2105,15 @@ public:
     ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::BOOL; }
 };
 
+class ConsClearNode : public ASTNode {
+public:
+    std::string generateCode() override {
+        return "std::cout << \"\\033[2J\\033[H\" << std::flush;\n";
+    }
+
+    ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::VOID; }
+};
+
 class ConsOutNode : public ASTNode {
     ASTPtr expr;
 public:
@@ -1763,6 +2181,14 @@ public:
     }
 };
 
+// Reads exactly one line from std::cin into the local `_l`.
+// Never leaves std::cin in a failed state (so one bad/blank/EOF read cannot
+// poison every later key.input call), and strips the trailing CR of CRLF input.
+inline std::string thavaCppReadLineStmt() {
+    return "std::string _l; if (!std::getline(std::cin, _l)) { std::cin.clear(); _l.clear(); } "
+           "if (!_l.empty() && _l.back() == '\\r') _l.pop_back(); ";
+}
+
 class InputNode : public ASTNode {
 public:
     ThavaType inputType;
@@ -1771,26 +2197,28 @@ public:
 
     std::string generateCode() override {
         std::string cppType;
-        std::string readCode;
+        std::string convert;
 
         if (inputType == ThavaType::INT) {
             cppType = "long long";
-            readCode = "long long val = 0; std::cin >> val; return val;";
+            convert = "long long val = 0; try { val = (long long)std::stoll(_l); } catch (...) { val = 0; } return val;";
         } else if (inputType == ThavaType::FLOAT) {
             cppType = "float";
-            readCode = "float val = 0.0f; std::cin >> val; return val;";
+            convert = "float val = 0.0f; try { val = (float)std::stod(_l); } catch (...) { val = 0.0f; } return val;";
         } else if (inputType == ThavaType::DOUBLE) {
             cppType = "double";
-            readCode = "double val = 0.0; std::cin >> val; return val;";
+            convert = "double val = 0.0; try { val = std::stod(_l); } catch (...) { val = 0.0; } return val;";
         } else if (inputType == ThavaType::BOOL) {
             cppType = "bool";
-            readCode = "bool val = false; std::cin >> std::boolalpha >> val; return val;";
+            convert = "bool val = (_l == \"true\" || _l == \"True\" || _l == \"TRUE\" || "
+                      "_l == \"1\" || _l == \"yes\"); return val;";
         } else {
             cppType = "std::string";
-            readCode = "std::string val; std::getline(std::cin >> std::ws, val); return val;";
+            convert = "return _l;";
         }
 
-        return "[&]() -> " + cppType + " { std::cout << std::string(\"" + escapeCppString(prompt) + "\"); " + readCode + " }()";
+        return "[&]() -> " + cppType + " { std::cout << std::string(\"" + escapeCppString(prompt) +
+               "\") << std::flush; " + thavaCppReadLineStmt() + convert + " }()";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override {
@@ -1808,7 +2236,7 @@ public:
     std::string generateCode() override {
         std::string helper = "_thava_str_" + mode;
         return helper + "([&]() -> std::string { std::cout << std::string(\"" + escapeCppString(prompt) +
-               "\"); std::string val; std::getline(std::cin >> std::ws, val); return val; }())";
+               "\") << std::flush; " + thavaCppReadLineStmt() + "return _l; }())";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::STRING; }
@@ -1972,6 +2400,7 @@ public:
         : varName(std::move(v)), indexExpr(std::move(i)), valExpr(std::move(val)), op(std::move(o)) {}
 
     std::string generateCode() override {
+        const std::string varName = cppVarRef(this->varName);
         if (op == "=") {
             return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", " + valExpr->generateCode() + ");";
         }
@@ -2233,6 +2662,7 @@ public:
         : varName(std::move(v)), method(std::move(m)), args(std::move(a)) {}
 
     std::string generateCode() override {
+        const std::string varName = cppVarRef(this->varName);
         if (method == "addval") {
             if (args.size() == 1) {
                 return "_thava_list_addval(" + varName + ", " + args[0]->generateCode() + ")";
@@ -2261,7 +2691,13 @@ public:
         exit(1);
     }
 
-    ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::UNKNOWN; }
+    ThavaType getType(std::shared_ptr<Environment> env) override {
+        if (env) {
+            rejectGlobalWrite(env, varName, env->functionName);
+            for (auto& arg : args) arg->getType(env);
+        }
+        return ThavaType::UNKNOWN;
+    }
 };
 
 // AST node for standard os library (OS interaction: Windows / Linux / MessageBox)
@@ -2535,6 +2971,10 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        if (env && (method == "clear" || method == "remove" || method == "del")) {
+            if (auto var = dynamic_cast<VarNode*>(base.get()))
+                rejectGlobalWrite(env, var->getName(), env->functionName);
+        }
         if (base) base->getType(env);
         for (auto& a : args) a->getType(env);
         if (method == "keys" || method == "values" || method == "items") return ThavaType::LIST;
@@ -2581,9 +3021,7 @@ public:
             if (i + 1 < params.size()) code += ", ";
         }
         code += ") {\n";
-        for (auto& stmt : body) {
-            code += "    " + stmt->generateCode() + "\n";
-        }
+        code += thavaCppBodyCode(body, "    ", params);
         // Safe fallback in case function body lacks return in all branches (avoids C++ missing return warning)
         if (returnType != ThavaType::VOID) {
             code += "    " + retTypeStr + " _thava_fallback_ret{};\n";
@@ -2627,6 +3065,8 @@ public:
 };
 
 // AST node for user function or cfunc call
+std::string thavaCppArgCode(const std::string& fname, size_t i, ASTNode* argNode);
+
 class CallNode : public ASTNode {
 public:
     std::string name;
@@ -2658,7 +3098,7 @@ public:
             if (isC) {
                 code += "_thava_c_arg(" + args[i]->generateCode() + ")";
             } else {
-                code += args[i]->generateCode();
+                code += thavaCppArgCode(name, i, args[i].get());
             }
             if (i + 1 < args.size()) code += ", ";
         }
@@ -2689,13 +3129,16 @@ public:
 class CastNode : public ASTNode {
 public:
     ThavaType targetType;
+    std::string customTarget; // "int64" / "int16" for integer widths
     ASTPtr expr;
-    CastNode(ThavaType t, ASTPtr e) : targetType(t), expr(std::move(e)) {}
+    CastNode(ThavaType t, ASTPtr e, std::string ct = "")
+        : targetType(t), customTarget(std::move(ct)), expr(std::move(e)) {}
 
     std::string generateCode() override {
         std::string innerCode = expr->generateCode();
         switch (targetType) {
-            case ThavaType::INT: return "(_thava_to_int(" + innerCode + "))";
+            case ThavaType::INT:
+                return "((" + cppIntName(customTarget) + ")_thava_to_int(" + innerCode + "))";
             case ThavaType::FLOAT: return "(_thava_to_float(" + innerCode + "))";
             case ThavaType::DOUBLE: return "(_thava_to_double(" + innerCode + "))";
             case ThavaType::BOOL: return "(_thava_to_bool(" + innerCode + "))";
@@ -2823,9 +3266,18 @@ public:
         : structName(std::move(name)), args(std::move(a)), line(l) {}
 
     std::string generateCode() override {
+        // C++ brace-initialisation rejects narrowing conversions (e.g. 40000
+        // into a <int16> field), so cast integer arguments to the field width.
+        const StructInfo* si = nullptr;
+        auto sit = g_structs.find(structName);
+        if (sit != g_structs.end()) si = &sit->second;
         std::string code = structName + "{";
         for (size_t i = 0; i < args.size(); ++i) {
-            code += args[i]->generateCode();
+            std::string argCode = args[i]->generateCode();
+            if (si && i < si->fields.size() && si->fields[i].type == ThavaType::INT) {
+                argCode = "static_cast<" + cppIntName(si->fields[i].customType) + ">(" + argCode + ")";
+            }
+            code += argCode;
             if (i + 1 < args.size()) code += ", ";
         }
         code += "}";
@@ -2862,6 +3314,31 @@ public:
         return ThavaType::UNKNOWN;
     }
 };
+
+// A collection argument that is not a plain variable is an rvalue in C++, but the
+// generated parameter is a non-const reference. Bind such values to a reusable
+// thread-local slot so the call still compiles (and the mutation is discarded,
+// exactly like passing a temporary in the native backends).
+static bool thavaIsLvalueArg(ASTNode* n) {
+    if (!n) return false;
+    if (dynamic_cast<VarNode*>(n)) return true;
+    if (dynamic_cast<IndexNode*>(n)) return true;
+    if (dynamic_cast<MemberAccessNode*>(n)) return true;
+    return false;
+}
+
+std::string thavaCppArgCode(const std::string& fname, size_t i, ASTNode* argNode) {
+    std::string argCode = argNode ? argNode->generateCode() : std::string();
+    auto it = g_funcParamTypes.find(fname);
+    if (it != g_funcParamTypes.end() && i < it->second.size()) {
+        ThavaType pt = it->second[i];
+        bool byRef = (pt == ThavaType::LIST || pt == ThavaType::MULTYPE || pt == ThavaType::DICT);
+        if (byRef && !thavaIsLvalueArg(argNode)) {
+            return "_thava_tmp_ref(" + argCode + ")";
+        }
+    }
+    return argCode;
+}
 
 // AST node for member assignment: target.field = expr (e.g. locvar.age = 20)
 class MemberAssignNode : public ASTNode {
@@ -2985,7 +3462,8 @@ public:
         code += "public:\n";
         code += "    virtual ~thava_class_" + className + "() = default;\n";
         code += "    bool _is_none = false;\n";
-        code += "    thava_class_" + className + "(const ThavaNoneType&) : _is_none(true) {}\n";
+        code += "    thava_class_" + className + "(const ThavaNoneType&) : " +
+                (baseClassName.empty() ? "" : "thava_class_" + baseClassName + "(_thava_none), ") + "_is_none(true) {}\n";
         code += "    thava_class_" + className + "& operator=(const ThavaNoneType&) { _is_none = true; return *this;\n}\n";
         code += "    bool operator==(const ThavaNoneType&) const { return _is_none; }\n";
         code += "    bool operator!=(const ThavaNoneType&) const { return !_is_none; }\n";
@@ -3015,7 +3493,7 @@ public:
                 if (f.access != mod) continue;
                 std::string tName;
                 if (f.type == ThavaType::CUSTOM) tName = "thava_class_" + f.customTypeName;
-                else tName = cppTypeNameFor(f.type);
+                else tName = cppTypeNameFor(f.type, f.customTypeName);
                 secCode += "    " + tName + " " + f.name;
                 if (f.initExpr) {
                     secCode += " = " + f.initExpr->generateCode();
@@ -3043,9 +3521,7 @@ public:
                     if (i + 1 < c.params.size()) secCode += ", ";
                 }
                 secCode += ") : _is_none(false) {\n";
-                for (const auto& stmt : c.body) {
-                    secCode += "        " + stmt->generateCode() + "\n";
-                }
+                secCode += thavaCppBodyCode(c.body, "        ", c.params);
                 secCode += "    }\n\n";
 
                 // Method thava_method_init to support parvar.init(...)
@@ -3058,9 +3534,7 @@ public:
                     if (i + 1 < c.params.size()) secCode += ", ";
                 }
                 secCode += ") {\n        this->_is_none = false;\n";
-                for (const auto& stmt : c.body) {
-                    secCode += "        " + stmt->generateCode() + "\n";
-                }
+                secCode += thavaCppBodyCode(c.body, "        ", c.params);
                 secCode += "    }\n\n";
             }
 
@@ -3079,9 +3553,7 @@ public:
                     if (i + 1 < m.params.size()) secCode += ", ";
                 }
                 secCode += ") {\n";
-                for (const auto& stmt : m.body) {
-                    secCode += "        " + stmt->generateCode() + "\n";
-                }
+                secCode += thavaCppBodyCode(m.body, "        ", m.params);
                 if (m.returnType != ThavaType::VOID) {
                     secCode += "        " + retTypeStr + " _thava_fallback_ret{};\n";
                     secCode += "        return _thava_fallback_ret;\n";
@@ -3149,7 +3621,7 @@ public:
                     tName = "thava_class_" + f.customTypeName;
                 }
             } else {
-                tName = cppTypeNameFor(f.type);
+                tName = cppTypeNameFor(f.type, f.customTypeName);
             }
             code += "    " + tName + " " + f.name;
             if (f.initExpr) {
@@ -3243,6 +3715,13 @@ inline void enforceAccess(const std::string& targetClass, const std::string& mem
     }
 }
 
+// Element type of a list/tuple literal or of a list variable, as known by the
+// type checker (defined further down, after the AST nodes it inspects).
+static ThavaType inferCollectionElemType(ASTNode* expr, std::shared_ptr<Environment> env);
+// Record the element type an argument brings for a <lst>/<tple> parameter.
+static void noteListParamElemType(const std::string& fname, size_t idx, ThavaType et);
+static void noteMethodListParamElemType(const std::string& key, size_t idx, ThavaType et);
+
 inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
                       const std::string& currentClassName = "",
                       const std::string& currentBaseClassName = "") {
@@ -3263,6 +3742,15 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
         checkExpr(mc->target.get(), env, currentClassName, currentBaseClassName);
         for (auto& a : mc->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
         std::string targetClass = resolveTargetClass(mc->target.get(), env, currentClassName, currentBaseClassName);
+        if (!targetClass.empty()) {
+            // Key the entry the way the backend emits the body: an inherited method
+            // is emitted under the class that declares it.
+            auto res = lookupMethod(targetClass, mc->methodName);
+            std::string owner = res.found ? res.definedInClass : targetClass;
+            for (size_t i = 0; i < mc->args.size(); ++i)
+                noteMethodListParamElemType(owner + "::" + mc->methodName, i,
+                                            inferCollectionElemType(mc->args[i].get(), env));
+        }
         enforceAccess(targetClass, mc->methodName, true, mc->line, currentClassName);
     }
     else if (auto bin = dynamic_cast<BinaryOpNode*>(expr)) {
@@ -3299,12 +3787,26 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
             checkExpr(p.second.get(), env, currentClassName, currentBaseClassName);
         }
     }
+    else if (auto listMethod = dynamic_cast<ListMethodNode*>(expr)) {
+        listMethod->getType(env);
+        for (auto& arg : listMethod->args) checkExpr(arg.get(), env, currentClassName, currentBaseClassName);
+        if (listMethod->method == "addval" && !listMethod->args.empty() && canWriteGlobal(env, listMethod->varName)) {
+            auto element = listMethod->args.back()->getType(env);
+            if (element != ThavaType::UNKNOWN && g_programEnv->getListElem(listMethod->varName) == ThavaType::UNKNOWN)
+                g_programEnv->defineListElem(listMethod->varName, element);
+        }
+    }
     else if (auto dictM = dynamic_cast<DictMethodNode*>(expr)) {
         checkExpr(dictM->base.get(), env, currentClassName, currentBaseClassName);
         for (auto& a : dictM->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
     }
     else if (auto call = dynamic_cast<CallNode*>(expr)) {
         for (auto& a : call->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
+        // Remember the element type of every list argument, so the callee's
+        // `param[i]` is unboxed as int/double/string and not as raw bits.
+        for (size_t i = 0; i < call->args.size(); ++i)
+            noteListParamElemType(call->name, i,
+                                  inferCollectionElemType(call->args[i].get(), env));
     }
     else if (auto osM = dynamic_cast<OsMethodNode*>(expr)) {
         for (auto& a : osM->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
@@ -3318,6 +3820,9 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
     }
     else if (auto ci = dynamic_cast<ClassInstantiateNode*>(expr)) {
         for (auto& a : ci->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
+        for (size_t i = 0; i < ci->args.size(); ++i)
+            noteMethodListParamElemType(ci->className + "::init", i,
+                                        inferCollectionElemType(ci->args[i].get(), env));
         auto it = g_classInfo.find(ci->className);
         if (it != g_classInfo.end() && !it->second.constructorAccess.empty()) {
             bool hasAccessibleCtor = false;
@@ -3374,6 +3879,8 @@ class Parser {
         if (current >= tokens.size()) {
             return {TokenType::EOF_TOKEN, "", tokens.empty() ? 1 : tokens.back().line};
         }
+        diag::tokenLine() = tokens[current].line;
+        diag::tokenText() = tokens[current].lexeme;
         return tokens[current];
     }
     Token peekAt(size_t offset) const {
@@ -3385,6 +3892,10 @@ class Parser {
     }
     Token advance() {
         if (current < tokens.size()) {
+            diag::tokenLine() = tokens[current].line;
+            diag::tokenText() = tokens[current].lexeme;
+            diag::prevTokenLine() = tokens[current].line;
+            diag::prevTokenText() = tokens[current].lexeme;
             return tokens[current++];
         }
         return {TokenType::EOF_TOKEN, "", tokens.empty() ? 1 : tokens.back().line};
@@ -3428,7 +3939,8 @@ class Parser {
     }
 
     bool isTypeToken(TokenType t) {
-        return t == TokenType::TYPE_INT || t == TokenType::TYPE_FL ||
+        return t == TokenType::TYPE_INT || t == TokenType::TYPE_INT64 || t == TokenType::TYPE_INT16 ||
+               t == TokenType::TYPE_FL ||
                t == TokenType::TYPE_DBL || t == TokenType::TYPE_BL ||
                t == TokenType::TYPE_STR || t == TokenType::TYPE_LST ||
                t == TokenType::TYPE_TPLE || t == TokenType::TYPE_MULTYPE ||
@@ -3438,6 +3950,8 @@ class Parser {
 
     ThavaType parseType(std::string* outCustomName = nullptr) {
         if (match(TokenType::TYPE_INT)) return ThavaType::INT;
+        if (match(TokenType::TYPE_INT64)) { if (outCustomName) *outCustomName = "int64"; return ThavaType::INT; }
+        if (match(TokenType::TYPE_INT16)) { if (outCustomName) *outCustomName = "int16"; return ThavaType::INT; }
         if (match(TokenType::TYPE_FL)) return ThavaType::FLOAT;
         if (match(TokenType::TYPE_DBL)) return ThavaType::DOUBLE;
         if (match(TokenType::TYPE_BL)) return ThavaType::BOOL;
@@ -3480,7 +3994,8 @@ class Parser {
         if (match(TokenType::NONE_LIT)) return std::make_unique<LiteralNode>("none", ThavaType::NONE);
         
         // C namespace syntax: c.<func_name>(...) or c.<const_name>
-        if (check(TokenType::IDENTIFIER) && peek().lexeme == "c" && peekAt(1).type == TokenType::DOT && peekAt(2).type == TokenType::IDENTIFIER) {
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "c" && !g_cNameIsVariable &&
+            peekAt(1).type == TokenType::DOT && peekAt(2).type == TokenType::IDENTIFIER) {
             advance(); // Skip "c"
             advance(); // Skip "."
             std::string cItem = advance().lexeme;
@@ -3572,6 +4087,7 @@ class Parser {
                     std::cerr << "Parser Error: " << name << " only supports <str> type at line " << peek().line << "\n";
                     exit(1);
                 }
+                match(TokenType::COMMA); // docs use key.input.upper(<str>, "prompt")
                 if (!check(TokenType::STR_LIT)) {
                     std::cerr << "Parser Error: " << name << " requires prompt string at line " << peek().line << "\n";
                     exit(1);
@@ -3683,12 +4199,15 @@ class Parser {
 
             ThavaType inputType = ThavaType::UNKNOWN;
             if (match(TokenType::TYPE_INT)) inputType = ThavaType::INT;
+            else if (match(TokenType::TYPE_INT64)) inputType = ThavaType::INT;
+            else if (match(TokenType::TYPE_INT16)) inputType = ThavaType::INT;
             else if (match(TokenType::TYPE_FL)) inputType = ThavaType::FLOAT;
             else if (match(TokenType::TYPE_DBL)) inputType = ThavaType::DOUBLE;
             else if (match(TokenType::TYPE_BL)) inputType = ThavaType::BOOL;
             else if (match(TokenType::TYPE_STR)) inputType = ThavaType::STRING;
             else { std::cerr << "Parser Error: key.input requires type specification <type> at line " << peek().line << "\n"; exit(1); }
 
+            match(TokenType::COMMA); // docs use key.input(<int>, "prompt")
             if (!check(TokenType::STR_LIT)) { std::cerr << "Parser Error: key.input requires prompt string at line " << peek().line << "\n"; exit(1); }
             std::string prompt = advance().lexeme;
 
@@ -4039,9 +4558,10 @@ class Parser {
     ASTPtr unary() {
         // Explicit type cast syntax: <type> expression
         if (isTypeToken(peek().type) && peek().type != TokenType::TYPE_VOID && peek().type != TokenType::TYPE_CUSTOM) {
-            ThavaType targetType = parseType();
+            std::string castWidth;
+            ThavaType targetType = parseType(&castWidth);
             ASTPtr expr = unary();
-            return std::make_unique<CastNode>(targetType, std::move(expr));
+            return std::make_unique<CastNode>(targetType, std::move(expr), castWidth);
         }
         if (check(TokenType::NOT)) {
             advance();
@@ -4290,6 +4810,17 @@ class Parser {
         return std::make_unique<ExpressionStatementNode>(expression());
     }
 
+    ASTPtr consClearStatement() {
+        advance(); // Skip 'cons.clear'
+        if (match(TokenType::LPAREN)) {
+            if (!match(TokenType::RPAREN)) {
+                std::cerr << "Parser Error: cons.clear() does not take any argument at line " << peek().line << "\n";
+                exit(1);
+            }
+        }
+        return std::make_unique<ConsClearNode>();
+    }
+
     ASTPtr consOutStatement() {
         advance(); 
         if (!match(TokenType::LPAREN)) { std::cerr << "Parser Error: Missing '(' in cons.out at line " << peek().line << "\n"; exit(1); }
@@ -4323,6 +4854,8 @@ class Parser {
         ThavaType targetType = ThavaType::UNKNOWN;
         bool hasType = false;
         if (match(TokenType::TYPE_INT)) { targetType = ThavaType::INT; hasType = true; }
+        else if (match(TokenType::TYPE_INT64)) { targetType = ThavaType::INT; hasType = true; }
+        else if (match(TokenType::TYPE_INT16)) { targetType = ThavaType::INT; hasType = true; }
         else if (match(TokenType::TYPE_FL)) { targetType = ThavaType::FLOAT; hasType = true; }
         else if (match(TokenType::TYPE_DBL)) { targetType = ThavaType::DOUBLE; hasType = true; }
         else if (match(TokenType::TYPE_BL)) { targetType = ThavaType::BOOL; hasType = true; }
@@ -4468,6 +5001,7 @@ class Parser {
     }
 
     ASTPtr tryStatement() {
+        g_usesNativeUnsupportedFeature = true;
         advance(); // Skip 'try'
         if (!match(TokenType::LBRACE)) {
             std::cerr << "Parser Error: Expected '{' after 'try' at line " << peek().line << "\n";
@@ -4583,6 +5117,16 @@ class Parser {
     }
 
     ASTPtr statement() {
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "global" && isTypeToken(peekAt(1).type)) {
+            advance();
+            std::string customType;
+            ThavaType type = parseType(&customType);
+            if (!check(TokenType::IDENTIFIER)) {
+                std::cerr << "Parser Error: Expected a name after global type at line " << peek().line << "\n";
+                exit(1);
+            }
+            return std::make_unique<GlobalDeclNode>(type, customType, advance().lexeme);
+        }
         if (check(TokenType::TRY)) return tryStatement();
         if (check(TokenType::THROW)) return throwStatement();
         if (check(TokenType::RAISE_ERROR)) return raiseErrorStatement();
@@ -4614,6 +5158,7 @@ class Parser {
         }
         if (check(TokenType::LBRACE)) return blockStatement();
         if (check(TokenType::CONS_OUT)) return consOutStatement();
+        if (check(TokenType::CONS_CLEAR)) return consClearStatement();
 
         // 0. Syntax starting with 'inline': inline <type> func ... or inline func ...
         if (check(TokenType::INLINE)) {
@@ -5105,6 +5650,7 @@ class Parser {
             }
         }
         g_funcReturnTypes[name] = returnType;
+        if (returnType == ThavaType::INT) g_funcReturnWidths[name] = customReturnType;
         g_funcParamTypes[name] = pTypes;
         g_funcMinArgs[name] = minArgs;
         g_funcDefaultArgTokens[name] = defaultArgTokens;
@@ -5213,6 +5759,7 @@ class Parser {
         for (auto& p : params) pTypes.push_back(p.first);
 
         g_funcReturnTypes[name] = returnType;
+        if (returnType == ThavaType::INT) g_funcReturnWidths[name] = customReturnType;
         g_funcParamTypes[name] = pTypes;
         g_funcMinArgs[name] = minArgs;
         g_funcDefaultArgTokens[name] = defaultArgTokens;
@@ -5304,6 +5851,7 @@ class Parser {
         for (auto& p : params) pTypes.push_back(p.first);
 
         g_funcReturnTypes[name] = returnType;
+        if (returnType == ThavaType::INT) g_funcReturnWidths[name] = "";
         g_funcParamTypes[name] = pTypes;
         g_funcMinArgs[name] = minArgs;
         g_funcDefaultArgTokens[name] = defaultArgTokens;
@@ -5339,17 +5887,98 @@ ASTPtr parseThavaExpression(const std::string& src) {
 // ==========================================
 // 5. STATIC TYPE CHECKER (Type Verification)
 // ==========================================
+// Element type of a list/tuple literal (or of another list variable), recorded so the
+// native backends know whether `list[i]` must be unboxed as int, double or string.
+static ThavaType inferCollectionElemType(ASTNode* expr, std::shared_ptr<Environment> env) {
+    if (!expr) return ThavaType::UNKNOWN;
+    if (auto coll = dynamic_cast<CollectionNode*>(expr)) {
+        ThavaType found = ThavaType::UNKNOWN;
+        for (auto& el : coll->getElements()) {
+            ThavaType t = ThavaType::UNKNOWN;
+            if (auto lit = dynamic_cast<LiteralNode*>(el.get())) {
+                t = lit->getLitType();
+            } else if (auto v = dynamic_cast<VarNode*>(el.get())) {
+                t = env ? env->get(v->getName()) : ThavaType::UNKNOWN;
+            }
+            if (t == ThavaType::FLOAT || t == ThavaType::DOUBLE) return ThavaType::DOUBLE;
+            if (t == ThavaType::STRING) found = ThavaType::STRING;
+            else if (t == ThavaType::INT && found == ThavaType::UNKNOWN) found = ThavaType::INT;
+        }
+        return found;
+    }
+    if (auto v = dynamic_cast<VarNode*>(expr)) {
+        if (env) {
+            ThavaType et = env->getListElem(v->getName());
+            if (et != ThavaType::UNKNOWN) return et;
+        }
+    }
+    return ThavaType::UNKNOWN;
+}
+
+// A <lst> parameter has no element type of its own, so take it from the lists the
+// function is actually called with. Conflicting numeric call sites promote to
+// <dbl> (the same rule list literals use: a double anywhere makes the whole list
+// double), strings win over integers.
+static ThavaType mergeListElemType(ThavaType cur, ThavaType et) {
+    if (cur == ThavaType::UNKNOWN || cur == et) return et;
+    if (cur == ThavaType::DOUBLE || et == ThavaType::DOUBLE) return ThavaType::DOUBLE;
+    if (cur == ThavaType::STRING || et == ThavaType::STRING) return ThavaType::STRING;
+    return ThavaType::INT;
+}
+
+static void noteListParamElemType(const std::string& fname, size_t idx, ThavaType et) {
+    if (et == ThavaType::UNKNOWN || et == ThavaType::NONE) return;
+    auto pit = g_funcParamTypes.find(fname);
+    if (pit == g_funcParamTypes.end()) return;
+    if (idx >= pit->second.size()) return;
+    ThavaType pt = pit->second[idx];
+    if (pt != ThavaType::LIST && pt != ThavaType::TUPLE) return;
+
+    auto& slot = g_funcListParamElem[fname];
+    if (slot.size() < pit->second.size()) slot.resize(pit->second.size(), ThavaType::UNKNOWN);
+    slot[idx] = mergeListElemType(slot[idx], et);
+}
+
+// Same for a class method/constructor. The key is "Class::method" ("Class::init"
+// for a constructor); only collection parameters ever consume the entry, so the
+// argument position does not have to be validated against a signature here.
+static void noteMethodListParamElemType(const std::string& key, size_t idx, ThavaType et) {
+    if (et == ThavaType::UNKNOWN || et == ThavaType::NONE) return;
+    if (key.empty()) return;
+    auto& slot = g_funcListParamElem[key];
+    if (slot.size() <= idx) slot.resize(idx + 1, ThavaType::UNKNOWN);
+    slot[idx] = mergeListElemType(slot[idx], et);
+}
+
 void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
                 ThavaType currentFuncRetType = ThavaType::UNKNOWN,
                 const std::string& currentFuncName = "",
                 const std::string& currentClassName = "",
                 const std::string& currentBaseClassName = "") {
     if (!node) return;
+    if (auto listMethod = dynamic_cast<ListMethodNode*>(node))
+        checkExpr(listMethod, env, currentClassName, currentBaseClassName);
+    if (auto dictMethod = dynamic_cast<DictMethodNode*>(node))
+        dictMethod->getType(env);
     if (dynamic_cast<StructDeclNode*>(node)) return;
     if (dynamic_cast<EnumDeclNode*>(node)) return;
 
+    if (auto decl = dynamic_cast<GlobalDeclNode*>(node)) {
+        auto it = g_globalVars.find(decl->name);
+        if (currentFuncName.empty() || it == g_globalVars.end() || it->second.first != decl->type ||
+            it->second.second != decl->customType || declaredInLocalScope(env, decl->name)) {
+            std::cerr << "[Static Type Error]: Invalid global declaration for '" << decl->name
+                      << "'. Expected a matching top-level variable and no conflicting local.\n";
+            exit(1);
+        }
+        env->writableGlobals.insert(decl->name);
+        return;
+    }
     if (auto varDecl = dynamic_cast<VarDeclNode*>(node)) {
-        if (env->variables.count(varDecl->varName)) {
+        // Top-level variables were pre-registered as globals, so their own
+        // declaration is not a duplicate.
+        if ((canWriteGlobal(env, varDecl->varName) || env->variables.count(varDecl->varName)) &&
+            !(env->globals.count(varDecl->varName) && env.get() == g_programEnv.get())) {
             std::cerr << "[Static Type Error]: Variable '" << varDecl->varName 
                       << "' has already been declared in the same scope!\n";
             exit(1);
@@ -5368,14 +5997,25 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             }
         }
         env->define(varDecl->varName, varDecl->varType, varDecl->customTypeName);
+        if ((varDecl->varType == ThavaType::LIST || varDecl->varType == ThavaType::TUPLE) &&
+            varDecl->initExpr && env->getListElem(varDecl->varName) == ThavaType::UNKNOWN) {
+            ThavaType elemT = inferCollectionElemType(varDecl->initExpr.get(), env);
+            if (elemT != ThavaType::UNKNOWN) env->defineListElem(varDecl->varName, elemT);
+        }
     }
     else if (auto assign = dynamic_cast<AssignNode*>(node)) {
         if (!env->count(assign->name)) {
             std::cerr << "[Static Type Error]: Variable '" << assign->name << "' is not declared before assignment!\n";
             exit(1);
         }
+        rejectGlobalWrite(env, assign->name, currentFuncName);
         if (auto sam = dynamic_cast<StrAdvMethodNode*>(assign->expr.get())) {
             if (sam->method == "split") env->defineListElem(assign->name, ThavaType::STRING);
+        }
+        else if (env->get(assign->name) == ThavaType::LIST || env->get(assign->name) == ThavaType::TUPLE) {
+            // `xs = [...]` may change the element representation (int <-> double <-> string).
+            ThavaType elemT = inferCollectionElemType(assign->expr.get(), env);
+            if (elemT != ThavaType::UNKNOWN) env->defineListElem(assign->name, elemT);
         }
         ThavaType varType = env->get(assign->name);
         ThavaType exprType = assign->expr->getType(env);
@@ -5390,6 +6030,21 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
                 exit(1);
             }
         }
+        // Share the normal expression semantics (including exponentiation and string concatenation)
+        // across all backends, then store through the existing global assignment path.
+        if (assign->op != "=" && canWriteGlobal(env, assign->name)) {
+            if ((varType != ThavaType::INT && varType != ThavaType::FLOAT &&
+                 varType != ThavaType::DOUBLE && !(varType == ThavaType::STRING && assign->op == "+=")) ||
+                (assign->op == "%=" && (varType != ThavaType::INT ||
+                 (exprType != ThavaType::INT && exprType != ThavaType::UNKNOWN)))) {
+                std::cerr << "[Static Type Error]: Unsupported global compound assignment '" << assign->op
+                          << "' for '" << assign->name << "'.\n";
+                exit(1);
+            }
+            assign->expr = std::make_unique<BinaryOpNode>(std::make_unique<VarNode>(assign->name),
+                assign->op.substr(0, assign->op.size() - 1), std::move(assign->expr));
+            assign->op = "=";
+        }
         checkExpr(assign->expr.get(), env, currentClassName, currentBaseClassName);
     }
     else if (auto idxAssign = dynamic_cast<IndexAssignNode*>(node)) {
@@ -5397,13 +6052,16 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             std::cerr << "[Static Type Error]: Variable '" << idxAssign->varName << "' is not declared before index assignment!\n";
             exit(1);
         }
+        rejectGlobalWrite(env, idxAssign->varName, currentFuncName);
         idxAssign->indexExpr->getType(env);
         idxAssign->valExpr->getType(env);
         checkExpr(idxAssign->indexExpr.get(), env, currentClassName, currentBaseClassName);
         checkExpr(idxAssign->valExpr.get(), env, currentClassName, currentBaseClassName);
     }
     else if (auto block = dynamic_cast<BlockNode*>(node)) {
-        auto innerEnv = std::make_shared<Environment>(env);
+        // Thava uses function-level scoping: a declaration inside a block
+        // (if/while/for/try) stays visible until the end of the function.
+        auto innerEnv = env;
         for (const auto& stmt : block->statements) {
             checkTypes(stmt.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
         }
@@ -5430,11 +6088,21 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         checkTypes(whileNode->body.get(), env, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
     }
     else if (auto funcDecl = dynamic_cast<FunctionDeclNode*>(node)) {
-        // Function body has isolated scope: cannot see top-level globals, only its own parameters
-        auto funcEnv = std::make_shared<Environment>(nullptr);
+        // A function sees its own parameters/locals plus the program's globals.
+        auto funcEnv = std::make_shared<Environment>(g_programEnv);
+        funcEnv->functionName = funcDecl->name;
         for (size_t i = 0; i < funcDecl->params.size(); ++i) {
             std::string cType = (i < funcDecl->paramCustomTypes.size()) ? funcDecl->paramCustomTypes[i] : "";
             funcEnv->define(funcDecl->params[i].second, funcDecl->params[i].first, cType);
+            // Give a collection parameter the element type its call sites use, so
+            // `param[i]` is typed (and printed/compared) correctly in this body.
+            if (funcDecl->params[i].first == ThavaType::LIST || funcDecl->params[i].first == ThavaType::TUPLE) {
+                auto eit = g_funcListParamElem.find(funcDecl->name);
+                if (eit != g_funcListParamElem.end() && i < eit->second.size() &&
+                    eit->second[i] != ThavaType::UNKNOWN) {
+                    funcEnv->defineListElem(funcDecl->params[i].second, eit->second[i]);
+                }
+            }
         }
         for (const auto& stmt : funcDecl->body) {
             checkTypes(stmt.get(), funcEnv, funcDecl->returnType, funcDecl->name, "", "");
@@ -5467,7 +6135,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
     }
     else if (auto rangeFor = dynamic_cast<RangeForNode*>(node)) {
-        auto innerEnv = std::make_shared<Environment>(env);
+        // Thava uses function-level scoping: a declaration inside a block
+        // (if/while/for/try) stays visible until the end of the function.
+        auto innerEnv = env;
         ThavaType startT = rangeFor->startExpr->getType(env);
         ThavaType stopT = rangeFor->stopExpr->getType(env);
         ThavaType stepT = rangeFor->stepExpr->getType(env);
@@ -5494,7 +6164,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
     }
     else if (auto forNode = dynamic_cast<ForNode*>(node)) {
         // Counter variable is strictly scoped to the for loop
-        auto innerEnv = std::make_shared<Environment>(env);
+        // Thava uses function-level scoping: a declaration inside a block
+        // (if/while/for/try) stays visible until the end of the function.
+        auto innerEnv = env;
         checkTypes(forNode->init.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
         ThavaType condType = forNode->cond->getType(innerEnv);
         if (condType != ThavaType::BOOL && condType != ThavaType::UNKNOWN) {
@@ -5516,7 +6188,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             exit(1);
         }
         checkExpr(forEach->collectionExpr.get(), env, currentClassName, currentBaseClassName);
-        auto innerEnv = std::make_shared<Environment>(env);
+        // Thava uses function-level scoping: a declaration inside a block
+        // (if/while/for/try) stays visible until the end of the function.
+        auto innerEnv = env;
         ThavaType elemType = forEach->varType;
         if (elemType == ThavaType::UNKNOWN) {
             if (collType == ThavaType::STRING || collType == ThavaType::DICT) elemType = ThavaType::STRING;
@@ -5588,7 +6262,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
         checkExpr(fileBlock->pathExpr.get(), env, currentClassName, currentBaseClassName);
         if (fileBlock->modeExpr) checkExpr(fileBlock->modeExpr.get(), env, currentClassName, currentBaseClassName);
-        auto innerEnv = std::make_shared<Environment>(env);
+        // Thava uses function-level scoping: a declaration inside a block
+        // (if/while/for/try) stays visible until the end of the function.
+        auto innerEnv = env;
         innerEnv->variables[fileBlock->varName] = ThavaType::FILE;
         for (const auto& stmt : fileBlock->body) {
             checkTypes(stmt.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
@@ -5611,12 +6287,12 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         for (auto& a : clibM->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
     }
     else if (auto tryExcept = dynamic_cast<TryExceptNode*>(node)) {
-        auto tryEnv = std::make_shared<Environment>(env);
+        auto tryEnv = env;
         for (const auto& stmt : tryExcept->tryBody) {
             checkTypes(stmt.get(), tryEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
         }
         for (const auto& clause : tryExcept->exceptClauses) {
-            auto excEnv = std::make_shared<Environment>(env);
+            auto excEnv = env;
             if (!clause.varName.empty()) {
                 excEnv->variables[clause.varName] = ThavaType::STRING;
             }
@@ -5669,9 +6345,16 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
 
         for (const auto& c : clsDecl->constructors) {
             auto ctorEnv = std::make_shared<Environment>(classEnv);
+            ctorEnv->functionName = "init";
+            auto ceit = g_funcListParamElem.find(clsDecl->className + "::init");
             for (size_t i = 0; i < c.params.size(); ++i) {
                 std::string cType = (i < c.paramCustomTypes.size()) ? c.paramCustomTypes[i] : "";
                 ctorEnv->define(c.params[i].second, c.params[i].first, cType);
+                if ((c.params[i].first == ThavaType::LIST || c.params[i].first == ThavaType::TUPLE) &&
+                    ceit != g_funcListParamElem.end() && i < ceit->second.size() &&
+                    ceit->second[i] != ThavaType::UNKNOWN) {
+                    ctorEnv->defineListElem(c.params[i].second, ceit->second[i]);
+                }
             }
             for (const auto& stmt : c.body) {
                 checkTypes(stmt.get(), ctorEnv, ThavaType::VOID, "init", clsDecl->className, clsDecl->baseClassName);
@@ -5680,9 +6363,16 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
 
         for (const auto& m : clsDecl->methods) {
             auto methodEnv = std::make_shared<Environment>(classEnv);
+            methodEnv->functionName = m.name;
+            auto meit = g_funcListParamElem.find(clsDecl->className + "::" + m.name);
             for (size_t i = 0; i < m.params.size(); ++i) {
                 std::string cType = (i < m.paramCustomTypes.size()) ? m.paramCustomTypes[i] : "";
                 methodEnv->define(m.params[i].second, m.params[i].first, cType);
+                if ((m.params[i].first == ThavaType::LIST || m.params[i].first == ThavaType::TUPLE) &&
+                    meit != g_funcListParamElem.end() && i < meit->second.size() &&
+                    meit->second[i] != ThavaType::UNKNOWN) {
+                    methodEnv->defineListElem(m.params[i].second, meit->second[i]);
+                }
             }
             for (const auto& stmt : m.body) {
                 checkTypes(stmt.get(), methodEnv, m.returnType, m.name, clsDecl->className, clsDecl->baseClassName);
@@ -5704,7 +6394,103 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
 #include "arm64_runtime.hpp"
 #include "arm64_codegen.hpp" 
 
+// Collect every variable declared anywhere inside a statement tree (blocks included),
+// so the C++ backend can declare them at function scope.
+static void thavaCollectVarDecls(ASTNode* node, std::vector<VarDeclNode*>& out) {
+    if (!node) return;
+    if (auto v = dynamic_cast<VarDeclNode*>(node)) { out.push_back(v); return; }
+    if (auto b = dynamic_cast<BlockNode*>(node)) {
+        for (const auto& s : b->statements) thavaCollectVarDecls(s.get(), out);
+        return;
+    }
+    if (auto i = dynamic_cast<IfNode*>(node)) {
+        thavaCollectVarDecls(i->thenBranch.get(), out);
+        thavaCollectVarDecls(i->elseBranch.get(), out);
+        return;
+    }
+    if (auto w = dynamic_cast<WhileNode*>(node)) { thavaCollectVarDecls(w->body.get(), out); return; }
+    if (auto f = dynamic_cast<ForNode*>(node)) {
+        thavaCollectVarDecls(f->init.get(), out);
+        thavaCollectVarDecls(f->body.get(), out);
+        return;
+    }
+    if (auto r = dynamic_cast<RangeForNode*>(node)) { thavaCollectVarDecls(r->body.get(), out); return; }
+    if (auto fe = dynamic_cast<ForEachNode*>(node)) { thavaCollectVarDecls(fe->body.get(), out); return; }
+    if (auto t = dynamic_cast<TryExceptNode*>(node)) {
+        for (const auto& s : t->tryBody) thavaCollectVarDecls(s.get(), out);
+        for (const auto& c : t->exceptClauses) {
+            for (const auto& s : c.body) thavaCollectVarDecls(s.get(), out);
+        }
+        return;
+    }
+}
+
+// part 0 = globals of built-in types (declared before the class definitions, so
+//          class methods can already refer to them)
+// part 1 = globals holding class/struct values (declared after those definitions)
+std::string thavaCppGlobalDecls(const std::vector<ASTNode*>& body, int part = 0) {
+    std::string code;
+    for (auto* n : body) {
+        auto* vd = dynamic_cast<VarDeclNode*>(n);
+        if (!vd) continue;
+        std::string t = vd->cppTypeName();
+        if (t == "auto") continue;
+        g_cppTopLevelGlobals.insert(vd->varName);
+        bool custom = (vd->varType == ThavaType::CUSTOM);
+        if ((part == 1) != custom) continue;
+        code += t + " thava_g_" + vd->varName + (g_classInfo.count(vd->customTypeName) && vd->initExpr ? "{_thava_none};\n" : "{};\n");
+    }
+    return code;
+}
+
+std::string thavaCppBodyCodePtrs(const std::vector<ASTNode*>& body, const std::string& indent,
+                                 bool keepHoisted = false) {
+    std::vector<VarDeclNode*> decls;
+    for (auto* s : body) thavaCollectVarDecls(s, decls);
+
+    if (!keepHoisted) g_cppHoisted.clear();
+    std::string code;
+    for (auto* d : decls) {
+        // Globals are already declared at file scope; redeclaring them here would
+        // shadow them inside the program body.
+        if (keepHoisted && g_cppTopLevelGlobals.count(d->varName)) continue;
+        std::string t = d->cppTypeName();
+        if (t == "auto") continue; // cannot be used in a hoisted declaration
+        if (!g_cppHoisted.insert(d->varName).second) continue;
+        code += indent + t + " " + d->varName + (g_classInfo.count(d->customTypeName) && d->initExpr ? "{_thava_none};\n" : "{};\n");
+    }
+
+    // Names declared in this body shadow globals of the same name while the body
+    // is generated.
+    auto savedLocals = g_cppCurrentLocals;
+    for (auto* d : decls) {
+        if (keepHoisted && g_cppTopLevelGlobals.count(d->varName)) continue;
+        g_cppCurrentLocals.insert(d->varName);
+    }
+
+    for (auto* s : body) code += indent + s->generateCode() + "\n";
+    g_cppHoisted.clear();
+    g_cppCurrentLocals = savedLocals;
+    return code;
+}
+
+std::string thavaCppBodyCode(const std::vector<ASTPtr>& body, const std::string& indent,
+                             const std::vector<std::pair<ThavaType, std::string>>& params) {
+    auto savedLocals = g_cppCurrentLocals;
+    for (const auto& param : params) g_cppCurrentLocals.insert(param.second);
+    std::vector<ASTNode*> ptrs;
+    ptrs.reserve(body.size());
+    for (const auto& s : body) ptrs.push_back(s.get());
+    auto code = thavaCppBodyCodePtrs(ptrs, indent);
+    g_cppCurrentLocals = std::move(savedLocals);
+    return code;
+}
+
 int main(int argc, char* argv[]) {
+    // Route every compile error through the diagnostic formatter (file:line + source line + hint)
+    static diag::Streambuf diagBuf;
+    std::cerr.rdbuf(&diagBuf);
+
     std::string inputFile = "";
     std::vector<std::string> inputFiles;
     std::string outputFile = "";
@@ -5837,6 +6623,7 @@ int main(int argc, char* argv[]) {
     }
 
     // 1. Initialize global tables & include guard for @attach, @cattach & @dlattach
+    g_dlPreferSo = isElfMode;
     g_attachedFiles.clear();
     g_cAttachedHeaders.clear();
     g_cAttachedSet.clear();
@@ -5852,11 +6639,13 @@ int main(int argc, char* argv[]) {
     g_dlFunctions.clear();
     g_dlLibraries.clear();
     g_dlLibrariesSet.clear();
+    g_dlLibraryInfos.clear();
     g_hasDLAttach = false;
     g_hasCLib = false;
 
     std::vector<Token> tokens;
     int lastLine = 1;
+    bool firstSource = true;
     for (const auto& inFile : inputFiles) {
         std::error_code ec;
         std::string normInput = std::filesystem::weakly_canonical(inFile, ec).string();
@@ -5873,6 +6662,8 @@ int main(int argc, char* argv[]) {
         buffer << file.rdbuf();
         std::string source = buffer.str();
 
+        if (firstSource) { diag::loadSource(inFile, source); firstSource = false; }
+
         g_attachedFiles.insert(normInput);
         Lexer lexer(source, normInput);
         auto fileTokens = lexer.scanTokens();
@@ -5883,6 +6674,10 @@ int main(int argc, char* argv[]) {
         tokens.insert(tokens.end(), fileTokens.begin(), fileTokens.end());
     }
     tokens.push_back({TokenType::EOF_TOKEN, "", lastLine});
+
+    // A program may declare its own variable named `c`; then `c.<name>` is member
+    // access, not the C-interop namespace (also honoured by @{...} snippets).
+    g_cNameIsVariable = detectCNameVariable(tokens);
 
     // Dynamic Library Mode (--lib): fallback to C++ transpiler only when @cattach or explicitCpp is specified
     // By default, native direct machine code emission is used!
@@ -5910,8 +6705,26 @@ int main(int argc, char* argv[]) {
 
     // 3. Static Type Checker (Full scope traversal)
     auto globalEnv = std::make_shared<Environment>();
+    // Top-level variables are globals: they are visible inside every function and
+    // method, so register them all before checking anything (order independent).
+    g_programEnv = globalEnv;
+    g_globalVars.clear();
     for (const auto& stmt : ast) {
-        checkTypes(stmt.get(), globalEnv);
+        if (auto vd = dynamic_cast<VarDeclNode*>(stmt.get())) {
+            globalEnv->define(vd->varName, vd->varType, vd->customTypeName);
+            globalEnv->globals[vd->varName] = true;
+            g_globalVars[vd->varName] = { vd->varType, vd->customTypeName };
+        }
+    }
+    // A collection parameter's element type comes from its call sites, and those
+    // calls may live in later functions, so repeat the traversal until the inferred
+    // types stop changing (each pass propagates one call level further).
+    for (int typePass = 0; typePass < 8; ++typePass) {
+        auto before = g_funcListParamElem;
+        for (const auto& stmt : ast) {
+            checkTypes(stmt.get(), globalEnv);
+        }
+        if (before == g_funcListParamElem) break;
     }
 
     // 3.5. Optimization Pipeline (AST transformations for -O1, -O2, -O3)
@@ -5926,6 +6739,14 @@ int main(int argc, char* argv[]) {
     }
 
     // 4. Code Generation
+    if (!useCppBackend && g_hasDLAttach && isWinArm64Mode) {
+        // Only the Windows ARM64 PE target lacks a module loader: the x86-64 PE
+        // backend uses IAT thunks and the two Linux ELF backends map the library
+        // themselves at run time.
+        std::cerr << "[Thava Compiler] Error: '@dlattach' is not supported by the native "
+                  << "Windows ARM64 backend (it has no module loader); compile with --backend cpp instead.\n";
+        return 1;
+    }
     if (!useCppBackend) {
         if (isArm64Mode) {
             if (isWinArm64Mode) {
@@ -6152,6 +6973,7 @@ int main(int argc, char* argv[]) {
               << "inline std::string _thava_to_string(const std::string& s) { return s; }\n"
               << "inline std::string _thava_to_string(long long v) { return std::to_string(v); }\n"
               << "inline std::string _thava_to_string(int v) { return std::to_string(v); }\n"
+              << "inline std::string _thava_to_string(short v) { return std::to_string((int)v); }\n"
               << "inline std::string _thava_to_string(double v) { std::string s = std::to_string(v); if (s.find('.') != std::string::npos) { while (s.back() == '0') s.pop_back(); if (s.back() == '.') s.pop_back(); } return s; }\n"
               << "inline std::string _thava_to_string(float v) { return _thava_to_string((double)v); }\n"
               << "inline std::string _thava_to_string(bool v) { return v ? \"true\" : \"false\"; }\n\n"
@@ -6187,11 +7009,15 @@ int main(int argc, char* argv[]) {
               << "    ThavaValue(std::vector<ThavaValue> v) : lVal(v), type(5) {}\n"
               << "    ThavaValue(const ThavaDict& d);\n"
               << "    ThavaValue(const ThavaNoneType&);\n\n"
-              << "    // Provide implicit conversion operators to easily convert back to native C++ types\n"
-              << "    operator long long() const { return iVal; }\n"
-              << "    operator double() const { return fVal; }\n"
-              << "    operator float() const { return (float)fVal; }\n"
-              << "    operator bool() const { return bVal; }\n"
+              << "    // Provide implicit conversion operators to easily convert back to native C++ types.\n"
+              << "    // Numeric conversions honour the runtime tag so an int-tagged value is never\n"
+              << "    // read through the double slot (that used to yield 0 for list/dict reads\n"
+              << "    // returned from a function).\n"
+              << "    operator long long() const { return type == 2 ? (long long)fVal : iVal; }\n"
+              << "    operator int() const { return type == 2 ? (int)fVal : (int)iVal; }\n"
+              << "    operator double() const { return type == 1 ? (double)iVal : fVal; }\n"
+              << "    operator float() const { return type == 1 ? (float)iVal : (float)fVal; }\n"
+              << "    operator bool() const { return type == 3 ? bVal : (type == 2 ? (fVal != 0.0) : (iVal != 0)); }\n"
               << "    operator std::string() const { return sVal; }\n"
               << "    operator std::vector<ThavaValue>() const { return lVal; }\n"
               << "    operator ThavaDict() const;\n\n"
@@ -6313,6 +7139,14 @@ int main(int argc, char* argv[]) {
               << "inline std::string _thava_to_string(const ThavaDict& d);\n"
               << "inline std::string _thava_to_string(const ThavaValue& v) { if (v.type == 1) return _thava_to_string(v.iVal); if (v.type == 2) return _thava_to_string(v.fVal); if (v.type == 3) return _thava_to_string(v.bVal); if (v.type == 4) return v.sVal; if (v.type == 6 && v.dVal) return _thava_to_string(*v.dVal); return \"\"; }\n\n"
               << "inline const std::vector<ThavaValue>& _thava_to_iterable(const std::vector<ThavaValue>& v) { return v; }\n"
+              << "template <typename T>\n"
+              << "inline T& _thava_tmp_ref(const T& v) {\n"
+              << "    static thread_local std::vector<T> _thava_pool(8);\n"
+              << "    static thread_local size_t _thava_pool_idx = 0;\n"
+              << "    T& _thava_slot = _thava_pool[_thava_pool_idx++ % _thava_pool.size()];\n"
+              << "    _thava_slot = v;\n"
+              << "    return _thava_slot;\n"
+              << "}\n\n"
               << "inline std::vector<std::string> _thava_to_iterable(const std::string& s) { std::vector<std::string> res; for (char c : s) res.push_back(std::string(1, c)); return res; }\n"
               << "inline std::vector<ThavaValue> _thava_to_iterable(const ThavaDict& d);\n"
               << "inline std::vector<ThavaValue> _thava_to_iterable(const ThavaValue& v) { if (v.type == 5) return v.lVal; if (v.type == 6 && v.dVal) return v.dVal->keys(); if (v.type == 4) { std::vector<ThavaValue> res; for (char c : v.sVal) res.push_back(ThavaValue(std::string(1, c))); return res; } return {}; }\n\n"
@@ -7224,6 +8058,43 @@ int main(int argc, char* argv[]) {
               << "inline bool operator<=(T a, const ThavaValue& b) { return (double)a <= _thava_to_double(b); }\n"
               << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
               << "inline bool operator>=(T a, const ThavaValue& b) { return (double)a >= _thava_to_double(b); }\n\n"
+              << "// Arithmetic between a typed value and a ThavaValue (typically a list/dict element).\n"
+              << "// Without these the built-in candidates (int/float/double/long long) are all reachable\n"
+              << "// through ThavaValue's conversion operators, so `total + xs[i]` was ambiguous.\n"
+              << "// The result keeps the primitive operand's type, so integer math stays integer.\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T _thava_mixed_add(const ThavaValue& a, T b) {\n"
+              << "    if constexpr (std::is_integral<T>::value) {\n"
+              << "        if (a.type == 2) return (T)(a.fVal + (double)b);\n"
+              << "        return (T)(_thava_to_int(a) + (long long)b);\n"
+              << "    } else { return (T)(_thava_to_double(a) + (double)b); }\n"
+              << "}\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T _thava_mixed_sub(const ThavaValue& a, T b) {\n"
+              << "    if constexpr (std::is_integral<T>::value) {\n"
+              << "        if (a.type == 2) return (T)(a.fVal - (double)b);\n"
+              << "        return (T)(_thava_to_int(a) - (long long)b);\n"
+              << "    } else { return (T)(_thava_to_double(a) - (double)b); }\n"
+              << "}\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T _thava_mixed_mul(const ThavaValue& a, T b) {\n"
+              << "    if constexpr (std::is_integral<T>::value) {\n"
+              << "        if (a.type == 2) return (T)(a.fVal * (double)b);\n"
+              << "        return (T)(_thava_to_int(a) * (long long)b);\n"
+              << "    } else { return (T)(_thava_to_double(a) * (double)b); }\n"
+              << "}\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T operator+(const ThavaValue& a, T b) { return _thava_mixed_add(a, b); }\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T operator+(T a, const ThavaValue& b) { return _thava_mixed_add(b, a); }\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T operator-(const ThavaValue& a, T b) { return _thava_mixed_sub(a, b); }\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T operator-(T a, const ThavaValue& b) { return (T)(a - _thava_to_double(b)); }\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T operator*(const ThavaValue& a, T b) { return _thava_mixed_mul(a, b); }\n"
+              << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
+              << "inline T operator*(T a, const ThavaValue& b) { return _thava_mixed_mul(b, a); }\n\n"
               << "inline long long _thava_len(const std::vector<ThavaValue>& vec) { return (long long)vec.size(); }\n"
               << "inline long long _thava_len(const std::string& s) { return (long long)s.size(); }\n"
               << "inline long long _thava_len(const ThavaValue& v) {\n"
@@ -7317,6 +8188,18 @@ int main(int argc, char* argv[]) {
     // Forward declarations are emitted first, followed by function definitions, and finally main() / init.
     // (Thava function names are prefixed with "thava_func_" to avoid colliding with C++ main)
     // (allowing users to define a Thava function named "main" without conflict.)
+    // Top-level variables are real globals: their names are registered first,
+    // because class methods and functions (emitted below, before the declarations)
+    // must already refer to the prefixed names. The declarations themselves are
+    // emitted after the class/struct definitions they may use.
+    std::vector<ASTNode*> topGlobalPtrs;
+    for (const auto& node : ast) {
+        if (dynamic_cast<VarDeclNode*>(node.get())) topGlobalPtrs.push_back(node.get());
+    }
+    std::string cppGlobalDecls = thavaCppGlobalDecls(topGlobalPtrs, 0);
+    std::string cppCustomGlobalDecls = thavaCppGlobalDecls(topGlobalPtrs, 1);
+    cppOutput << cppGlobalDecls;
+
     for (const auto& node : ast) {
         if (auto enumDecl = dynamic_cast<EnumDeclNode*>(node.get())) {
             cppOutput << enumDecl->generateCode() << "\n";
@@ -7337,6 +8220,10 @@ int main(int argc, char* argv[]) {
             cppOutput << clsDecl->generateCode() << "\n";
         }
     }
+    // Class-typed globals need the definitions above; declare them now, before the
+    // functions and main() that use them.
+    cppOutput << cppCustomGlobalDecls;
+
     for (const auto& node : ast) {
         if (auto funcDecl = dynamic_cast<FunctionDeclNode*>(node.get())) {
             cppOutput << funcDecl->generateCode() << "\n";
@@ -7412,7 +8299,8 @@ int main(int argc, char* argv[]) {
 
         cppOutput << "// Module initialization for dynamic library\n"
                   << "static void _thava_module_init() {\n"
-                  << "    try {\n";
+                                     << "    try {\n";
+        std::vector<ASTNode*> topNodes;
         for (const auto& node : ast) {
             if (dynamic_cast<FunctionDeclNode*>(node.get())) continue;
             if (dynamic_cast<ForwardDeclNode*>(node.get())) continue;
@@ -7420,8 +8308,9 @@ int main(int argc, char* argv[]) {
             if (dynamic_cast<ClassDeclNode*>(node.get())) continue;
             if (dynamic_cast<StructDeclNode*>(node.get())) continue;
             if (dynamic_cast<EnumDeclNode*>(node.get())) continue;
-            cppOutput << "        " << node->generateCode() << "\n";
+            topNodes.push_back(node.get());
         }
+        cppOutput << thavaCppBodyCodePtrs(topNodes, "        ", true);
         cppOutput << "    } catch (...) {}\n"
                   << "}\n\n"
                   << "struct _ThavaModuleAutoInit {\n"
@@ -7441,14 +8330,18 @@ int main(int argc, char* argv[]) {
                   << "    std::cout << std::boolalpha;\n"
                   << "    try {\n";
 
-        for (const auto& node : ast) {
-            if (dynamic_cast<FunctionDeclNode*>(node.get())) continue; // Code already emitted above, skip here
-            if (dynamic_cast<ForwardDeclNode*>(node.get())) continue;  // Code already emitted above, skip here
-            if (dynamic_cast<CFuncDeclNode*>(node.get())) continue;    // cfunc declarations do not need emission in main
-            if (dynamic_cast<ClassDeclNode*>(node.get())) continue;    // Class/struct code already emitted above, skip here
-            if (dynamic_cast<StructDeclNode*>(node.get())) continue;
-            if (dynamic_cast<EnumDeclNode*>(node.get())) continue;
-            cppOutput << "        " << node->generateCode() << "\n";
+        {
+            std::vector<ASTNode*> topNodes;
+            for (const auto& node : ast) {
+                if (dynamic_cast<FunctionDeclNode*>(node.get())) continue; // Code already emitted above, skip here
+                if (dynamic_cast<ForwardDeclNode*>(node.get())) continue;  // Code already emitted above, skip here
+                if (dynamic_cast<CFuncDeclNode*>(node.get())) continue;    // cfunc declarations do not need emission in main
+                if (dynamic_cast<ClassDeclNode*>(node.get())) continue;    // Class/struct code already emitted above, skip here
+                if (dynamic_cast<StructDeclNode*>(node.get())) continue;
+                if (dynamic_cast<EnumDeclNode*>(node.get())) continue;
+                topNodes.push_back(node.get());
+            }
+            cppOutput << thavaCppBodyCodePtrs(topNodes, "        ", true); // globals already declared
         }
 
         cppOutput << "    } catch (const ThavaException& _thava_uncaught_e) {\n"
@@ -7471,7 +8364,10 @@ int main(int argc, char* argv[]) {
     }
 
     // 5. MinGW / Linux Compilation
-    std::string tempCppFile = "_thava_temp.cpp";
+    // Unique per run: two compilations in the same directory must not delete each
+    // other's intermediate file.
+    std::string tempCppFile = "_thava_temp_" +
+        std::to_string((unsigned long long)std::chrono::steady_clock::now().time_since_epoch().count()) + ".cpp";
     std::ofstream tempFile(tempCppFile);
     tempFile << cppOutput.str();
     tempFile.close();

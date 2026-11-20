@@ -29,7 +29,15 @@ public:
         int32_t offset;
         ThavaType type;
         std::string customType;
+        // Collection parameters (<lst>/<tple>/<dict>) are passed by reference:
+        // listOutSlot holds the address of the caller's slot for that variable.
+        bool listOut = false;
+        int32_t listOutSlot = 0;
     };
+
+    static bool isCollectionType(ThavaType t) {
+        return t == ThavaType::LIST || t == ThavaType::TUPLE || t == ThavaType::DICT;
+    }
 
     struct FuncInfo {
         size_t labelId;
@@ -43,6 +51,7 @@ public:
     int32_t maxFrameOffset = -32;
     size_t currentFuncRetLabel = 0;
     ThavaType currentFuncRetType = ThavaType::UNKNOWN;
+    std::string currentFuncRetWidth; // "" = int32, "int64", "int16"
 
     // Loop control
     std::vector<size_t> breakLabels;
@@ -53,6 +62,7 @@ public:
     uint32_t offFmtInt = 0;        // "%lld"
     uint32_t offFmtFloatNL = 0;    // "%g\n"
     uint32_t offFmtFloat = 0;      // "%g"
+    uint32_t offFmtFloat6 = 0;     // "%.6f" (double -> string, six decimals)
     uint32_t offFmtStrNL = 0;      // "%s\n"
     uint32_t offFmtStr = 0;        // "%s"
     uint32_t offFmtNL = 0;         // "\n"
@@ -91,6 +101,7 @@ public:
     size_t lblFileReadAll = 0;
     size_t lblFileReadLine = 0;
     size_t lblFileReadLines = 0;
+    size_t lblThrow = 0;
 
     std::map<std::string, ThavaType> listElemTypes;
     ThavaType lastCollectionElemType = ThavaType::UNKNOWN;
@@ -99,6 +110,53 @@ public:
     std::map<ASTNode*, int32_t> deferNodeToFlagSlot;
 
     void setOptLevel(int level) { optLevel = level; }
+
+    // Truncates a 64-bit value in `r` to the declared integer width and
+    // sign-extends it back: <int> = 32-bit, <int16> = 16-bit, <int64> = 64-bit.
+    void narrowIntReg(x86::Reg r, const std::string& width) {
+        if (width == "int64") return;
+        uint8_t bits = (width == "int16") ? 16 : 32;
+        // Shift the whole 64-bit register so the sign bit of the target width
+        // lands in bit 63, then shift back to sign-extend.
+        enc.shl_ri(r, 64 - bits);
+        enc.sar_ri(r, 64 - bits);
+    }
+
+    // Top-level variables (globals) live in the program frame. A data cell holds
+    // that frame pointer so functions and methods can reach them.
+    uint32_t globalBaseCell = 0;
+    std::map<std::string, int32_t> globalVarSlots;
+    bool emittingProgramBody = false;
+
+    void loadCollectionPtr(const std::string& name, VarInfo* local, x86::Reg dst) {
+        if (local) enc.mov_rm_rbp(dst, local->offset);
+        else {
+            emitGlobalBase(dst, globalVarSlots.at(name));
+            enc.mov_rm(dst, dst, 0);
+        }
+    }
+
+    bool isGlobalName(const std::string& name) const {
+        return globalVarSlots.count(name) > 0;
+    }
+
+    // First free frame slot of the program body (after the globals).
+    int32_t programFrameBase = -32;
+
+    // dst = address of a global slot: the program frame pointer plus the slot
+    // offset (globals live in the frame of the program body).
+    void emitGlobalBase(x86::Reg dst, int32_t slotOffset = 0) {
+        enc.lea_rip_rdata(dst, globalBaseCell);
+        enc.mov_rm(dst, dst, 0);
+        if (slotOffset != 0) enc.add_ri(dst, slotOffset);
+    }
+
+    // Store an integer/pointer value into a variable slot, honouring the
+    // variable's declared integer width.
+    void storeVarFromReg(int32_t offset, x86::Reg reg, VarInfo* vi) {
+        if (vi && vi->type == ThavaType::INT) narrowIntReg(reg, vi->customType);
+        enc.mov_mr_rbp(offset, reg);
+    }
 
     void invalidateRegCache() {}
 
@@ -125,18 +183,35 @@ public:
     NativeCodegen(TEmitter& p, x86::Encoder& e, std::shared_ptr<Environment> env)
         : pe(p), enc(e), globalEnv(env) {}
 
+    // Thava is function-scoped: a declaration inside any block (if/while/for/try)
+    // stays visible until the end of the enclosing function, so nested blocks do
+    // not open their own scope. Only functions, methods and the top-level body do.
     void enterScope() {
         invalidateRegCache();
-        scopeStack.push_back({});
     }
 
     void exitScope() {
         invalidateRegCache();
+    }
+
+    void enterFunctionScope() {
+        invalidateRegCache();
+        scopeStack.push_back({});
+    }
+
+    void exitFunctionScope() {
+        invalidateRegCache();
         if (!scopeStack.empty()) scopeStack.pop_back();
     }
 
+    // Scopes below this index are invisible to the code being emitted: while a
+    // function/method is emitted, the program scope (which holds the globals as
+    // frame slots of main) must not resolve, because those slots belong to
+    // another frame.
+    size_t lookupFloor = 0;
+
     VarInfo* lookupVar(const std::string& name) {
-        for (int i = (int)scopeStack.size() - 1; i >= 0; --i) {
+        for (int i = (int)scopeStack.size() - 1; i >= (int)lookupFloor; --i) {
             auto it = scopeStack[i].find(name);
             if (it != scopeStack[i].end()) return &it->second;
         }
@@ -156,6 +231,7 @@ public:
         offFmtInt      = pe.addStringLiteralOffset("%lld");
         offFmtFloatNL  = pe.addStringLiteralOffset("%g\n");
         offFmtFloat    = pe.addStringLiteralOffset("%g");
+        offFmtFloat6   = pe.addStringLiteralOffset("%.6f");
         offFmtStrNL    = pe.addStringLiteralOffset("%s\n");
         offFmtStr      = pe.addStringLiteralOffset("%s");
         offFmtNL       = pe.addStringLiteralOffset("\n");
@@ -1988,6 +2064,122 @@ public:
         enc.ret();
     }
 
+    // ==========================================
+    // EXCEPTION RUNTIME
+    // The current handler record lives in R15 (0 when no try block is active).
+    // Record layout (48 bytes, allocated in the frame of the function that
+    // owns the try block):
+    //   +0  message    +8  type name    +16 previous handler
+    //   +24 resume address              +32 saved RBP
+    // ==========================================
+    void emitThrowHelper() {
+        lblThrow = enc.createLabel();
+        enc.bindLabel(lblThrow);
+
+        size_t fatal = enc.createLabel();
+        enc.test_rr(x86::R15, x86::R15);
+        enc.je(fatal);
+
+        // Store the exception, unwind the stack and resume at the handler.
+        enc.mov_mr(x86::R15, 0, x86::RAX);  // message
+        enc.mov_mr(x86::R15, 8, x86::RDX);  // type name
+        enc.mov_rm(x86::RCX, x86::R15, 32); // saved RBP
+        enc.mov_rm(x86::R10, x86::R15, 24); // resume address
+        enc.mov_rm(x86::R11, x86::R15, 16); // previous handler
+        enc.mov_rr(x86::RBP, x86::RCX);
+        enc.mov_rr(x86::RSP, x86::RBP);
+        enc.sub_rsp(2048);
+        enc.mov_rr(x86::R15, x86::R11);
+        enc.jmp_r(x86::R10);
+
+        // No active handler: report the exception and exit like before.
+        enc.bindLabel(fatal);
+        size_t hasMsg = enc.createLabel();
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.jne(hasMsg);
+        enc.lea_rip_rdata(x86::RAX, pe.addStringLiteralOffset("Runtime Error!"));
+        enc.bindLabel(hasMsg);
+        enc.mov_rr(x86::RDX, x86::RAX);
+        enc.lea_rip_rdata(x86::RCX, pe.addStringLiteralOffset("[Runtime Exception]: %s\n"));
+        enc.call_iat_func("printf");
+        enc.mov_ri64(x86::RCX, 1);
+        enc.call_iat_func("exit");
+    }
+
+    // Emit `throw msg [as type]` into the exception runtime.
+    void emitThrowCall(ASTNode* msgExpr, ASTNode* typeExpr, const std::string& defaultMsg) {
+        int32_t msgSlot;
+        currentFrameOffset -= 8;
+        if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+        msgSlot = currentFrameOffset;
+        if (msgExpr) {
+            emitExpr(msgExpr);
+        } else {
+            enc.lea_rip_rdata(x86::RAX, pe.addStringLiteralOffset(defaultMsg));
+        }
+        enc.mov_mr_rbp(msgSlot, x86::RAX);
+
+        if (typeExpr) {
+            emitExpr(typeExpr);
+            enc.mov_rr(x86::RDX, x86::RAX);
+        } else {
+            enc.lea_rip_rdata(x86::RDX, pe.addStringLiteralOffset("RuntimeError"));
+        }
+        enc.mov_rm_rbp(x86::RAX, msgSlot);
+        enc.call_label(lblThrow);
+    }
+
+    // Element type of `base[i]`: known from the list variable's declaration, or
+    // inferred from a list literal such as `[1.5, 2.5][i]`.
+    ThavaType elemTypeOfIndexedList(ASTNode* base) {
+        if (auto v = dynamic_cast<VarNode*>(base)) {
+            auto it = listElemTypes.find(v->getName());
+            if (it != listElemTypes.end()) return it->second;
+            return ThavaType::UNKNOWN;
+        }
+        if (auto coll = dynamic_cast<CollectionNode*>(base)) {
+            ThavaType found = ThavaType::INT;
+            for (auto& el : coll->getElements()) {
+                ThavaType t = getStaticExprType(el.get());
+                if (t == ThavaType::DOUBLE || t == ThavaType::FLOAT) return ThavaType::DOUBLE;
+                if (t == ThavaType::STRING) found = ThavaType::STRING;
+            }
+            return found;
+        }
+        return ThavaType::UNKNOWN;
+    }
+
+    // "1.500000" -> "1.5", "3.000000" -> "3": trims the decimals produced by
+    // "%.6f" so a double renders like the other backends' short form.
+    void emitTrimTrailingZeros(x86::Reg strPtr) {
+        size_t scan = enc.createLabel();
+        size_t back = enc.createLabel();
+        size_t noDot = enc.createLabel();
+        size_t done = enc.createLabel();
+        enc.mov_rr(x86::RSI, strPtr);
+        enc.bindLabel(scan);
+        enc.movzx_rm8(x86::RAX, x86::RSI, 0);
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.je(back);
+        enc.inc_r(x86::RSI);
+        enc.jmp(scan);
+        enc.bindLabel(back);
+        enc.dec_r(x86::RSI);
+        enc.movzx_rm8(x86::RAX, x86::RSI, 0);
+        enc.cmp_ri32(x86::RAX, '0');
+        enc.jne(noDot);
+        enc.xor_r32(x86::RAX, x86::RAX);
+        enc.mov_mr8(x86::RSI, 0, x86::RAX);
+        enc.jmp(back);
+        enc.bindLabel(noDot);
+        enc.movzx_rm8(x86::RAX, x86::RSI, 0);
+        enc.cmp_ri32(x86::RAX, '.');
+        enc.jne(done);
+        enc.xor_r32(x86::RAX, x86::RAX);
+        enc.mov_mr8(x86::RSI, 0, x86::RAX);
+        enc.bindLabel(done);
+    }
+
     ThavaType getStaticExprType(ASTNode* n) {
         if (!n) return ThavaType::UNKNOWN;
         if (auto lit = dynamic_cast<LiteralNode*>(n)) return lit->getLitType();
@@ -2016,10 +2208,8 @@ public:
         }
         if (auto cast = dynamic_cast<CastNode*>(n)) return cast->targetType;
         if (auto idx = dynamic_cast<IndexNode*>(n)) {
-            if (auto v = dynamic_cast<VarNode*>(idx->base.get())) {
-                auto it = listElemTypes.find(v->getName());
-                if (it != listElemTypes.end()) return it->second;
-            }
+            ThavaType et = elemTypeOfIndexedList(idx->base.get());
+            if (et != ThavaType::UNKNOWN) return et;
         }
         if (auto cond = dynamic_cast<ConditionalExprNode*>(n)) {
             ThavaType tt = getStaticExprType(cond->trueExpr.get());
@@ -2085,6 +2275,19 @@ public:
         if (auto cast = dynamic_cast<CastNode*>(node)) {
             ThavaType srcType = emitExpr(cast->expr.get());
             if (cast->targetType == srcType) return srcType;
+
+            // A cast to a collection type is only a type annotation (e.g. <lst>[...]);
+            // anything else would silently produce a bogus pointer.
+            if (cast->targetType == ThavaType::LIST || cast->targetType == ThavaType::TUPLE ||
+                cast->targetType == ThavaType::DICT) {
+                std::cerr << "[Native Codegen Error]: cannot cast a "
+                          << (srcType == ThavaType::INT ? "<int>" :
+                              srcType == ThavaType::STRING ? "<str>" :
+                              srcType == ThavaType::BOOL ? "<bl>" :
+                              (srcType == ThavaType::DOUBLE || srcType == ThavaType::FLOAT) ? "<dbl>" : "value")
+                          << " to a collection type (<lst>/<tple>/<dict>)\n";
+                exit(1);
+            }
 
             // Target: INT
             if (cast->targetType == ThavaType::INT) {
@@ -2166,10 +2369,18 @@ public:
                     enc.mov_mr_rbp(bufSlot, x86::RAX);
 
                     enc.mov_rr(x86::RCX, x86::RAX);
-                    enc.lea_rip_rdata(x86::RDX, offFmtFloat);
-                    enc.movsd_rm_rbp(x86::XMM2, valSlot);
-                    enc.mov_rm_rbp(x86::R8, valSlot);
-                    enc.call_iat_func("sprintf");
+                    if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+                        // The zero-libc Linux runtime formats doubles itself.
+                        enc.mov_rm_rbp(x86::R8, valSlot);
+                        enc.call_iat_func("sprintf_d");
+                    } else {
+                        enc.lea_rip_rdata(x86::RDX, offFmtFloat6);
+                        enc.movsd_rm_rbp(x86::XMM2, valSlot);
+                        enc.mov_rm_rbp(x86::R8, valSlot);
+                        enc.call_iat_func("sprintf");
+                        enc.mov_rm_rbp(x86::RDI, bufSlot);
+                        emitTrimTrailingZeros(x86::RDI);
+                    }
 
                     enc.mov_rm_rbp(x86::RAX, bufSlot);
                     return ThavaType::STRING;
@@ -2218,6 +2429,20 @@ public:
 
         if (auto var = dynamic_cast<VarNode*>(node)) {
             VarInfo* vi = lookupVar(var->getName());
+            if (!vi && isGlobalName(var->getName())) {
+                // Global read from inside a function/method.
+                ThavaType gt = globalEnv ? globalEnv->get(var->getName()) : ThavaType::UNKNOWN;
+                std::string gct = globalEnv ? globalEnv->getCustomType(var->getName()) : std::string();
+                int32_t goff = globalVarSlots[var->getName()];
+                emitGlobalBase(x86::R11, goff);
+                if (gt == ThavaType::FLOAT || gt == ThavaType::DOUBLE) {
+                    enc.movsd_rm(x86::XMM0, x86::R11, 0);
+                } else {
+                    enc.mov_rm(x86::RAX, x86::R11, 0);
+                    if (gt == ThavaType::INT) narrowIntReg(x86::RAX, gct);
+                }
+                return gt;
+            }
             if (!vi) {
                 auto fit = functions.find(var->getName());
                 if (fit != functions.end()) {
@@ -2231,6 +2456,7 @@ public:
                 enc.movsd_rm_rbp(x86::XMM0, vi->offset);
             } else {
                 enc.mov_rm_rbp(x86::RAX, vi->offset);
+                if (vi->type == ThavaType::INT) narrowIntReg(x86::RAX, vi->customType);
             }
             return vi->type;
         }
@@ -2731,6 +2957,16 @@ public:
                 enc.mov_ri64(x86::RAX, 0);
 
                 enc.bindLabel(endIn);
+                return ThavaType::BOOL;
+            }
+
+            // Substring test: "needle" in "haystack"
+            if (contType == ThavaType::STRING) {
+                enc.mov_rr(x86::RCX, x86::RAX);      // haystack = container
+                enc.mov_rm_rbp(x86::RDX, itemSlot);  // sub = item
+                enc.call_label(lblStrFind);
+                enc.cmp_ri32(x86::RAX, 0);
+                enc.setcc_to_rax(x86::Cond::GE);
                 return ThavaType::BOOL;
             }
 
@@ -3372,6 +3608,55 @@ public:
                 return ThavaType::INT;
             }
 
+            // Built-in min()/max() — unless the program defines its own function with that name
+            if ((call->name == "min" || call->name == "max") && functions.find(call->name) == functions.end()) {
+                if (call->args.size() != 2) {
+                    std::cerr << "[Native Codegen Error]: " << call->name
+                              << "() expects exactly 2 arguments\n";
+                    exit(1);
+                }
+                bool wantMax = (call->name == "max");
+
+                ThavaType at = emitExpr(call->args[0].get());
+                currentFrameOffset -= 8;
+                if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+                int32_t aSlot = currentFrameOffset;
+                bool aFloat = (at == ThavaType::DOUBLE || at == ThavaType::FLOAT);
+                if (aFloat) enc.movsd_mr_rbp(aSlot, x86::XMM0);
+                else enc.mov_mr_rbp(aSlot, x86::RAX);
+
+                ThavaType bt = emitExpr(call->args[1].get());
+                currentFrameOffset -= 8;
+                if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+                int32_t bSlot = currentFrameOffset;
+                bool bFloat = (bt == ThavaType::DOUBLE || bt == ThavaType::FLOAT);
+                if (bFloat) enc.movsd_mr_rbp(bSlot, x86::XMM0);
+                else enc.mov_mr_rbp(bSlot, x86::RAX);
+
+                if (aFloat || bFloat) {
+                    if (aFloat) enc.movsd_rm_rbp(x86::XMM0, aSlot);
+                    else { enc.mov_rm_rbp(x86::RAX, aSlot); enc.cvtsi2sd(x86::XMM0, x86::RAX); }
+                    if (bFloat) enc.movsd_rm_rbp(x86::XMM1, bSlot);
+                    else { enc.mov_rm_rbp(x86::RAX, bSlot); enc.cvtsi2sd(x86::XMM1, x86::RAX); }
+                    // MINSD xmm0, xmm1 (F2 0F 5D C1) / MAXSD xmm0, xmm1 (F2 0F 5F C1)
+                    enc.emit8(0xF2);
+                    enc.emit8(0x0F);
+                    enc.emit8(wantMax ? 0x5F : 0x5D);
+                    enc.emit8(0xC1);
+                    return ThavaType::DOUBLE;
+                }
+
+                enc.mov_rm_rbp(x86::RAX, aSlot);
+                enc.mov_rm_rbp(x86::R10, bSlot);
+                enc.cmp_rr(x86::RAX, x86::R10);
+                size_t keepLeft = enc.createLabel();
+                if (wantMax) enc.jge(keepLeft);
+                else enc.jle(keepLeft);
+                enc.mov_rr(x86::RAX, x86::R10);
+                enc.bindLabel(keepLeft);
+                return ThavaType::INT;
+            }
+
             auto it = functions.find(call->name);
             if (it == functions.end()) {
                 auto dlit = g_dlFunctions.find(call->name);
@@ -3425,7 +3710,21 @@ public:
                         }
                     }
 
-                    enc.call_iat_func(call->name);
+                    if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+                        // No system dynamic linker on this target: the runtime loader
+                        // mapped the library at its own fixed base, so call straight
+                        // into base + text + export offset.
+                        if (!dlinfo.hasOffset) {
+                            std::cerr << "[Thava Compiler] Error: dynamic library '" << dlinfo.libPath
+                                      << "' exports no function offsets; rebuild it with --lib using this compiler.\n";
+                            exit(1);
+                        }
+                        enc.mov_ri64(x86::RAX, (int64_t)dlLoadBaseForPath(dlinfo.libPath) +
+                                              (int64_t)dlinfo.libTextRva + (int64_t)dlinfo.funcOffset);
+                        enc.call_r(x86::RAX);
+                    } else {
+                        enc.call_iat_func(call->name);
+                    }
                     currentFrameOffset = savedOffset;
                     return dlinfo.retType;
                 }
@@ -3498,9 +3797,23 @@ public:
             x86::Reg intRegs[] = { x86::RCX, x86::RDX, x86::R8, x86::R9 };
             x86::Xmm xmmRegs[] = { x86::XMM0, x86::XMM1, x86::XMM2, x86::XMM3 };
 
+            // For a collection parameter, the caller passes the address of the
+            // variable itself when the argument is a plain variable, so mutations
+            // inside the callee reach the caller's variable.
+            auto argAddressOf = [&](size_t i, x86::Reg dst) {
+                VarInfo* av = nullptr;
+                if (i < call->args.size()) {
+                    if (auto vn = dynamic_cast<VarNode*>(call->args[i].get()))
+                        av = lookupVar(vn->getName());
+                }
+                enc.lea_rm_rbp(dst, av ? av->offset : argSlots[i]);
+            };
+
             for (size_t i = 0; i < argSlots.size() && i < 4; ++i) {
                 ThavaType pt = (i < fi.params.size()) ? fi.params[i].first : ThavaType::INT;
-                if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
+                if (isCollectionType(pt)) {
+                    argAddressOf(i, intRegs[i]);
+                } else if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
                     enc.movsd_rm_rbp(xmmRegs[i], argSlots[i]);
                     enc.mov_rm_rbp(intRegs[i], argSlots[i]);
                 } else {
@@ -3512,7 +3825,10 @@ public:
             for (size_t i = 4; i < argSlots.size(); ++i) {
                 int32_t stackDisp = 32 + (int32_t)(i - 4) * 8;
                 ThavaType pt = (i < fi.params.size()) ? fi.params[i].first : ThavaType::INT;
-                if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
+                if (isCollectionType(pt)) {
+                    argAddressOf(i, x86::R10);
+                    enc.mov_mr_rsp(stackDisp, x86::R10);
+                } else if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
                     enc.movsd_rm_rbp(x86::XMM4, argSlots[i]);
                     enc.movsd_mr_rsp(stackDisp, x86::XMM4);
                 } else {
@@ -3535,36 +3851,55 @@ public:
                 return ThavaType::STRING;
             }
 
+            // Read a whole line for every non-string type. Using scanf("%d")
+            // left invalid input (e.g. "abc") in the stream, which made the
+            // next key.input read the same garbage and never consume a line.
             if (!inp->prompt.empty()) {
                 uint32_t off = pe.addStringLiteralOffset(inp->prompt);
                 enc.lea_rip_rdata(x86::RCX, off);
-                enc.call_iat_func("printf");
+            } else {
                 enc.xor_r32(x86::RCX, x86::RCX);
-                enc.call_iat_func("fflush");
             }
+            enc.mov_ri64(x86::RDX, inp->inputType == ThavaType::BOOL ? 1 : 0);
+            enc.call_label(lblInputLine);
 
             currentFrameOffset -= 8;
             if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
             int32_t scratchSlot = currentFrameOffset;
-
-            enc.lea_rm_rbp(x86::RDX, scratchSlot);
+            enc.mov_mr_rbp(scratchSlot, x86::RAX); // line buffer
 
             if (inp->inputType == ThavaType::INT) {
-                enc.lea_rip_rdata(x86::RCX, offFmtScanInt);
-                enc.call_iat_func("scanf");
-                enc.mov_rm_rbp(x86::RAX, scratchSlot);
+                enc.mov_rr(x86::RCX, x86::RAX);
+                enc.call_iat_func("_atoi64");
                 return ThavaType::INT;
             } else if (inp->inputType == ThavaType::DOUBLE || inp->inputType == ThavaType::FLOAT) {
-                enc.lea_rip_rdata(x86::RCX, offFmtScanDouble);
-                enc.call_iat_func("scanf");
-                enc.movsd_rm_rbp(x86::XMM0, scratchSlot);
+                enc.mov_rr(x86::RCX, x86::RAX);
+                enc.call_iat_func("atof");
                 return inp->inputType;
             } else if (inp->inputType == ThavaType::BOOL) {
-                enc.lea_rip_rdata(x86::RCX, offFmtScanInt);
-                enc.call_iat_func("scanf");
-                enc.mov_rm_rbp(x86::RAX, scratchSlot);
+                // The line was lowercased by lblInputLine (mode 1), so plain
+                // strcmp against "true"/"yes" plus a numeric fallback is enough.
+                size_t isTrue = enc.createLabel();
+                size_t boolDone = enc.createLabel();
+                enc.mov_rm_rbp(x86::RCX, scratchSlot);
+                enc.lea_rip_rdata(x86::RDX, pe.addStringLiteralOffset("true"));
+                enc.call_iat_func("strcmp");
                 enc.test_rr(x86::RAX, x86::RAX);
-                enc.setcc_to_rax(x86::Cond::NE);
+                enc.je(isTrue);
+                enc.mov_rm_rbp(x86::RCX, scratchSlot);
+                enc.lea_rip_rdata(x86::RDX, pe.addStringLiteralOffset("yes"));
+                enc.call_iat_func("strcmp");
+                enc.test_rr(x86::RAX, x86::RAX);
+                enc.je(isTrue);
+                enc.mov_rm_rbp(x86::RCX, scratchSlot);
+                enc.call_iat_func("_atoi64");
+                enc.test_rr(x86::RAX, x86::RAX);
+                enc.jne(isTrue);
+                enc.mov_ri64(x86::RAX, 0);
+                enc.jmp(boolDone);
+                enc.bindLabel(isTrue);
+                enc.mov_ri64(x86::RAX, 1);
+                enc.bindLabel(boolDone);
                 return ThavaType::BOOL;
             }
             return ThavaType::INT;
@@ -3651,11 +3986,8 @@ public:
                 return ThavaType::INT;
             }
 
-            ThavaType elemType = ThavaType::INT;
-            if (auto v = dynamic_cast<VarNode*>(idxNode->base.get())) {
-                auto it = listElemTypes.find(v->getName());
-                if (it != listElemTypes.end()) elemType = it->second;
-            }
+            ThavaType elemType = elemTypeOfIndexedList(idxNode->base.get());
+            if (elemType == ThavaType::UNKNOWN) elemType = ThavaType::INT;
 
             emitExpr(idxNode->indexExpr.get()); // idx in RAX
             enc.mov_rm_rbp(x86::R10, baseSlot); // base ptr in R10
@@ -3701,25 +4033,143 @@ public:
             return emitCLibMethod(clibNode);
         }
 
-        // --- MemberAccessNode (Read struct field: obj.field) ---
-        if (auto mem = dynamic_cast<MemberAccessNode*>(node)) {
-            std::string structName = "";
-            if (auto v = dynamic_cast<VarNode*>(mem->target.get())) {
-                VarInfo* vi = lookupVar(v->getName());
-                if (vi) structName = vi->customType;
-            } else if (auto subMem = dynamic_cast<MemberAccessNode*>(mem->target.get())) {
-                std::string parentStruct = "";
-                if (auto pv = dynamic_cast<VarNode*>(subMem->target.get())) {
-                    VarInfo* pvi = lookupVar(pv->getName());
-                    if (pvi) parentStruct = pvi->customType;
-                }
-                if (g_structs.count(parentStruct)) {
-                    auto pit = g_structs[parentStruct].fieldIndex.find(subMem->memberName);
-                    if (pit != g_structs[parentStruct].fieldIndex.end()) {
-                        structName = g_structs[parentStruct].fields[pit->second].customType;
+        // --- LocVar / ParVar: the current object / the parent sub-object ---
+        if (dynamic_cast<LocVarNode*>(node) || dynamic_cast<ParVarNode*>(node)) {
+            VarInfo* thi = lookupVar("@this");
+            if (!thi) {
+                std::cerr << "[Native Codegen Error]: 'locvar'/'parvar' used outside a class method.\n";
+                exit(1);
+            }
+            enc.mov_rm_rbp(x86::RAX, thi->offset);
+            return ThavaType::CUSTOM;
+        }
+
+        // --- ClassInstantiateNode: ClassName(args...) ---
+        if (auto ci = dynamic_cast<ClassInstantiateNode*>(node)) {
+            auto lit = classLayouts.find(ci->className);
+            if (lit == classLayouts.end()) {
+                std::cerr << "[Native Codegen Error]: Class '" << ci->className << "' is not declared!\n";
+                exit(1);
+            }
+            int32_t size = lit->second.totalSize > 0 ? lit->second.totalSize : 8;
+
+            enc.mov_ri64(x86::RCX, size);
+            enc.call_iat_func("malloc");
+            currentFrameOffset -= 8;
+            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+            int32_t ptrSlot = currentFrameOffset;
+            enc.mov_mr_rbp(ptrSlot, x86::RAX);
+
+            // Zero the block so unset fields read as 0
+            enc.mov_rr(x86::RCX, x86::RAX);
+            enc.xor_r32(x86::RDX, x86::RDX);
+            enc.mov_ri64(x86::R8, size);
+            enc.call_iat_func("memset");
+
+            // Field default values, base class first
+            std::vector<std::string> chain;
+            for (std::string c = ci->className; !c.empty();) {
+                chain.push_back(c);
+                auto b = classBase.find(c);
+                c = (b != classBase.end()) ? b->second : std::string();
+            }
+            for (int ci2 = (int)chain.size() - 1; ci2 >= 0; --ci2) {
+                auto dit = classFieldDefaults.find(chain[ci2]);
+                if (dit == classFieldDefaults.end()) continue;
+                auto lay = classLayouts.find(chain[ci2]);
+                for (auto& d : dit->second) {
+                    const StructFieldInfo* fld = nullptr;
+                    if (lay != classLayouts.end()) {
+                        for (const auto& f : lay->second.fields)
+                            if (f.offset == d.first) { fld = &f; break; }
+                    }
+                    if (!fld) continue;
+                    ThavaType dt = emitExpr(d.second);
+                    enc.mov_rm_rbp(x86::R10, ptrSlot);
+                    if (fld->type == ThavaType::DOUBLE) {
+                        if (dt == ThavaType::INT) enc.cvtsi2sd(x86::XMM0, x86::RAX);
+                        enc.movsd_mr(x86::R10, fld->offset, x86::XMM0);
+                    } else if (fld->type == ThavaType::FLOAT) {
+                        if (dt == ThavaType::INT) enc.cvtsi2sd(x86::XMM0, x86::RAX);
+                        enc.cvtsd2ss(x86::XMM0, x86::XMM0);
+                        enc.movss_mr(x86::R10, fld->offset, x86::XMM0);
+                    } else {
+                        if (fld->type == ThavaType::INT) narrowIntReg(x86::RAX, fld->customType);
+                        enc.mov_mr(x86::R10, fld->offset, x86::RAX);
                     }
                 }
             }
+
+            // Constructor call (both 'func init' and 'func ClassName' map here)
+            ThavaType ctorRet = ThavaType::VOID;
+            std::string ctorKey = ci->className + "::init";
+            size_t ctorLbl = findMethodLabel(ci->className, "init", &ctorRet);
+            std::vector<std::pair<ThavaType, std::string>> ctorParams;
+            auto cpit = classMethodParams.find(ctorKey);
+            if (cpit != classMethodParams.end()) ctorParams = cpit->second;
+
+            if (ctorLbl != 0 && ctorParams.size() == ci->args.size()) {
+                std::vector<int32_t> argSlots;
+                std::vector<ThavaType> argTypes;
+                for (auto& a : ci->args) {
+                    ThavaType at = emitExpr(a.get());
+                    currentFrameOffset -= 8;
+                    if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+                    int32_t slot = currentFrameOffset;
+                    if (at == ThavaType::FLOAT || at == ThavaType::DOUBLE) enc.movsd_mr_rbp(slot, x86::XMM0);
+                    else enc.mov_mr_rbp(slot, x86::RAX);
+                    argSlots.push_back(slot);
+                    argTypes.push_back(at);
+                }
+                emitClassCallArgs(ctorLbl, ctorKey, ci->args, ptrSlot, argSlots, argTypes);
+            }
+
+            enc.mov_rm_rbp(x86::RAX, ptrSlot);
+            return ThavaType::CUSTOM;
+        }
+
+        // --- MethodCallNode on a class instance: obj.method(args...) ---
+        if (auto mc = dynamic_cast<MethodCallNode*>(node)) {
+            std::string cls = structNameOfTarget(mc->target.get());
+            if (classLayouts.count(cls)) {
+                ThavaType ret = ThavaType::VOID;
+                std::string key = cls + "::" + mc->methodName;
+                size_t lbl = findMethodLabel(cls, mc->methodName, &ret);
+                if (lbl == 0) {
+                    std::cerr << "[Native Codegen Error]: class '" << cls << "' has no method '"
+                              << mc->methodName << "'.\n";
+                    exit(1);
+                }
+                emitExpr(mc->target.get());
+                currentFrameOffset -= 8;
+                if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+                int32_t thisSlot = currentFrameOffset;
+                enc.mov_mr_rbp(thisSlot, x86::RAX);
+
+                std::vector<int32_t> argSlots;
+                std::vector<ThavaType> argTypes;
+                for (auto& a : mc->args) {
+                    ThavaType at = emitExpr(a.get());
+                    currentFrameOffset -= 8;
+                    if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+                    int32_t slot = currentFrameOffset;
+                    if (at == ThavaType::FLOAT || at == ThavaType::DOUBLE) enc.movsd_mr_rbp(slot, x86::XMM0);
+                    else enc.mov_mr_rbp(slot, x86::RAX);
+                    argSlots.push_back(slot);
+                    argTypes.push_back(at);
+                }
+                emitClassCallArgs(lbl, key, mc->args, thisSlot, argSlots, argTypes);
+                if (ret == ThavaType::INT) narrowIntReg(x86::RAX, currentFuncRetWidth);
+                return ret;
+            }
+            std::cerr << "[Native Codegen Error]: cannot resolve the class of method call '"
+                      << mc->methodName << "'.\n";
+            exit(1);
+        }
+
+        // --- MemberAccessNode (Read struct/class field: obj.field) ---
+        if (auto mem = dynamic_cast<MemberAccessNode*>(node)) {
+            std::string structName = structNameOfTarget(mem->target.get());
 
             auto sit = g_structs.find(structName);
             if (sit == g_structs.end()) {
@@ -3814,6 +4264,7 @@ public:
                     enc.movsd_mr(x86::RCX, f.offset, x86::XMM0);
                 } else {
                     enc.mov_rm_rbp(x86::RAX, argSlots[i]);
+                    if (f.type == ThavaType::INT) narrowIntReg(x86::RAX, f.customType);
                     enc.mov_mr(x86::RCX, f.offset, x86::RAX);
                 }
             }
@@ -3871,10 +4322,18 @@ public:
                 int32_t bufSlot = currentFrameOffset;
 
                 enc.lea_rm_rbp(x86::RCX, bufSlot);
-                enc.lea_rip_rdata(x86::RDX, offFmtFloat);
-                enc.movsd_rm_rbp(x86::XMM2, valSlot);
-                enc.mov_rm_rbp(x86::R8, valSlot);
-                enc.call_iat_func("sprintf");
+                if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+                    // The zero-libc Linux runtime has no %g formatting.
+                    enc.mov_rm_rbp(x86::R8, valSlot);
+                    enc.call_iat_func("sprintf_d");
+                } else {
+                    enc.lea_rip_rdata(x86::RDX, offFmtFloat6);
+                    enc.movsd_rm_rbp(x86::XMM2, valSlot);
+                    enc.mov_rm_rbp(x86::R8, valSlot);
+                    enc.call_iat_func("sprintf");
+                    enc.lea_rm_rbp(x86::RDI, bufSlot);
+                    emitTrimTrailingZeros(x86::RDI);
+                }
 
                 enc.lea_rm_rbp(x86::RCX, bufSlot);
                 enc.mov_rm_rbp(x86::RDX, fileVarOffset);
@@ -3932,10 +4391,17 @@ public:
                     int32_t bufSlot = currentFrameOffset;
 
                     enc.lea_rm_rbp(x86::RCX, bufSlot);
-                    enc.lea_rip_rdata(x86::RDX, offFmtFloat);
-                    enc.movsd_rm_rbp(x86::XMM2, valSlot);
-                    enc.mov_rm_rbp(x86::R8, valSlot);
-                    enc.call_iat_func("sprintf");
+                    if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+                        enc.mov_rm_rbp(x86::R8, valSlot);
+                        enc.call_iat_func("sprintf_d");
+                    } else {
+                        enc.lea_rip_rdata(x86::RDX, offFmtFloat6);
+                        enc.movsd_rm_rbp(x86::XMM2, valSlot);
+                        enc.mov_rm_rbp(x86::R8, valSlot);
+                        enc.call_iat_func("sprintf");
+                        enc.lea_rm_rbp(x86::RDI, bufSlot);
+                        emitTrimTrailingZeros(x86::RDI);
+                    }
 
                     enc.lea_rm_rbp(x86::RCX, bufSlot);
                     enc.mov_rm_rbp(x86::RDX, fileVarOffset);
@@ -3983,13 +4449,17 @@ public:
     }
 
     ThavaType emitListMethod(ListMethodNode* lm) {
+        if (!lookupVar(lm->varName) && isGlobalName(lm->varName) &&
+            (lm->method != "addval" || lm->args.size() != 1)) {
+            std::cerr << "[Codegen Error]: Unsupported native global list operation: " << lm->method << "\n";
+            exit(1);
+        }
         if (lm->method == "addval") {
             VarInfo* vi = lookupVar(lm->varName);
-            if (!vi) {
+            if (!vi && !isGlobalName(lm->varName)) {
                 std::cerr << "[Native Codegen Error]: List '" << lm->varName << "' is not declared!\n";
                 exit(1);
             }
-            int32_t listVarOff = vi->offset;
 
             // Evaluate valExpr (args[0] if 1 arg, args[1] if 2 args)
             ASTNode* valExpr = lm->args.size() == 1 ? lm->args[0].get() : lm->args[1].get();
@@ -4005,7 +4475,7 @@ public:
             }
 
             // Load old list ptr
-            enc.mov_rm_rbp(x86::R10, listVarOff); // oldPtr
+            loadCollectionPtr(lm->varName, vi, x86::R10); // oldPtr
             // old count n = [R10 + 0]
             enc.mov_rm(x86::R11, x86::R10, 0);   // n
             currentFrameOffset -= 8;
@@ -4043,7 +4513,7 @@ public:
             enc.mov_ri64(x86::RAX, 8);
             enc.add_rr(x86::RCX, x86::RAX); // dst = newPtr + 8
 
-            enc.mov_rm_rbp(x86::RDX, listVarOff);
+            loadCollectionPtr(lm->varName, vi, x86::RDX);
             enc.add_rr(x86::RDX, x86::RAX); // src = oldPtr + 8
 
             enc.mov_rm_rbp(x86::R8, countSlot);
@@ -4062,7 +4532,11 @@ public:
 
             // update list variable
             enc.mov_rm_rbp(x86::RAX, newPtrSlot);
-            enc.mov_mr_rbp(listVarOff, x86::RAX);
+            if (vi) enc.mov_mr_rbp(vi->offset, x86::RAX);
+            else {
+                emitGlobalBase(x86::R11, globalVarSlots.at(lm->varName));
+                enc.mov_mr(x86::R11, 0, x86::RAX);
+            }
             return ThavaType::INT;
         }
         return ThavaType::VOID;
@@ -5093,28 +5567,274 @@ public:
     // ==========================================
     // STATEMENT CODE GENERATION
     // ==========================================
+    // ==========================================
+    // CLASS SUPPORT (single inheritance, static dispatch)
+    // An instance is a flat heap block: inherited fields first, then own
+    // fields, every field in an 8-byte slot. Methods are ordinary functions
+    // whose first argument is the implicit 'this' pointer.
+    // ==========================================
+    std::map<std::string, StructInfo> classLayouts;
+    std::map<std::string, std::string> classBase;
+    std::map<std::string, std::vector<std::pair<int32_t, ASTNode*>>> classFieldDefaults;
+    std::map<std::string, size_t> classMethodLabels;   // "Class::method" -> label
+    std::map<std::string, ThavaType> classMethodRet;    // "Class::method" -> return type
+    std::map<std::string, std::vector<std::pair<ThavaType, std::string>>> classMethodParams;
+    std::string currentClassName;
+    std::string currentBaseClassName;
+
+    // Resolve the struct/class name a member-access target refers to.
+    std::string structNameOfTarget(ASTNode* n) {
+        if (!n) return "";
+        if (auto v = dynamic_cast<VarNode*>(n)) {
+            VarInfo* vi = lookupVar(v->getName());
+            if (vi) return vi->customType;
+            return "";
+        }
+        if (dynamic_cast<LocVarNode*>(n)) return currentClassName;
+        if (auto p = dynamic_cast<ParVarNode*>(n)) return p->baseClassName;
+        if (auto m = dynamic_cast<MemberAccessNode*>(n)) {
+            std::string parent = structNameOfTarget(m->target.get());
+            auto it = g_structs.find(parent);
+            if (it != g_structs.end()) {
+                auto fi = it->second.fieldIndex.find(m->memberName);
+                if (fi != it->second.fieldIndex.end()) return it->second.fields[fi->second].customType;
+            }
+        }
+        return "";
+    }
+
+    size_t findMethodLabel(const std::string& cls, const std::string& method, ThavaType* outRet) {
+        std::string c = cls;
+        while (!c.empty()) {
+            std::string key = c + "::" + method;
+            auto it = classMethodLabels.find(key);
+            if (it != classMethodLabels.end()) {
+                if (outRet) {
+                    auto rt = classMethodRet.find(key);
+                    *outRet = (rt != classMethodRet.end()) ? rt->second : ThavaType::VOID;
+                }
+                return it->second;
+            }
+            auto b = classBase.find(c);
+            c = (b != classBase.end()) ? b->second : std::string();
+        }
+        return 0;
+    }
+
+    void registerNativeClass(ClassDeclNode* cd) {
+        StructInfo layout;
+        int32_t cur = 0;
+        if (!cd->baseClassName.empty()) {
+            auto bit = classLayouts.find(cd->baseClassName);
+            if (bit == classLayouts.end()) {
+                std::cerr << "[Native Codegen Error]: base class '" << cd->baseClassName
+                          << "' of '" << cd->className << "' is not declared before it.\n";
+                exit(1);
+            }
+            layout = bit->second; // inherited fields keep their offsets
+            cur = layout.totalSize;
+            classBase[cd->className] = cd->baseClassName;
+        }
+        layout.name = cd->className;
+        for (auto& f : cd->fields) {
+            StructFieldInfo sfi;
+            sfi.name = f.name;
+            sfi.type = f.type;
+            sfi.customType = f.customTypeName;
+            sfi.offset = cur;
+            layout.fieldIndex[f.name] = layout.fields.size();
+            layout.fields.push_back(sfi);
+            if (f.initExpr) classFieldDefaults[cd->className].push_back({ cur, f.initExpr.get() });
+            cur += 8;
+        }
+        layout.totalSize = cur > 0 ? cur : 8;
+        classLayouts[cd->className] = layout;
+        g_structs[cd->className] = layout; // reuse struct field read/write codegen
+
+        for (auto& m : cd->methods) {
+            std::string key = cd->className + "::" + m.name;
+            if (!classMethodLabels.count(key)) {
+                classMethodLabels[key] = enc.createLabel();
+                classMethodRet[key] = m.returnType;
+                classMethodParams[key] = m.params;
+            }
+        }
+        for (auto& c : cd->constructors) {
+            std::string key = cd->className + "::init";
+            if (!classMethodLabels.count(key)) {
+                classMethodLabels[key] = enc.createLabel();
+                classMethodRet[key] = ThavaType::VOID;
+                classMethodParams[key] = c.params;
+            }
+            std::string alias = cd->className + "::" + cd->className;
+            if (!classMethodLabels.count(alias)) {
+                classMethodLabels[alias] = classMethodLabels[key];
+                classMethodRet[alias] = ThavaType::VOID;
+                classMethodParams[alias] = c.params;
+            }
+        }
+    }
+
+    void emitClassMethod(const std::string& className, size_t labelId, ThavaType retType,
+                         const std::string& retWidth,
+                         const std::vector<std::pair<ThavaType, std::string>>& params,
+                         const std::vector<std::string>& paramCustoms,
+                         const std::vector<ASTPtr>& body,
+                         const std::string& methodName) {
+        std::string prevClass = currentClassName;
+        std::string prevBase = currentBaseClassName;
+        currentClassName = className;
+        auto bit = classBase.find(className);
+        currentBaseClassName = (bit != classBase.end()) ? bit->second : std::string();
+
+        enc.bindLabel(labelId);
+        enc.push(x86::RBP);
+        enc.mov_rr(x86::RBP, x86::RSP);
+        enc.sub_rsp(2048);
+
+        currentFrameOffset = -32;
+        maxFrameOffset = -32;
+        currentFuncRetLabel = enc.createLabel();
+        currentFuncRetType = retType;
+        currentFuncRetWidth = retWidth;
+
+        enterFunctionScope();
+
+        x86::Reg intRegs[] = { x86::RCX, x86::RDX, x86::R8, x86::R9 };
+        x86::Xmm xmmRegs[] = { x86::XMM0, x86::XMM1, x86::XMM2, x86::XMM3 };
+
+        int32_t thisOff = declareVar("@this", ThavaType::CUSTOM, className);
+        enc.mov_mr_rbp(thisOff, x86::RCX);
+
+        for (size_t i = 0; i < params.size(); ++i) {
+            ThavaType pt = params[i].first;
+            std::string pct = (i < paramCustoms.size()) ? paramCustoms[i] : "";
+            int32_t off = declareVar(params[i].second, pt, pct);
+            if (isCollectionType(pt)) {
+                // Element type comes from the call sites of this method.
+                auto eit = g_funcListParamElem.find(className + "::" + methodName);
+                ThavaType et = (eit != g_funcListParamElem.end() && i < eit->second.size())
+                                   ? eit->second[i] : ThavaType::UNKNOWN;
+                if (et != ThavaType::UNKNOWN) listElemTypes[params[i].second] = et;
+                else listElemTypes.erase(params[i].second);
+                int32_t refSlot = declareVar("@ref" + std::to_string(i), ThavaType::INT);
+                VarInfo* pv = lookupVar(params[i].second);
+                if (pv) { pv->listOut = true; pv->listOutSlot = refSlot; }
+                if (i < 3) {
+                    enc.mov_mr_rbp(refSlot, intRegs[i + 1]);
+                } else {
+                    int32_t callerOff = 48 + (int32_t)(i - 3) * 8;
+                    enc.mov_rm_rbp(x86::RAX, callerOff);
+                    enc.mov_mr_rbp(refSlot, x86::RAX);
+                }
+                enc.mov_rm_rbp(x86::RAX, refSlot);
+                enc.mov_rm(x86::RAX, x86::RAX, 0);
+                enc.mov_mr_rbp(off, x86::RAX);
+            } else if (i < 3) {
+                if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
+                    enc.movsd_mr_rbp(off, xmmRegs[i]);
+                } else {
+                    if (pt == ThavaType::INT) narrowIntReg(intRegs[i + 1], pct);
+                    enc.mov_mr_rbp(off, intRegs[i + 1]);
+                }
+            } else {
+                // Extra parameters arrive on the caller's stack (Win64 slots).
+                int32_t callerOff = 48 + (int32_t)(i - 3) * 8;
+                if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
+                    enc.movsd_rm_rbp(x86::XMM0, callerOff);
+                    enc.movsd_mr_rbp(off, x86::XMM0);
+                } else {
+                    enc.mov_rm_rbp(x86::RAX, callerOff);
+                    if (pt == ThavaType::INT) narrowIntReg(x86::RAX, pct);
+                    enc.mov_mr_rbp(off, x86::RAX);
+                }
+            }
+        }
+
+        for (const auto& s : body) emitStmt(s.get());
+
+        enc.bindLabel(currentFuncRetLabel);
+
+        // Copy collection parameters back to the caller (same rule as functions).
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (!isCollectionType(params[i].first)) continue;
+            VarInfo* pv = lookupVar(params[i].second);
+            if (!pv || !pv->listOut) continue;
+            enc.mov_rm_rbp(x86::R10, pv->offset);
+            enc.mov_rm_rbp(x86::R11, pv->listOutSlot);
+            enc.mov_mr(x86::R11, 0, x86::R10);
+        }
+
+        exitFunctionScope();
+        enc.add_rsp(2048);
+        enc.pop(x86::RBP);
+        enc.ret();
+
+        currentClassName = prevClass;
+        currentBaseClassName = prevBase;
+    }
+
+    // Push 'this' + call arguments into the method's register parameters.
+    void emitClassCallArgs(size_t labelKeySlot, const std::string& key,
+                           const std::vector<ASTPtr>& args, int32_t thisSlot,
+                           const std::vector<int32_t>& argSlots,
+                           const std::vector<ThavaType>& argTypes) {
+        x86::Reg intRegs[] = { x86::RCX, x86::RDX, x86::R8, x86::R9 };
+        x86::Xmm xmmRegs[] = { x86::XMM0, x86::XMM1, x86::XMM2, x86::XMM3 };
+        std::vector<std::pair<ThavaType, std::string>> decl;
+        auto pit = classMethodParams.find(key);
+        if (pit != classMethodParams.end()) decl = pit->second;
+
+        enc.mov_rm_rbp(x86::RCX, thisSlot);
+        for (size_t i = 0; i < args.size(); ++i) {
+            ThavaType want = (i < decl.size()) ? decl[i].first : argTypes[i];
+            bool isFloat = (want == ThavaType::FLOAT || want == ThavaType::DOUBLE);
+            if (isCollectionType(want)) {
+                // Collections are passed as the address of the caller's variable.
+                VarInfo* av = nullptr;
+                if (i < args.size()) {
+                    if (auto vn = dynamic_cast<VarNode*>(args[i].get()))
+                        av = lookupVar(vn->getName());
+                }
+                int32_t addrSlot = av ? av->offset : argSlots[i];
+                if (i < 3) {
+                    enc.lea_rm_rbp(intRegs[i + 1], addrSlot);
+                } else {
+                    int32_t stackDisp = 32 + (int32_t)(i - 3) * 8;
+                    enc.lea_rm_rbp(x86::R10, addrSlot);
+                    enc.mov_mr_rsp(stackDisp, x86::R10);
+                }
+            } else if (i < 3) {
+                if (isFloat) {
+                    if (argTypes[i] == ThavaType::INT || argTypes[i] == ThavaType::BOOL) {
+                        enc.mov_rm_rbp(x86::RAX, argSlots[i]);
+                        enc.cvtsi2sd(xmmRegs[i], x86::RAX);
+                    } else {
+                        enc.movsd_rm_rbp(xmmRegs[i], argSlots[i]);
+                    }
+                } else {
+                    enc.mov_rm_rbp(intRegs[i + 1], argSlots[i]);
+                }
+            } else {
+                int32_t stackDisp = 32 + (int32_t)(i - 3) * 8;
+                if (isFloat) {
+                    enc.movsd_rm_rbp(x86::XMM4, argSlots[i]);
+                    enc.movsd_mr_rsp(stackDisp, x86::XMM4);
+                } else {
+                    enc.mov_rm_rbp(x86::R10, argSlots[i]);
+                    enc.mov_mr_rsp(stackDisp, x86::R10);
+                }
+            }
+        }
+        enc.call_label(labelKeySlot);
+    }
+
     void emitStmt(ASTNode* node) {
         if (!node) return;
 
         // --- MemberAssignNode (Gan thuoc tinh struct: obj.field = val / += / -= ...) ---
         if (auto massign = dynamic_cast<MemberAssignNode*>(node)) {
-            std::string structName = "";
-            if (auto v = dynamic_cast<VarNode*>(massign->target.get())) {
-                VarInfo* vi = lookupVar(v->getName());
-                if (vi) structName = vi->customType;
-            } else if (auto subMem = dynamic_cast<MemberAccessNode*>(massign->target.get())) {
-                std::string parentStruct = "";
-                if (auto pv = dynamic_cast<VarNode*>(subMem->target.get())) {
-                    VarInfo* pvi = lookupVar(pv->getName());
-                    if (pvi) parentStruct = pvi->customType;
-                }
-                if (g_structs.count(parentStruct)) {
-                    auto pit = g_structs[parentStruct].fieldIndex.find(subMem->memberName);
-                    if (pit != g_structs[parentStruct].fieldIndex.end()) {
-                        structName = g_structs[parentStruct].fields[pit->second].customType;
-                    }
-                }
-            }
+            std::string structName = structNameOfTarget(massign->target.get());
 
             auto sit = g_structs.find(structName);
             if (sit == g_structs.end()) {
@@ -5166,18 +5886,22 @@ public:
                 }
             } else {
                 if (massign->op == "=") {
+                    if (fld.type == ThavaType::INT) narrowIntReg(x86::RAX, fld.customType);
                     enc.mov_mr(x86::RCX, fld.offset, x86::RAX);
                 } else if (massign->op == "+=") {
                     enc.mov_rm(x86::RDX, x86::RCX, fld.offset);
                     enc.add_rr(x86::RDX, x86::RAX);
+                    if (fld.type == ThavaType::INT) narrowIntReg(x86::RDX, fld.customType);
                     enc.mov_mr(x86::RCX, fld.offset, x86::RDX);
                 } else if (massign->op == "-=") {
                     enc.mov_rm(x86::RDX, x86::RCX, fld.offset);
                     enc.sub_rr(x86::RDX, x86::RAX);
+                    if (fld.type == ThavaType::INT) narrowIntReg(x86::RDX, fld.customType);
                     enc.mov_mr(x86::RCX, fld.offset, x86::RDX);
                 } else if (massign->op == "*=") {
                     enc.mov_rm(x86::RDX, x86::RCX, fld.offset);
                     enc.imul_rr(x86::RDX, x86::RAX);
+                    if (fld.type == ThavaType::INT) narrowIntReg(x86::RDX, fld.customType);
                     enc.mov_mr(x86::RCX, fld.offset, x86::RDX);
                 }
             }
@@ -5185,7 +5909,14 @@ public:
         }
 
         if (auto vdecl = dynamic_cast<VarDeclNode*>(node)) {
-            int32_t offset = declareVar(vdecl->varName, vdecl->varType, vdecl->customTypeName);
+            int32_t offset;
+            if (emittingProgramBody && globalVarSlots.count(vdecl->varName)) {
+                // Global variable: its slot was reserved in the program scope. A
+                // local declaration with the same name inside a function shadows it.
+                offset = globalVarSlots[vdecl->varName];
+            } else {
+                offset = declareVar(vdecl->varName, vdecl->varType, vdecl->customTypeName);
+            }
             if (vdecl->initExpr) {
                 if (auto fm = dynamic_cast<FileMethodNode*>(vdecl->initExpr.get())) {
                     if (fm->method == "read_lines" || fm->method == "readlines") {
@@ -5212,6 +5943,7 @@ public:
                     if (vdecl->varType == ThavaType::INT && (t == ThavaType::FLOAT || t == ThavaType::DOUBLE)) {
                         enc.cvttsd2si(x86::RAX, x86::XMM0);
                     }
+                    if (vdecl->varType == ThavaType::INT) narrowIntReg(x86::RAX, vdecl->customTypeName);
                     enc.mov_mr_rbp(offset, x86::RAX);
                 }
             } else if (g_structs.count(vdecl->customTypeName)) {
@@ -5235,6 +5967,23 @@ public:
 
         if (auto assign = dynamic_cast<AssignNode*>(node)) {
             VarInfo* vi = lookupVar(assign->name);
+            if (!vi && isGlobalName(assign->name)) {
+                ThavaType gt = globalEnv->get(assign->name);
+                std::string gct = globalEnv->getCustomType(assign->name);
+                ThavaType t = emitExpr(assign->expr.get());
+                emitGlobalBase(x86::R11, globalVarSlots.at(assign->name));
+                if (gt == ThavaType::FLOAT || gt == ThavaType::DOUBLE) {
+                    if (t == ThavaType::INT || t == ThavaType::BOOL) enc.cvtsi2sd(x86::XMM0, x86::RAX);
+                    enc.movsd_mr(x86::R11, 0, x86::XMM0);
+                } else {
+                    if (gt == ThavaType::INT && (t == ThavaType::FLOAT || t == ThavaType::DOUBLE))
+                        enc.cvttsd2si(x86::RAX, x86::XMM0);
+                    if (gt == ThavaType::INT) narrowIntReg(x86::RAX, gct);
+                    enc.mov_mr(x86::R11, 0, x86::RAX);
+                }
+                invalidateRegCache();
+                return;
+            }
             if (!vi) {
                 std::cerr << "[Native Codegen Error]: Variable '" << assign->name << "' is not declared!\n";
                 exit(1);
@@ -5265,10 +6014,23 @@ public:
                     if (vi->type == ThavaType::INT && (t == ThavaType::FLOAT || t == ThavaType::DOUBLE)) {
                         enc.cvttsd2si(x86::RAX, x86::XMM0);
                     }
-                    enc.mov_mr_rbp(vi->offset, x86::RAX);
+                    storeVarFromReg(vi->offset, x86::RAX, vi);
                 }
             } else if (assign->op == "+=") {
-                if (vi->type == ThavaType::FLOAT || vi->type == ThavaType::DOUBLE) {
+                if (vi->type == ThavaType::STRING) {
+                    // `s += x` on a string concatenates; treating the pointers as
+                    // integers used to store a bogus pointer and crash on print.
+                    if (t != ThavaType::STRING) {
+                        std::cerr << "[Native Codegen Error]: '+=' on <str> variable '"
+                                  << assign->name << "' needs a <str> value.\n";
+                        exit(1);
+                    }
+                    enc.mov_rr(x86::RDX, x86::RAX);
+                    enc.mov_rm_rbp(x86::RCX, vi->offset);
+                    enc.call_label(lblStrConcat);
+                    storeVarFromReg(vi->offset, x86::RAX, vi);
+                    invalidateRegCache();
+                } else if (vi->type == ThavaType::FLOAT || vi->type == ThavaType::DOUBLE) {
                     if (t == ThavaType::INT) enc.cvtsi2sd(x86::XMM0, x86::RAX);
                     enc.movsd_rm_rbp(x86::XMM1, vi->offset);
                     enc.addsd_rr(x86::XMM1, x86::XMM0);
@@ -5277,10 +6039,15 @@ public:
                 } else {
                     enc.mov_rm_rbp(x86::RCX, vi->offset);
                     enc.add_rr(x86::RCX, x86::RAX);
-                    enc.mov_mr_rbp(vi->offset, x86::RCX);
+                    storeVarFromReg(vi->offset, x86::RCX, vi);
                     invalidateRegCache();
                 }
             } else if (assign->op == "-=") {
+                if (vi->type == ThavaType::STRING) {
+                    std::cerr << "[Native Codegen Error]: operator '-=' is not defined on <str> variable '"
+                              << assign->name << "'.\n";
+                    exit(1);
+                }
                 if (vi->type == ThavaType::FLOAT || vi->type == ThavaType::DOUBLE) {
                     if (t == ThavaType::INT) enc.cvtsi2sd(x86::XMM0, x86::RAX);
                     enc.movsd_rm_rbp(x86::XMM1, vi->offset);
@@ -5290,11 +6057,23 @@ public:
                 } else {
                     enc.mov_rm_rbp(x86::RCX, vi->offset);
                     enc.sub_rr(x86::RCX, x86::RAX);
-                    enc.mov_mr_rbp(vi->offset, x86::RCX);
+                    storeVarFromReg(vi->offset, x86::RCX, vi);
                     invalidateRegCache();
                 }
             } else if (assign->op == "*=") {
-                if (vi->type == ThavaType::FLOAT || vi->type == ThavaType::DOUBLE) {
+                if (vi->type == ThavaType::STRING) {
+                    // String repetition: `s *= 3`, same helper as `s * 3`.
+                    if (t != ThavaType::INT) {
+                        std::cerr << "[Native Codegen Error]: '*=' on <str> variable '"
+                                  << assign->name << "' needs an <int> count.\n";
+                        exit(1);
+                    }
+                    enc.mov_rr(x86::RDX, x86::RAX);
+                    enc.mov_rm_rbp(x86::RCX, vi->offset);
+                    enc.call_label(lblStrMul);
+                    storeVarFromReg(vi->offset, x86::RAX, vi);
+                    invalidateRegCache();
+                } else if (vi->type == ThavaType::FLOAT || vi->type == ThavaType::DOUBLE) {
                     if (t == ThavaType::INT) enc.cvtsi2sd(x86::XMM0, x86::RAX);
                     enc.movsd_rm_rbp(x86::XMM1, vi->offset);
                     enc.mulsd_rr(x86::XMM1, x86::XMM0);
@@ -5303,10 +6082,15 @@ public:
                 } else {
                     enc.mov_rm_rbp(x86::RCX, vi->offset);
                     enc.imul_rr(x86::RCX, x86::RAX);
-                    enc.mov_mr_rbp(vi->offset, x86::RCX);
+                    storeVarFromReg(vi->offset, x86::RCX, vi);
                     invalidateRegCache();
                 }
             } else if (assign->op == "/=") {
+                if (vi->type == ThavaType::STRING) {
+                    std::cerr << "[Native Codegen Error]: operator '/=' is not defined on <str> variable '"
+                              << assign->name << "'.\n";
+                    exit(1);
+                }
                 if (vi->type == ThavaType::FLOAT || vi->type == ThavaType::DOUBLE) {
                     if (t == ThavaType::INT) enc.cvtsi2sd(x86::XMM0, x86::RAX);
                     enc.movsd_rm_rbp(x86::XMM1, vi->offset);
@@ -5318,15 +6102,20 @@ public:
                     enc.mov_rm_rbp(x86::RAX, vi->offset);
                     enc.cqo();
                     enc.idiv_r(x86::R10);
-                    enc.mov_mr_rbp(vi->offset, x86::RAX);
+                    storeVarFromReg(vi->offset, x86::RAX, vi);
                     invalidateRegCache();
                 }
             } else if (assign->op == "%=") {
+                if (vi->type == ThavaType::STRING) {
+                    std::cerr << "[Native Codegen Error]: operator '%=' is not defined on <str> variable '"
+                              << assign->name << "'.\n";
+                    exit(1);
+                }
                 enc.mov_rr(x86::R10, x86::RAX);
                 enc.mov_rm_rbp(x86::RAX, vi->offset);
                 enc.cqo();
                 enc.idiv_r(x86::R10);
-                enc.mov_mr_rbp(vi->offset, x86::RDX);
+                storeVarFromReg(vi->offset, x86::RDX, vi);
                 invalidateRegCache();
             } else if (assign->op == "**=") {
                 enc.mov_rr(x86::R10, x86::RAX);
@@ -5382,20 +6171,20 @@ public:
 
                 enc.bindLabel(powDone);
                 enc.mov_rm_rbp(x86::RAX, resSlot);
-                enc.mov_mr_rbp(vi->offset, x86::RAX);
+                storeVarFromReg(vi->offset, x86::RAX, vi);
             } else {
-                enc.mov_mr_rbp(vi->offset, x86::RAX);
+                storeVarFromReg(vi->offset, x86::RAX, vi);
             }
             return;
         }
 
         if (auto idxAssign = dynamic_cast<IndexAssignNode*>(node)) {
             VarInfo* vi = lookupVar(idxAssign->varName);
-            if (!vi) {
+            if (!vi && !isGlobalName(idxAssign->varName)) {
                 std::cerr << "[Native Codegen Error]: Variable '" << idxAssign->varName << "' is not declared!\n";
                 exit(1);
             }
-            if (vi->type == ThavaType::DICT) {
+            if ((vi ? vi->type : globalEnv->get(idxAssign->varName)) == ThavaType::DICT) {
                 ThavaType kt = emitExpr(idxAssign->indexExpr.get());
                 currentFrameOffset -= 8;
                 if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
@@ -5408,7 +6197,7 @@ public:
                 int32_t valSlot = currentFrameOffset;
                 enc.mov_mr_rbp(valSlot, x86::RAX);
 
-                enc.mov_rm_rbp(x86::R10, vi->offset);
+                loadCollectionPtr(idxAssign->varName, vi, x86::R10);
                 size_t searchLoop = enc.createLabel();
                 size_t foundLbl = enc.createLabel();
                 size_t notFoundLbl = enc.createLabel();
@@ -5422,7 +6211,7 @@ public:
 
                 enc.bindLabel(searchLoop);
                 enc.mov_rm_rbp(x86::RAX, iSlot);
-                enc.mov_rm_rbp(x86::R10, vi->offset);
+                loadCollectionPtr(idxAssign->varName, vi, x86::R10);
                 enc.mov_rm(x86::R11, x86::R10, 0);
                 enc.cmp_rr(x86::RAX, x86::R11);
                 enc.jge(notFoundLbl);
@@ -5453,7 +6242,7 @@ public:
                 enc.mov_rm_rbp(x86::RAX, iSlot);
                 enc.mov_ri64(x86::R11, 32);
                 enc.imul_rr(x86::RAX, x86::R11);
-                enc.mov_rm_rbp(x86::R10, vi->offset);
+                loadCollectionPtr(idxAssign->varName, vi, x86::R10);
                 enc.add_rr(x86::R10, x86::RAX);
                 enc.mov_rm_rbp(x86::RAX, valSlot);
                 if (idxAssign->op == "+=") {
@@ -5470,7 +6259,7 @@ public:
                 enc.jmp(endAssign);
 
                 enc.bindLabel(notFoundLbl);
-                enc.mov_rm_rbp(x86::R10, vi->offset);
+                loadCollectionPtr(idxAssign->varName, vi, x86::R10);
                 enc.mov_rm(x86::RAX, x86::R10, 0); // count
                 enc.mov_ri64(x86::R11, 32);
                 enc.imul_rr(x86::RAX, x86::R11);
@@ -5485,7 +6274,7 @@ public:
                 enc.mov_mr(x86::R10, 40, x86::RAX); // valType
 
                 // count++
-                enc.mov_rm_rbp(x86::R10, vi->offset);
+                loadCollectionPtr(idxAssign->varName, vi, x86::R10);
                 enc.mov_rm(x86::RAX, x86::R10, 0);
                 enc.mov_ri64(x86::R11, 1);
                 enc.add_rr(x86::RAX, x86::R11);
@@ -5511,7 +6300,7 @@ public:
                 listElemTypes[idxAssign->varName] = ThavaType::DOUBLE;
             }
 
-            enc.mov_rm_rbp(x86::R10, vi->offset); // list ptr in R10
+            loadCollectionPtr(idxAssign->varName, vi, x86::R10); // list ptr in R10
             enc.mov_rm_rbp(x86::R11, idxSlot);    // index in R11
             enc.mov_ri64(x86::RDX, 8);
             enc.imul_rr(x86::R11, x86::RDX);      // idx * 8
@@ -5817,6 +6606,20 @@ public:
             return;
         }
 
+        if (dynamic_cast<ConsClearNode*>(node)) {
+            if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+                // ANSI clear + home: works in every Linux terminal
+                uint32_t offClear = pe.addStringLiteralOffset("\x1b[2J\x1b[H");
+                enc.lea_rip_rdata(x86::RDX, offClear);
+                emitCallPrintf(offFmtStr, x86::RDX, true);
+            } else {
+                uint32_t offCls = pe.addStringLiteralOffset("cls");
+                enc.lea_rip_rdata(x86::RCX, offCls);
+                enc.call_iat_func("system");
+            }
+            return;
+        }
+
         if (auto consOut = dynamic_cast<ConsOutNode*>(node)) {
             auto lit = dynamic_cast<LiteralNode*>(consOut->getExpr());
             if (lit && lit->getLitType() == ThavaType::STRING) {
@@ -5904,6 +6707,17 @@ public:
                     enc.lea_rip_rdata(x86::RDX, off);
                     emitCallPrintf(offFmtStr, x86::RDX, true);
                 } else if (et == ThavaType::LIST || et == ThavaType::TUPLE) {
+                    // Determine the element type so each item is printed with the
+                    // correct format (double bit patterns / string pointers would
+                    // otherwise be printed as raw integers -> garbage output).
+                    ThavaType printElemType = ThavaType::INT;
+                    if (auto pv = dynamic_cast<VarNode*>(consOut->getExpr())) {
+                        auto leit = listElemTypes.find(pv->getName());
+                        if (leit != listElemTypes.end()) printElemType = leit->second;
+                    } else {
+                        printElemType = lastCollectionElemType;
+                    }
+
                     currentFrameOffset -= 8;
                     if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
                     int32_t listPtrSlot = currentFrameOffset;
@@ -5933,8 +6747,16 @@ public:
                     enc.imul_rr(x86::RAX, x86::R11);
                     enc.mov_rm_rbp(x86::R10, listPtrSlot);
                     enc.add_rr(x86::R10, x86::RAX);
-                    enc.mov_rm(x86::RAX, x86::R10, 8); // elem
-                    emitCallPrintf(offFmtInt, x86::RAX, true);
+                    if (printElemType == ThavaType::FLOAT || printElemType == ThavaType::DOUBLE) {
+                        enc.movsd_rm(x86::XMM0, x86::R10, 8); // elem as double
+                        emitCallPrintfFloat(offFmtFloat, x86::XMM0);
+                    } else if (printElemType == ThavaType::STRING) {
+                        enc.mov_rm(x86::RAX, x86::R10, 8); // elem as char*
+                        emitCallPrintf(offFmtStr, x86::RAX, true);
+                    } else {
+                        enc.mov_rm(x86::RAX, x86::R10, 8); // elem as int64
+                        emitCallPrintf(offFmtInt, x86::RAX, true);
+                    }
 
                     size_t noCommaLbl = enc.createLabel();
                     enc.mov_rm_rbp(x86::RAX, idxSlot);
@@ -6071,6 +6893,7 @@ public:
                 } else if (currentFuncRetType == ThavaType::INT && (t == ThavaType::FLOAT || t == ThavaType::DOUBLE)) {
                     enc.cvttsd2si(x86::RAX, x86::XMM0);
                 }
+                if (currentFuncRetType == ThavaType::INT) narrowIntReg(x86::RAX, currentFuncRetWidth);
             }
             enc.jmp(currentFuncRetLabel);
             return;
@@ -6097,63 +6920,81 @@ public:
 
         if (auto raiseNode = dynamic_cast<RaiseErrorNode*>(node)) {
             if (raiseNode->isCompileTime) return;
-
-            uint32_t offFmtRuntimeError = pe.addStringLiteralOffset("[Runtime Error (%s)]: %s\n");
-
-            currentFrameOffset -= 8;
-            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-            int32_t typeSlot = currentFrameOffset;
-            if (raiseNode->typeExpr) {
-                emitExpr(raiseNode->typeExpr.get());
-                enc.mov_mr_rbp(typeSlot, x86::RAX);
-            } else {
-                uint32_t offDefType = pe.addStringLiteralOffset("RuntimeError");
-                enc.lea_rip_rdata(x86::RAX, offDefType);
-                enc.mov_mr_rbp(typeSlot, x86::RAX);
-            }
-
-            currentFrameOffset -= 8;
-            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-            int32_t msgSlot = currentFrameOffset;
-            if (raiseNode->msgExpr) {
-                emitExpr(raiseNode->msgExpr.get());
-                enc.mov_mr_rbp(msgSlot, x86::RAX);
-            } else {
-                uint32_t offDefMsg = pe.addStringLiteralOffset("Runtime Error!");
-                enc.lea_rip_rdata(x86::RAX, offDefMsg);
-                enc.mov_mr_rbp(msgSlot, x86::RAX);
-            }
-
-            enc.lea_rip_rdata(x86::RCX, offFmtRuntimeError);
-            enc.mov_rm_rbp(x86::RDX, typeSlot);
-            enc.mov_rm_rbp(x86::R8, msgSlot);
-            enc.call_iat_func("printf");
-
-            enc.mov_ri64(x86::RCX, 1);
-            enc.call_iat_func("exit");
+            emitThrowCall(raiseNode->msgExpr.get(), raiseNode->typeExpr.get(), "Runtime Error!");
             return;
         }
 
         if (auto throwNode = dynamic_cast<ThrowNode*>(node)) {
-            uint32_t offFmtThrow = pe.addStringLiteralOffset("[Runtime Exception]: %s\n");
-            currentFrameOffset -= 8;
+            emitThrowCall(throwNode->expr.get(), nullptr, "Runtime Exception occurred!");
+            return;
+        }
+
+        if (auto tryNode = dynamic_cast<TryExceptNode*>(node)) {
+            // Handler record lives in this frame; R15 links active handlers.
+            currentFrameOffset -= 48;
             if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-            int32_t msgSlot = currentFrameOffset;
-            if (throwNode->expr) {
-                emitExpr(throwNode->expr.get());
-                enc.mov_mr_rbp(msgSlot, x86::RAX);
-            } else {
-                uint32_t offDefMsg = pe.addStringLiteralOffset("Runtime Exception occurred!");
-                enc.lea_rip_rdata(x86::RAX, offDefMsg);
-                enc.mov_mr_rbp(msgSlot, x86::RAX);
+            int32_t rec = currentFrameOffset;
+
+            size_t resumeLbl = enc.createLabel();
+            size_t afterLbl = enc.createLabel();
+
+            enc.xor_r32(x86::R10, x86::R10);
+            enc.mov_mr_rbp(rec + 0, x86::R10);            // message
+            enc.mov_mr_rbp(rec + 8, x86::R10);            // type name
+            enc.mov_mr_rbp(rec + 16, x86::R15);           // previous handler
+            enc.lea_rip_label(x86::R10, resumeLbl);
+            enc.mov_mr_rbp(rec + 24, x86::R10);           // resume address
+            enc.mov_mr_rbp(rec + 32, x86::RBP);           // saved RBP
+            enc.lea_rm_rbp(x86::R15, rec);                // install handler
+
+            enterScope();
+            for (const auto& s : tryNode->tryBody) emitStmt(s.get());
+            exitScope();
+
+            // Normal completion: pop the handler and skip the catch code.
+            enc.mov_rm_rbp(x86::R15, rec + 16);
+            enc.jmp(afterLbl);
+
+            // A throw jumped back here.
+            enc.bindLabel(resumeLbl);
+            enc.mov_rm_rbp(x86::R15, rec + 16);
+
+            const ExceptClause* catchAll = nullptr;
+            for (const auto& clause : tryNode->exceptClauses) {
+                bool isCatchAll = clause.exceptionType.empty() || clause.exceptionType == "Exception" ||
+                                  clause.exceptionType == "RuntimeError";
+
+                size_t nextClause = 0;
+                if (!isCatchAll) {
+                    nextClause = enc.createLabel();
+                    enc.mov_rm_rbp(x86::RCX, rec + 8);
+                    enc.lea_rip_rdata(x86::RDX, pe.addStringLiteralOffset(clause.exceptionType));
+                    enc.call_iat_func("strcmp");
+                    enc.test_rr(x86::RAX, x86::RAX);
+                    enc.jne(nextClause);
+                }
+
+                enterScope();
+                if (!clause.varName.empty()) {
+                    int32_t varOff = declareVar(clause.varName, ThavaType::STRING);
+                    enc.mov_rm_rbp(x86::RAX, rec + 0);
+                    enc.mov_mr_rbp(varOff, x86::RAX);
+                }
+                for (const auto& s : clause.body) emitStmt(s.get());
+                exitScope();
+                enc.jmp(afterLbl);
+
+                if (!isCatchAll) enc.bindLabel(nextClause);
+                else { catchAll = &clause; break; }
             }
+            (void)catchAll;
 
-            enc.lea_rip_rdata(x86::RCX, offFmtThrow);
-            enc.mov_rm_rbp(x86::RDX, msgSlot);
-            enc.call_iat_func("printf");
+            // Nothing matched: keep unwinding outwards with the same payload.
+            enc.mov_rm_rbp(x86::RAX, rec + 0);
+            enc.mov_rm_rbp(x86::RDX, rec + 8);
+            enc.call_label(lblThrow);
 
-            enc.mov_ri64(x86::RCX, 1);
-            enc.call_iat_func("exit");
+            enc.bindLabel(afterLbl);
             return;
         }
     }
@@ -6173,8 +7014,9 @@ public:
         maxFrameOffset = -32;
         currentFuncRetLabel = enc.createLabel();
         currentFuncRetType = func->returnType;
+        currentFuncRetWidth = func->customReturnType;
 
-        enterScope();
+        enterFunctionScope();
 
         // Setup defers inside this function
         std::vector<DeferNode*> defersInFunc;
@@ -6206,10 +7048,38 @@ public:
             std::string pct = (i < func->paramCustomTypes.size()) ? func->paramCustomTypes[i] : "";
             int32_t off = declareVar(pname, pt, pct);
 
-            if (i < 4) {
+            if (isCollectionType(pt)) {
+                // Element type comes from the call sites (g_funcListParamElem); the
+                // parameter shadows a same-named global, so never inherit its type.
+                auto eit = g_funcListParamElem.find(func->name);
+                ThavaType et = (eit != g_funcListParamElem.end() && i < eit->second.size())
+                                   ? eit->second[i] : ThavaType::UNKNOWN;
+                if (et != ThavaType::UNKNOWN) listElemTypes[pname] = et;
+                else listElemTypes.erase(pname);
+            }
+
+            if (isCollectionType(pt)) {
+                // The caller passes the address of its own slot. Keep that address
+                // (to copy the possibly reallocated pointer back on return) and use
+                // the current pointer value as this function's variable.
+                int32_t refSlot = declareVar("@ref" + std::to_string(i), ThavaType::INT);
+                VarInfo* pv = lookupVar(pname);
+                if (pv) { pv->listOut = true; pv->listOutSlot = refSlot; }
+                if (i < 4) {
+                    enc.mov_mr_rbp(refSlot, intRegs[i]);
+                } else {
+                    int32_t callerOff = 48 + (int32_t)(i - 4) * 8;
+                    enc.mov_rm_rbp(x86::RAX, callerOff);
+                    enc.mov_mr_rbp(refSlot, x86::RAX);
+                }
+                enc.mov_rm_rbp(x86::RAX, refSlot);
+                enc.mov_rm(x86::RAX, x86::RAX, 0);
+                enc.mov_mr_rbp(off, x86::RAX);
+            } else if (i < 4) {
                 if (pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) {
                     enc.movsd_mr_rbp(off, xmmRegs[i]);
                 } else {
+                    if (pt == ThavaType::INT) narrowIntReg(intRegs[i], pct);
                     enc.mov_mr_rbp(off, intRegs[i]);
                 }
             } else {
@@ -6259,7 +7129,18 @@ public:
             }
         }
 
-        exitScope();
+        // Copy list/dict/tuple parameters back into the caller's variable, so that
+        // addval/removeval/assign inside this function stay visible to the caller.
+        for (size_t i = 0; i < func->params.size(); ++i) {
+            if (!isCollectionType(func->params[i].first)) continue;
+            VarInfo* pv = lookupVar(func->params[i].second);
+            if (!pv || !pv->listOut) continue;
+            enc.mov_rm_rbp(x86::R10, pv->offset);
+            enc.mov_rm_rbp(x86::R11, pv->listOutSlot);
+            enc.mov_mr(x86::R11, 0, x86::R10);
+        }
+
+        exitFunctionScope();
 
         enc.add_rsp(2048);
         enc.pop(x86::RBP);
@@ -6269,8 +7150,143 @@ public:
     // ==========================================
     // PROGRAM ENTRY POINT & ORCHESTRATION
     // ==========================================
+    // Maps every @dlattach library into the running process and relocates its
+    // absolute data words. Emitted into the program entry, before user code, so a
+    // missing library fails with a clear message instead of a bad jump.
+    void emitDLAttachLoader() {
+        if (!g_hasDLAttach) return;
+
+        for (const auto& libPath : g_dlLibraries) {
+            auto infoIt = g_dlLibraryInfos.find(libPath);
+            if (infoIt == g_dlLibraryInfos.end() || !infoIt->second.hasOffsets) {
+                std::cerr << "[Thava Compiler] Error: dynamic library '" << libPath
+                          << "' exports no offsets; rebuild it with --lib using this compiler.\n";
+                exit(1);
+            }
+            const DLLibraryInfo& lib = infoIt->second;
+            const char* expectedMachine = std::is_same_v<TEmitter, PeEmitter> ? "x86-64-pe" : "x86-64-elf";
+            if (!lib.machine.empty() && lib.machine != expectedMachine) {
+                std::cerr << "[Thava Compiler] Error: dynamic library '" << libPath << "' was built for '"
+                          << lib.machine << "', but this target is '" << expectedMachine << "'.\n";
+                exit(1);
+            }
+            const int64_t base = (int64_t)dlLoadBaseForPath(libPath);
+            const int64_t delta = base - (int64_t)lib.imageBase;
+
+            uint32_t pathStr = pe.addStringLiteralOffset(libPath);
+            uint32_t baseNameStr = pe.addStringLiteralOffset(lib.basename.empty() ? libPath : lib.basename);
+            const std::string errMsg =
+                "[Thava Runtime] cannot load library '" + libPath + "'\n";
+            uint32_t errStr = pe.addStringLiteralOffset(errMsg);
+            size_t errLbl = enc.createLabel();
+            size_t okLbl = enc.createLabel();
+            size_t altLbl = enc.createLabel();
+            size_t fdLbl = enc.createLabel();
+
+            // fd = open(path, O_RDONLY); jumps to failLbl on error, leaves the fd in R12.
+            auto emitOpen = [&](uint32_t strOff, size_t failLbl) {
+                enc.lea_rip_rdata(x86::RDI, strOff);
+                enc.xor_r32(x86::RSI, x86::RSI);
+                enc.xor_r32(x86::RDX, x86::RDX);
+                enc.mov_ri64(x86::RAX, 2);        // sys_open
+                enc.syscall();
+                enc.test_rr(x86::RAX, x86::RAX);
+                enc.jl(failLbl);
+                enc.mov_rr(x86::R12, x86::RAX);   // fd
+            };
+
+            emitOpen(pathStr, altLbl);
+            enc.jmp(fdLbl);
+
+            // The recorded path can belong to the build machine (cross-compiling), so
+            // fall back to the plain file name in the current directory.
+            enc.bindLabel(altLbl);
+            emitOpen(baseNameStr, errLbl);
+            enc.bindLabel(fdLbl);
+
+            // size = lseek(fd, 0, SEEK_END)
+            enc.mov_rr(x86::RDI, x86::R12);
+            enc.xor_r32(x86::RSI, x86::RSI);
+            enc.mov_ri64(x86::RDX, 2);
+            enc.mov_ri64(x86::RAX, 8);
+            enc.syscall();
+            enc.test_rr(x86::RAX, x86::RAX);
+            enc.jle(errLbl);
+            enc.mov_rr(x86::R13, x86::RAX);      // file size
+            enc.mov_rr(x86::R14, x86::R13);
+            enc.mov_ri64(x86::R10, kDLHeapSlack);
+            enc.add_rr(x86::R14, x86::R10);      // reservation = size + heap slack
+
+            // Reserve the whole window anonymously first: the part of the file that
+            // is not page aligned stays zero-filled, which gives the module its heap.
+            enc.mov_ri64(x86::RDI, base);
+            enc.mov_rr(x86::RSI, x86::R14);
+            enc.mov_ri64(x86::RDX, 7);           // PROT_READ|PROT_WRITE|PROT_EXEC
+            enc.mov_ri64(x86::R10, 0x22);        // MAP_PRIVATE|MAP_ANONYMOUS
+            enc.mov_ri64(x86::R8, -1);
+            enc.xor_r32(x86::R9, x86::R9);
+            enc.mov_ri64(x86::RAX, 9);           // mmap
+            enc.syscall();
+            enc.mov_ri64(x86::R10, base);
+            enc.cmp_rr(x86::RAX, x86::R10);
+            enc.jne(errLbl);
+
+            // Map the library file itself over the reservation (MAP_FIXED).
+            enc.mov_ri64(x86::RDI, base);
+            enc.mov_rr(x86::RSI, x86::R13);
+            enc.mov_ri64(x86::RDX, 7);
+            enc.mov_ri64(x86::R10, 0x12);        // MAP_PRIVATE|MAP_FIXED
+            enc.mov_rr(x86::R8, x86::R12);
+            enc.xor_r32(x86::R9, x86::R9);
+            enc.mov_ri64(x86::RAX, 9);
+            enc.syscall();
+            enc.mov_ri64(x86::R10, base);
+            enc.cmp_rr(x86::RAX, x86::R10);
+            enc.jne(errLbl);
+
+            // close(fd)
+            enc.mov_rr(x86::RDI, x86::R12);
+            enc.mov_ri64(x86::RAX, 3);
+            enc.syscall();
+
+            // Relocate the module's absolute function-pointer words.
+            for (uint32_t relocOff : lib.relocs) {
+                enc.mov_ri64(x86::R10, base + (int64_t)relocOff);
+                enc.mov_rm(x86::R11, x86::R10, 0);
+                enc.mov_ri64(x86::RAX, delta);
+                enc.add_rr(x86::R11, x86::RAX);
+                enc.mov_mr(x86::R10, 0, x86::R11);
+            }
+
+            // Run the module's top-level initializer, like DllMain on PE. RDX = 1
+            // passes the library's DllMain reason guard; the entry sets up its own
+            // frame, so it must be entered at its first instruction.
+            if (lib.hasInit) {
+                enc.mov_ri64(x86::RDX, 1);
+                enc.mov_ri64(x86::RAX, base + (int64_t)lib.textRva + (int64_t)lib.initOffset);
+                enc.call_r(x86::RAX);
+            }
+            enc.jmp(okLbl);
+
+            // Report on stderr and exit(1) with raw syscalls only: the loader must
+            // not depend on the program's runtime helpers being initialised.
+            enc.bindLabel(errLbl);
+            enc.mov_ri64(x86::RDI, 2);
+            enc.lea_rip_rdata(x86::RSI, errStr);
+            enc.mov_ri64(x86::RDX, (int64_t)errMsg.size());
+            enc.mov_ri64(x86::RAX, 1);
+            enc.syscall();
+            enc.mov_ri64(x86::RDI, 1);
+            enc.mov_ri64(x86::RAX, 60);
+            enc.syscall();
+
+            enc.bindLabel(okLbl);
+        }
+    }
+
     bool compileProgram(const std::vector<ASTPtr>& ast, const std::string& outputFile) {
         initFormats();
+        size_t libInitLabel = 0;
 
         if (g_isLibraryMode) {
             if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
@@ -6283,6 +7299,38 @@ public:
         size_t mainLabel = enc.createLabel();
         enc.jmp(mainLabel);
 
+        // A library's initializer is its entry point: the ELF loader calls it
+        // directly, with RDX = 1 to pass the DllMain reason guard below.
+        if (g_isLibraryMode) libInitLabel = mainLabel;
+
+        // 1.5. Globals: reserve one data cell for the program frame pointer and
+        // give every top-level variable a slot in the program frame, so functions
+        // and the top-level body agree on the same addresses.
+        // Globals live in the frame of the program body; a data cell stores that
+        // frame pointer so functions and methods can reach them.
+        currentFrameOffset = -32;
+        maxFrameOffset = -32;
+        enterFunctionScope();
+        globalBaseCell = pe.addDataSlot(8);
+        if (globalEnv) {
+            for (const auto& gv : globalEnv->globals) {
+                globalVarSlots[gv.first] = declareVar(
+                    gv.first, globalEnv->get(gv.first), globalEnv->getCustomType(gv.first));
+                // Function bodies are emitted before the program body, so the element
+                // type of a global list must be known now: without it `g_list[i]`
+                // would be unboxed as an int (raw bits for doubles).
+                ThavaType gElem = globalEnv->getListElem(gv.first);
+                if (gElem != ThavaType::UNKNOWN && gElem != ThavaType::NONE)
+                    listElemTypes[gv.first] = gElem;
+            }
+        }
+        // Everything emitted from here on (functions, methods) must not resolve
+        // these frame slots.
+        lookupFloor = scopeStack.size();
+        // Functions reset the frame counter while they are emitted; remember where
+        // the program body's locals start.
+        programFrameBase = currentFrameOffset;
+
         // 1.5. In Linux ELF mode, emit helpers calling Linux syscalls directly
         if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
             LinuxNativeRuntime linuxRt(enc, pe);
@@ -6291,6 +7339,7 @@ public:
 
         // 2. Emit runtime string & collection helpers
         emitRuntimeHelpers();
+        emitThrowHelper();
 
         // 2.5. Register all dynamic library imported functions in PE
         if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
@@ -6299,7 +7348,12 @@ public:
             }
         }
 
-        // 3. Pre-register all user functions & forward declarations
+        // 3. Pre-register classes (layouts + method labels)
+        for (const auto& node : ast) {
+            if (auto cd = dynamic_cast<ClassDeclNode*>(node.get())) registerNativeClass(cd);
+        }
+
+        // 3.1. Pre-register all user functions & forward declarations
         for (const auto& node : ast) {
             if (auto func = dynamic_cast<FunctionDeclNode*>(node.get())) {
                 if (functions.find(func->name) == functions.end()) {
@@ -6327,15 +7381,51 @@ public:
             }
         }
 
+        // 4.1. Emit bodies for all class methods and constructors
+        for (const auto& node : ast) {
+            auto cd = dynamic_cast<ClassDeclNode*>(node.get());
+            if (!cd) continue;
+            for (const auto& m : cd->methods) {
+                std::string key = cd->className + "::" + m.name;
+                auto lit = classMethodLabels.find(key);
+                if (lit == classMethodLabels.end()) continue;
+                emitClassMethod(cd->className, lit->second, m.returnType, m.customReturnType,
+                                m.params, m.paramCustomTypes, m.body, m.name);
+            }
+            for (const auto& c : cd->constructors) {
+                std::string key = cd->className + "::init";
+                auto lit = classMethodLabels.find(key);
+                if (lit == classMethodLabels.end()) continue;
+                emitClassMethod(cd->className, lit->second, ThavaType::VOID, "",
+                                c.params, c.paramCustomTypes, c.body, "init");
+            }
+        }
+
         // 5. Main Entry Point
         enc.bindLabel(mainLabel);
         enc.push(x86::RBP);
         enc.mov_rr(x86::RBP, x86::RSP);
         enc.sub_rsp(2048);
 
-        currentFrameOffset = -32;
-        maxFrameOffset = -32;
-        enterScope();
+        // Globals already reserved the first slots of this frame (step 1.5); locals
+        // continue after them. The program body resolves globals as its own frame
+        // slots again.
+        lookupFloor = 0;
+        currentFrameOffset = programFrameBase;
+        enterFunctionScope();
+
+        // Publish this frame pointer so functions can reach globals.
+        enc.lea_rip_rdata(x86::R10, globalBaseCell);
+        enc.mov_mr(x86::R10, 0, x86::RBP);
+
+        // Map and relocate every @dlattach library before any of its code runs (a
+        // library itself never runs the loader: its exports are entered directly).
+        if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+            if (!g_isLibraryMode) emitDLAttachLoader();
+        }
+
+        // No handler installed at program start.
+        enc.xor_r32(x86::R15, x86::R15);
 
         if (g_isLibraryMode) {
             // Dynamic Library Entry Point (DllMain for Windows PE)
@@ -6360,8 +7450,10 @@ public:
             enc.pop(x86::RBP);
             enc.mov_ri64(x86::RAX, 1); // return TRUE (success)
             enc.ret();
-            exitScope();
+            exitFunctionScope();
         } else {
+            emittingProgramBody = true;
+
             // Set console to UTF-8
             if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
                 enc.mov_ri64(x86::RCX, 65001);
@@ -6412,8 +7504,10 @@ public:
                 if (dynamic_cast<StructDeclNode*>(node.get())) continue;
                 if (dynamic_cast<EnumDeclNode*>(node.get())) continue;
                 emitStmt(node.get());
-            }
 
+        }
+
+        {
             // Execute active top-level defers in REVERSE order (LIFO)
             for (int i = (int)topDeferInfos.size() - 1; i >= 0; --i) {
                 size_t skipLbl = enc.createLabel();
@@ -6436,28 +7530,22 @@ public:
             enc.add_rsp(2048);
             enc.pop(x86::RBP);
             enc.ret();
-            exitScope();
+            exitFunctionScope();
+        }
         }
 
         // 5.5. Dynamic Library Export & Metadata registration
+        // The metadata carries image offsets of the exported functions, so it can
+        // only be built once .text is final; it is therefore reached through a data
+        // slot that is patched together with the string itself.
+        uint32_t metaSlot = 0;
         if (g_isLibraryMode) {
-            std::string metaStr = "__THAVA_METADATA_START__\n# THAVA DYNAMIC LIBRARY METADATA\n";
-            for (const auto& node : ast) {
-                if (auto func = dynamic_cast<FunctionDeclNode*>(node.get())) {
-                    metaStr += "func:" + func->name + "|ret:" + typeToString(func->returnType) + "|params:";
-                    for (size_t i = 0; i < func->params.size(); ++i) {
-                        metaStr += typeToString(func->params[i].first) + " " + func->params[i].second;
-                        if (i + 1 < func->params.size()) metaStr += ",";
-                    }
-                    metaStr += "\n";
-                }
-            }
-            metaStr += "__THAVA_METADATA_END__\n";
-            uint32_t metaStrOffset = pe.addStringLiteralOffset(metaStr);
+            metaSlot = pe.addDataSlot(8);
 
             // Emit _thava_get_metadata in .text
             uint32_t metaFuncTextOffset = (uint32_t)enc.code.size();
-            enc.lea_rip_rdata(x86::RAX, metaStrOffset);
+            enc.lea_rip_rdata(x86::R10, metaSlot);
+            enc.mov_rm(x86::RAX, x86::R10, 0);
             enc.ret();
 
             if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
@@ -6480,6 +7568,58 @@ public:
 
         // 6. Layout .rdata, resolve fixups, and write PE/ELF binary
         pe.setTextBytes(enc.code);
+        if (g_isLibraryMode) {
+            uint32_t dataRva = 0;
+            if constexpr (std::is_same_v<TEmitter, PeEmitter>) dataRva = pe.getRdataRva();
+            else dataRva = pe.getDataRva();
+
+            auto hexVal = [](uint64_t v) {
+                static const char* digits = "0123456789abcdef";
+                std::string s;
+                do { s.insert(s.begin(), digits[v & 0xF]); v >>= 4; } while (v);
+                return "0x" + s;
+            };
+
+            std::string metaStr = "__THAVA_METADATA_START__\n# THAVA DYNAMIC LIBRARY METADATA\n";
+            metaStr += "machine:";
+            metaStr += std::is_same_v<TEmitter, PeEmitter> ? "x86-64-pe" : "x86-64-elf";
+            metaStr += "\n";
+            metaStr += "image:" + hexVal(0x400000) + "\n";
+            metaStr += "text:" + hexVal(pe.textRva) + "\n";
+            metaStr += "data:" + hexVal(dataRva) + "\n";
+            if (libInitLabel != 0) {
+                int initOff = enc.getLabelOffset(libInitLabel);
+                if (initOff >= 0) metaStr += "init:" + hexVal((uint64_t)initOff) + "\n";
+            }
+            for (const auto& node : ast) {
+                if (auto func = dynamic_cast<FunctionDeclNode*>(node.get())) {
+                    metaStr += "func:" + func->name + "|ret:" + typeToString(func->returnType) + "|params:";
+                    for (size_t i = 0; i < func->params.size(); ++i) {
+                        metaStr += typeToString(func->params[i].first) + " " + func->params[i].second;
+                        if (i + 1 < func->params.size()) metaStr += ",";
+                    }
+                    auto fit = functions.find(func->name);
+                    if (fit != functions.end()) {
+                        int fOff = enc.getLabelOffset(fit->second.labelId);
+                        if (fOff >= 0) metaStr += "|off:" + hexVal((uint64_t)fOff);
+                    }
+                    metaStr += "\n";
+                }
+            }
+            if constexpr (!std::is_same_v<TEmitter, PeEmitter>) {
+                metaStr += "reloc:";
+                bool firstReloc = true;
+                for (const auto& slot : pe.getFuncSlotOffsets()) {
+                    if (!firstReloc) metaStr += ",";
+                    firstReloc = false;
+                    metaStr += hexVal((uint64_t)dataRva + slot.second);
+                }
+                metaStr += "\n";
+            }
+            metaStr += "__THAVA_METADATA_END__\n";
+            uint32_t metaStrOffset = pe.addStringLiteralOffset(metaStr);
+            pe.setDataSlotValue(metaSlot, 0x400000 + dataRva + metaStrOffset);
+        }
         pe.layoutRdata();
         enc.resolveFixups(pe.textRva, pe.getRdataRva(), pe.getFuncToIatMap());
         pe.setTextBytes(enc.code);

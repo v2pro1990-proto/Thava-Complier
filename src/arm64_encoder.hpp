@@ -154,6 +154,24 @@ public:
     }
 
     // ORR Xd, Xn, Xm
+    // lsr rd, rn, #shift  (64-bit)
+    void lsr_ri(Reg rd, Reg rn, uint32_t shift) {
+        emit32(0xD340FC00u | ((shift & 0x3F) << 16) | (rn << 5) | rd);
+    }
+
+    // lsl rd, rn, #shift  (64-bit)
+    // ASR Xd, Xn, #shift (arithmetic shift right, 64-bit)
+    void asr_ri(Reg rd, Reg rn, uint32_t shift) {
+        emit32(0x9340FC00u | ((shift & 63) << 16) | ((rn & 31) << 5) | (rd & 31));
+    }
+
+    void lsl_ri(Reg rd, Reg rn, uint32_t shift) {
+        uint32_t s = shift & 0x3F;
+        uint32_t immr = (64 - s) & 0x3F;
+        uint32_t imms = 63 - s;
+        emit32(0xD3400000u | (immr << 16) | (imms << 10) | (rn << 5) | rd);
+    }
+
     void orr_rrr(Reg rd, Reg rn, Reg rm) {
         emit32(0xAA000000 | ((rm & 31) << 16) | ((rn & 31) << 5) | (rd & 31));
     }
@@ -391,6 +409,50 @@ public:
     // FCVTZS Xd, Dn (Convert 64-bit float to signed 64-bit integer, round towards zero)
     void fcvtzs_rd(Reg rd, VReg rn) {
         emit32(0x9E780000 | ((rn & 31) << 5) | (rd & 31));
+    }
+
+    // FMOV Dd, Xn (integer bits -> double register)
+    void fmov_dx(VReg rd, Reg rn) {
+        emit32(0x9E670000 | ((rn & 31) << 5) | (rd & 31));
+    }
+
+    // FMOV Xd, Dn (double register bits -> integer register)
+    void fmov_xd(Reg rd, VReg rn) {
+        emit32(0x9E660000 | ((rn & 31) << 5) | (rd & 31));
+    }
+
+    // FCVT Dd, Sn (single -> double)
+    void fcvt_sd(VReg rd, VReg rn) {
+        emit32(0x1E22C000 | ((rn & 31) << 5) | (rd & 31));
+    }
+
+    // FCVT Sd, Dn (double -> single)
+    void fcvt_ds(VReg rd, VReg rn) {
+        emit32(0x1E624000 | ((rn & 31) << 5) | (rd & 31));
+    }
+
+    // LDR St, [Xn, #offset] (32-bit FP load, offset must be a multiple of 4)
+    void fldr_s_imm(VReg rt, Reg rn, int32_t offset) {
+        if (offset >= 0 && offset <= 16380 && (offset % 4 == 0)) {
+            uint32_t imm12 = (offset / 4) & 0xFFF;
+            emit32(0xBD400000 | (imm12 << 10) | ((rn & 31) << 5) | (rt & 31));
+        } else {
+            mov_ri64(X16, offset);
+            add_rrr(X16, rn, X16);
+            emit32(0xBD400000 | ((X16 & 31) << 5) | (rt & 31));
+        }
+    }
+
+    // STR St, [Xn, #offset] (32-bit FP store)
+    void fstr_s_imm(VReg rt, Reg rn, int32_t offset) {
+        if (offset >= 0 && offset <= 16380 && (offset % 4 == 0)) {
+            uint32_t imm12 = (offset / 4) & 0xFFF;
+            emit32(0xBD000000 | (imm12 << 10) | ((rn & 31) << 5) | (rt & 31));
+        } else {
+            mov_ri64(X16, offset);
+            add_rrr(X16, rn, X16);
+            emit32(0xBD000000 | ((X16 & 31) << 5) | (rt & 31));
+        }
     }
 
     // LDR Dt, [Xn, #offset] (64-bit FP load)

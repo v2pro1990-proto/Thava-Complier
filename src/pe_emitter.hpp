@@ -176,6 +176,21 @@ public:
         return off;
     }
 
+    // Reserve a writable 8-byte slot in .rdata (used for the global-variable
+    // base pointer), returns its offset within .rdata.
+    uint32_t addDataSlot(size_t bytes = 8) {
+        while (rdataBytes.size() % 8 != 0) rdataBytes.push_back(0); // 8-byte align
+        uint32_t off = (uint32_t)rdataBytes.size();
+        for (size_t i = 0; i < bytes; ++i) rdataBytes.push_back(0);
+        return off;
+    }
+
+    // Overwrite an already reserved data slot (late metadata pointer).
+    void setDataSlotValue(uint32_t offset, uint64_t value) {
+        if (offset + sizeof(uint64_t) > rdataBytes.size()) return;
+        std::memcpy(&rdataBytes[offset], &value, sizeof(uint64_t));
+    }
+
     // Add 8-byte double literal to .rdata, returns offset within .rdata
     uint32_t addDoubleLiteralOffset(double val) {
         while (rdataBytes.size() % 8 != 0) rdataBytes.push_back(0); // 8-byte align
@@ -521,7 +536,7 @@ public:
             writeVal<uint32_t>(peFile, secHdrOffset + 28, 0);
             writeVal<uint16_t>(peFile, secHdrOffset + 32, 0);
             writeVal<uint16_t>(peFile, secHdrOffset + 34, 0);
-            writeVal<uint32_t>(peFile, secHdrOffset + 36, 0x40000040); // INITIALIZED_DATA | READ
+            writeVal<uint32_t>(peFile, secHdrOffset + 36, 0xC0000040); // INITIALIZED_DATA | READ | WRITE
         }
 
         // Section 3: .reloc (if isDll)

@@ -1,0 +1,47 @@
+<int> counter = 2
+<dbl> factor = 1.5
+<str> label = "A"
+<lst> names = ["old"]
+<lst> items = []
+class Tick {
+    func Tick() {
+        global <int> counter
+        counter += 3
+    }
+    <void> func square() {
+        global <int> counter
+        counter **= 2
+    }
+}
+func change() {
+    global <int> counter
+    global <dbl> factor
+    global <str> label
+    global <lst> names
+    global <lst> items
+    counter -= 1
+    counter *= 3
+    counter /= 4
+    counter %= 7
+    factor = 1.5
+    factor *= 2.0
+    label += "B"
+    names[0] = "new"
+    items.addval(9)
+}
+func shadowParam(<int> counter) {
+    counter = 50
+}
+func shadow() {
+    <int> counter = 90
+    counter = 91
+}
+func main() {
+    <Tick> tick = Tick()
+    tick.square()
+    change()
+    shadowParam(4)
+    shadow()
+    cons.out("@{counter} @{factor} @{label} @{names[0]} @{items[0]}")
+}
+main()

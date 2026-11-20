@@ -7,6 +7,7 @@
 #include <cstring>
 #include <map>
 #include <iostream>
+#include <filesystem>
 
 class ElfEmitter {
 public:
@@ -87,6 +88,14 @@ public:
         return getDataRva();
     }
 
+    // Reserve a writable 8-byte slot in the data section (global base pointer).
+    uint32_t addDataSlot(size_t bytes = 8) {
+        while (dataBytes.size() % 8 != 0) dataBytes.push_back(0);
+        uint32_t off = (uint32_t)dataBytes.size();
+        for (size_t i = 0; i < bytes; ++i) dataBytes.push_back(0);
+        return off;
+    }
+
     // Add string literal to data pool, returns offset within data section
     uint32_t addStringLiteralOffset(const std::string& str) {
         auto it = stringPool.find(str);
@@ -104,6 +113,19 @@ public:
         uint32_t off = (uint32_t)dataBytes.size();
         appendVal<double>(dataBytes, val);
         return off;
+    }
+
+    // Overwrite an already reserved data slot (used for the late metadata pointer:
+    // the value needs the final .data RVA, which is only known once .text is fixed).
+    void setDataSlotValue(uint32_t offset, uint64_t value) {
+        if (offset + sizeof(uint64_t) > dataBytes.size()) return;
+        std::memcpy(&dataBytes[offset], &value, sizeof(uint64_t));
+    }
+
+    // Image offsets of the absolute function-pointer words in .data; the runtime
+    // loader has to relocate exactly these when it maps a library elsewhere.
+    const std::map<std::string, uint32_t>& getFuncSlotOffsets() const {
+        return funcToSlotOffset;
     }
 
     // Allocate an 8-byte function pointer slot in .data
@@ -237,6 +259,15 @@ public:
 
         out.write(reinterpret_cast<const char*>(elfFile.data()), elfFile.size());
         out.close();
+
+        // Linux has no extension-driven "executable" bit: make the produced binary
+        // directly runnable, like every native compiler does.
+        std::error_code permEc;
+        std::filesystem::permissions(
+            filePath,
+            std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                std::filesystem::perms::others_exec,
+            std::filesystem::perm_options::add, permEc);
 
         return true;
     }

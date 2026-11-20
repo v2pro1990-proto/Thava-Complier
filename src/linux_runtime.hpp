@@ -18,6 +18,11 @@ public:
     uint32_t offHeapTop  = 0;
     uint32_t offReadBuf  = 0;  // 1024-byte input buffer
     uint32_t offStrNL    = 0;  // "\n"
+    uint32_t offDoubleMillion = 0; // 1000000.0
+    uint32_t offDoubleHalf    = 0; // 0.5
+    uint32_t offDoubleTen     = 0; // 10.0 (atof exponent scaling)
+    uint32_t offShellPath     = 0; // "/bin/sh"
+    uint32_t offDashC         = 0; // "-c"
 
     LinuxNativeRuntime(x86::Encoder& e, ElfEmitter& el)
         : enc(e), elf(el) {}
@@ -28,6 +33,11 @@ public:
         offHeapCur  = elf.addDoubleLiteralOffset(0.0);
         offHeapTop  = elf.addDoubleLiteralOffset(0.0);
         offStrNL    = elf.addStringLiteralOffset("\n");
+        offDoubleMillion = elf.addDoubleLiteralOffset(1000000.0);
+        offDoubleHalf    = elf.addDoubleLiteralOffset(0.5);
+        offDoubleTen     = elf.addDoubleLiteralOffset(10.0);
+        offShellPath     = elf.addStringLiteralOffset("/bin/sh");
+        offDashC         = elf.addStringLiteralOffset("-c");
 
         // Allocate 1024 bytes buffer in .data for console input
         std::string zeroBuf(1024, '\0');
@@ -150,6 +160,184 @@ public:
         enc.sub_rr(x86::RAX, x86::R8);
         enc.ret();
         elf.registerFuncPointer("strcmp", rvaStrcmp);
+
+        // --- F2. _thava_linux_strstr (haystack in RCX, needle in RDX -> RAX ptr or 0) ---
+        size_t lblStrstr = enc.createLabel();
+        enc.bindLabel(lblStrstr);
+        uint32_t rvaStrstr = elf.textRva + (uint32_t)enc.code.size();
+        size_t ssStart = enc.createLabel();
+        size_t ssOuter = enc.createLabel();
+        size_t ssInner = enc.createLabel();
+        size_t ssFound = enc.createLabel();
+        size_t ssNext = enc.createLabel();
+        size_t ssNotFound = enc.createLabel();
+
+        // Empty needle -> haystack
+        enc.movzx_rm8(x86::RAX, x86::RDX, 0);
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.jne(ssStart);
+        enc.mov_rr(x86::RAX, x86::RCX);
+        enc.ret();
+
+        enc.bindLabel(ssStart);
+        enc.mov_rr(x86::R8, x86::RCX); // current haystack position
+        enc.bindLabel(ssOuter);
+        enc.movzx_rm8(x86::RAX, x86::R8, 0);
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.je(ssNotFound);
+        enc.mov_rr(x86::R9, x86::RDX); // needle cursor
+        enc.mov_rr(x86::R10, x86::R8); // haystack cursor
+        enc.bindLabel(ssInner);
+        enc.movzx_rm8(x86::RAX, x86::R9, 0);
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.je(ssFound);
+        enc.movzx_rm8(x86::R11, x86::R10, 0);
+        enc.cmp_rr(x86::R11, x86::RAX);
+        enc.jne(ssNext);
+        enc.inc_r(x86::R9);
+        enc.inc_r(x86::R10);
+        enc.jmp(ssInner);
+        enc.bindLabel(ssNext);
+        enc.inc_r(x86::R8);
+        enc.jmp(ssOuter);
+        enc.bindLabel(ssFound);
+        enc.mov_rr(x86::RAX, x86::R8);
+        enc.ret();
+        enc.bindLabel(ssNotFound);
+        enc.xor_r32(x86::RAX, x86::RAX);
+        enc.ret();
+        elf.registerFuncPointer("strstr", rvaStrstr);
+
+        // --- F3. _thava_linux_strncmp (a in RCX, b in RDX, n in R8 -> int) ---
+        size_t lblStrncmp = enc.createLabel();
+        enc.bindLabel(lblStrncmp);
+        uint32_t rvaStrncmp = elf.textRva + (uint32_t)enc.code.size();
+        size_t snLoop = enc.createLabel();
+        size_t snDiff = enc.createLabel();
+        size_t snEqual = enc.createLabel();
+        enc.bindLabel(snLoop);
+        enc.test_rr(x86::R8, x86::R8);
+        enc.je(snEqual);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+        enc.movzx_rm8(x86::R9, x86::RDX, 0);
+        enc.cmp_rr(x86::RAX, x86::R9);
+        enc.jne(snDiff);
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.je(snEqual);
+        enc.inc_r(x86::RCX);
+        enc.inc_r(x86::RDX);
+        enc.dec_r(x86::R8);
+        enc.jmp(snLoop);
+        enc.bindLabel(snDiff);
+        enc.sub_rr(x86::RAX, x86::R9);
+        enc.ret();
+        enc.bindLabel(snEqual);
+        enc.xor_r32(x86::RAX, x86::RAX);
+        enc.ret();
+        elf.registerFuncPointer("strncmp", rvaStrncmp);
+
+        // --- F4. _thava_linux_memset (dst in RCX, byte in RDX, n in R8 -> RAX dst) ---
+        size_t lblMemset = enc.createLabel();
+        enc.bindLabel(lblMemset);
+        uint32_t rvaMemset = elf.textRva + (uint32_t)enc.code.size();
+        size_t msLoop = enc.createLabel();
+        size_t msDone = enc.createLabel();
+        enc.mov_rr(x86::R9, x86::RCX);
+        enc.test_rr(x86::R8, x86::R8);
+        enc.je(msDone);
+        enc.bindLabel(msLoop);
+        enc.mov_mr8(x86::R9, 0, x86::RDX);
+        enc.inc_r(x86::R9);
+        enc.dec_r(x86::R8);
+        enc.jne(msLoop);
+        enc.bindLabel(msDone);
+        enc.mov_rr(x86::RAX, x86::RCX);
+        enc.ret();
+        elf.registerFuncPointer("memset", rvaMemset);
+
+        // --- F5. _thava_linux_pow (x in XMM0, y in XMM1 -> XMM0) via x87 ---
+        size_t lblPow = enc.createLabel();
+        enc.bindLabel(lblPow);
+        uint32_t rvaPow = elf.textRva + (uint32_t)enc.code.size();
+        enc.push(x86::RBP);
+        enc.mov_rr(x86::RBP, x86::RSP);
+        enc.sub_rsp(32);
+        enc.movsd_mr_rbp(-8, x86::XMM0);  // x
+        enc.movsd_mr_rbp(-16, x86::XMM1); // y
+        enc.emit8(0xDD); enc.emit8(0x45); enc.emit8(0xF0); // fld qword [rbp-16]
+        enc.emit8(0xDD); enc.emit8(0x45); enc.emit8(0xF8); // fld qword [rbp-8]
+        enc.emit8(0xD9); enc.emit8(0xF1);                   // fyl2x -> y*log2(x)
+        enc.emit8(0xD9); enc.emit8(0xC0);                   // fld st0
+        enc.emit8(0xD9); enc.emit8(0xFC);                   // frndint -> k
+        enc.emit8(0xD9); enc.emit8(0xC9);                   // fxch st1
+        enc.emit8(0xD8); enc.emit8(0xE1);                   // fsub st0, st1 -> f
+        enc.emit8(0xD9); enc.emit8(0xF0);                   // f2xm1 -> 2^f - 1
+        enc.emit8(0xD9); enc.emit8(0xE8);                   // fld1
+        enc.emit8(0xDE); enc.emit8(0xC1);                   // faddp -> 2^f
+        enc.emit8(0xD9); enc.emit8(0xFD);                   // fscale -> 2^f * 2^k
+        enc.emit8(0xDD); enc.emit8(0xD9);                   // fstp st1
+        enc.emit8(0xDD); enc.emit8(0x5D); enc.emit8(0xF8);  // fstp qword [rbp-8]
+        enc.movsd_rm_rbp(x86::XMM0, -8);
+        enc.mov_rr(x86::RSP, x86::RBP);
+        enc.pop(x86::RBP);
+        enc.ret();
+        elf.registerFuncPointer("pow", rvaPow);
+
+        // --- F6. _thava_linux_system (cmd in RCX -> exit status) ---
+        size_t lblSystem = enc.createLabel();
+        enc.bindLabel(lblSystem);
+        uint32_t rvaSystem = elf.textRva + (uint32_t)enc.code.size();
+        size_t sysParent = enc.createLabel();
+        size_t sysFail = enc.createLabel();
+        size_t sysDone = enc.createLabel();
+        enc.push(x86::RBP);
+        enc.mov_rr(x86::RBP, x86::RSP);
+        enc.sub_rsp(64);
+        enc.mov_mr_rbp(-8, x86::RCX); // cmd
+        enc.mov_ri64(x86::RAX, 57);   // sys_fork
+        enc.syscall();
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.jl(sysFail);
+        enc.jne(sysParent);
+
+        // child: execve("/bin/sh", { "/bin/sh", "-c", cmd, 0 }, 0)
+        enc.lea_rip_rdata(x86::RDI, offShellPath);
+        enc.lea_rip_rdata(x86::RDX, offDashC);
+        enc.lea_rm_rbp(x86::R10, -56);
+        enc.mov_mr(x86::R10, 0, x86::RDI);
+        enc.mov_mr(x86::R10, 8, x86::RDX);
+        enc.mov_rm_rbp(x86::R9, -8);
+        enc.mov_mr(x86::R10, 16, x86::R9);
+        enc.xor_r32(x86::R11, x86::R11);
+        enc.mov_mr(x86::R10, 24, x86::R11);
+        enc.mov_rr(x86::RSI, x86::R10);
+        enc.xor_r32(x86::RDX, x86::RDX);
+        enc.mov_ri64(x86::RAX, 59); // sys_execve
+        enc.syscall();
+        enc.mov_ri64(x86::RAX, 60); // sys_exit
+        enc.mov_ri64(x86::RDI, 127);
+        enc.syscall();
+
+        enc.bindLabel(sysParent);
+        enc.mov_rr(x86::RDI, x86::RAX);
+        enc.lea_rm_rbp(x86::RSI, -16);
+        enc.xor_r32(x86::RDX, x86::RDX);
+        enc.xor_r32(x86::R10, x86::R10);
+        enc.mov_ri64(x86::RAX, 61); // sys_wait4
+        enc.syscall();
+        enc.mov_rm_rbp(x86::RAX, -16);
+        enc.shr_ri(x86::RAX, 8);
+        enc.mov_ri64(x86::R10, 0xFF);
+        enc.and_rr(x86::RAX, x86::R10);
+        enc.jmp(sysDone);
+
+        enc.bindLabel(sysFail);
+        enc.mov_ri64(x86::RAX, -1);
+        enc.bindLabel(sysDone);
+        enc.mov_rr(x86::RSP, x86::RBP);
+        enc.pop(x86::RBP);
+        enc.ret();
+        elf.registerFuncPointer("system", rvaSystem);
 
         // --- G. _thava_linux_memcpy (dst in RCX, src in RDX, count in R8 -> RAX dst) ---
         size_t lblMemcpy = enc.createLabel();
@@ -342,16 +530,229 @@ public:
         elf.registerFuncPointer("_atoi64", rvaAtoi);
 
         // --- K. _thava_linux_atof (str in RCX -> double in XMM0) ---
+        // Full decimal parse: optional blanks, sign, integer digits, fraction
+        // digits and an optional e/E exponent. The previous version reused the
+        // integer parser, so "3.5" became 3 (key.input(<dbl>) lost the fraction).
         size_t lblAtof = enc.createLabel();
         enc.bindLabel(lblAtof);
         uint32_t rvaAtof = elf.textRva + (uint32_t)enc.code.size();
-        // Uses _atoi64 on integer part, and converts to double
+        size_t afSkipSpace = enc.createLabel();
+        size_t afAfterSpace = enc.createLabel();
+        size_t afPlusSign = enc.createLabel();
+        size_t afDigits = enc.createLabel();
+        size_t afStoreFrac = enc.createLabel();
+        size_t afNextChar = enc.createLabel();
+        size_t afNotDot = enc.createLabel();
+        size_t afStop = enc.createLabel();
+        size_t afExpSign = enc.createLabel();
+        size_t afExpPlus = enc.createLabel();
+        size_t afExpLoop = enc.createLabel();
+        size_t afExpDone = enc.createLabel();
+        size_t afScaleLoop = enc.createLabel();
+        size_t afScaleMul = enc.createLabel();
+        size_t afScaleDone = enc.createLabel();
+        size_t afExpMul = enc.createLabel();
+        size_t afExpDiv = enc.createLabel();
+        size_t afNegate = enc.createLabel();
+        size_t afFinish = enc.createLabel();
+
         enc.push(x86::RBP);
         enc.mov_rr(x86::RBP, x86::RSP);
-        enc.sub_rsp(64);
-        enc.call_label(lblAtoi);
-        enc.cvtsi2sd(x86::XMM0, x86::RAX);
-        enc.add_rsp(64);
+        enc.sub_rsp(96);
+
+        enc.mov_mr_rbp(-8, x86::RCX);   // p
+        enc.mov_ri64(x86::RAX, 0);
+        enc.mov_mr_rbp(-16, x86::RAX);  // negative flag
+        enc.mov_mr_rbp(-24, x86::RAX);  // integer part
+        enc.mov_mr_rbp(-32, x86::RAX);  // fraction value
+        enc.mov_mr_rbp(-40, x86::RAX);  // fraction digit count
+        enc.mov_mr_rbp(-48, x86::RAX);  // exponent value
+        enc.mov_mr_rbp(-56, x86::RAX);  // saw decimal point
+        enc.mov_mr_rbp(-64, x86::RAX);  // exponent is negative
+
+        // Skip leading blanks.
+        enc.bindLabel(afSkipSpace);
+        enc.mov_rm_rbp(x86::RCX, -8);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+        enc.cmp_ri32(x86::RAX, ' ');
+        enc.jne(afAfterSpace);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.jmp(afSkipSpace);
+
+        // Optional sign.
+        enc.bindLabel(afAfterSpace);
+        enc.cmp_ri32(x86::RAX, '-');
+        enc.jne(afPlusSign);
+        enc.mov_ri64(x86::R10, 1);
+        enc.mov_mr_rbp(-16, x86::R10);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.jmp(afDigits);
+
+        enc.bindLabel(afPlusSign);
+        enc.cmp_ri32(x86::RAX, '+');
+        enc.jne(afDigits);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+
+        // Integer and fraction digits.
+        enc.bindLabel(afDigits);
+        enc.mov_rm_rbp(x86::RCX, -8);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+        enc.cmp_ri32(x86::RAX, '0');
+        enc.jl(afNotDot);
+        enc.cmp_ri32(x86::RAX, '9');
+        enc.jg(afNotDot);
+        enc.sub_ri32(x86::RAX, '0');
+
+        enc.mov_rm_rbp(x86::R10, -56);
+        enc.test_rr(x86::R10, x86::R10);
+        enc.jne(afStoreFrac);
+
+        // integerPart = integerPart * 10 + digit
+        enc.mov_rm_rbp(x86::R8, -24);
+        enc.mov_ri64(x86::R9, 10);
+        enc.imul_rr(x86::R8, x86::R9);
+        enc.add_rr(x86::R8, x86::RAX);
+        enc.mov_mr_rbp(-24, x86::R8);
+        enc.jmp(afNextChar);
+
+        // fractionValue = fractionValue * 10 + digit; fractionDigits++
+        enc.bindLabel(afStoreFrac);
+        enc.mov_rm_rbp(x86::R8, -32);
+        enc.mov_ri64(x86::R9, 10);
+        enc.imul_rr(x86::R8, x86::R9);
+        enc.add_rr(x86::R8, x86::RAX);
+        enc.mov_mr_rbp(-32, x86::R8);
+        enc.mov_rm_rbp(x86::R8, -40);
+        enc.inc_r(x86::R8);
+        enc.mov_mr_rbp(-40, x86::R8);
+
+        enc.bindLabel(afNextChar);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.jmp(afDigits);
+
+        // Not a digit: maybe the decimal point.
+        enc.bindLabel(afNotDot);
+        enc.cmp_ri32(x86::RAX, '.');
+        enc.jne(afStop);
+        enc.mov_rm_rbp(x86::R10, -56);
+        enc.test_rr(x86::R10, x86::R10);
+        enc.jne(afStop);
+        enc.mov_ri64(x86::R10, 1);
+        enc.mov_mr_rbp(-56, x86::R10);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.jmp(afDigits);
+
+        // Optional exponent.
+        enc.bindLabel(afStop);
+        enc.cmp_ri32(x86::RAX, 'e');
+        enc.je(afExpSign);
+        enc.cmp_ri32(x86::RAX, 'E');
+        enc.jne(afScaleLoop);
+
+        enc.bindLabel(afExpSign);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+        enc.cmp_ri32(x86::RAX, '-');
+        enc.jne(afExpPlus);
+        enc.mov_ri64(x86::R10, 1);
+        enc.mov_mr_rbp(-64, x86::R10);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.jmp(afExpLoop);
+
+        enc.bindLabel(afExpPlus);
+        enc.cmp_ri32(x86::RAX, '+');
+        enc.jne(afExpLoop);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+
+        enc.bindLabel(afExpLoop);
+        enc.mov_rm_rbp(x86::RCX, -8);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+        enc.cmp_ri32(x86::RAX, '0');
+        enc.jl(afExpDone);
+        enc.cmp_ri32(x86::RAX, '9');
+        enc.jg(afExpDone);
+        enc.sub_ri32(x86::RAX, '0');
+        enc.mov_rm_rbp(x86::R8, -48);
+        enc.mov_ri64(x86::R9, 10);
+        enc.imul_rr(x86::R8, x86::R9);
+        enc.add_rr(x86::R8, x86::RAX);
+        enc.mov_mr_rbp(-48, x86::R8);
+        enc.inc_r(x86::RCX);
+        enc.mov_mr_rbp(-8, x86::RCX);
+        enc.jmp(afExpLoop);
+
+        // Clamp the exponent so absurd input cannot spin the scaling loop.
+        enc.bindLabel(afExpDone);
+        enc.mov_rm_rbp(x86::R8, -48);
+        enc.mov_ri64(x86::R9, 400);
+        enc.cmp_rr(x86::R8, x86::R9);
+        enc.jle(afScaleLoop);
+        enc.mov_mr_rbp(-48, x86::R9);
+
+        // scale = 10^fractionDigits
+        enc.bindLabel(afScaleLoop);
+        enc.mov_rm_rbp(x86::R11, -40);
+        enc.mov_ri64(x86::R9, 1);
+        enc.test_rr(x86::R11, x86::R11);
+        enc.je(afScaleDone);
+        enc.bindLabel(afScaleMul);
+        enc.mov_ri64(x86::RAX, 10);
+        enc.imul_rr(x86::R9, x86::RAX);
+        enc.sub_ri32(x86::R11, 1);
+        enc.test_rr(x86::R11, x86::R11);
+        enc.jne(afScaleMul);
+
+        // (integerPart * scale + fractionValue) / scale
+        enc.bindLabel(afScaleDone);
+        enc.mov_rm_rbp(x86::R8, -24);
+        enc.imul_rr(x86::R8, x86::R9);
+        enc.mov_rm_rbp(x86::R10, -32);
+        enc.add_rr(x86::R8, x86::R10);
+        enc.cvtsi2sd(x86::XMM0, x86::R8);
+        enc.cvtsi2sd(x86::XMM1, x86::R9);
+        enc.divsd_rr(x86::XMM0, x86::XMM1);
+
+        // Apply the exponent.
+        enc.mov_rm_rbp(x86::R11, -48);
+        enc.test_rr(x86::R11, x86::R11);
+        enc.je(afNegate);
+        enc.movsd_rip_rdata(x86::XMM1, offDoubleTen);
+        enc.mov_rm_rbp(x86::R10, -64);
+        enc.test_rr(x86::R10, x86::R10);
+        enc.jne(afExpDiv);
+
+        enc.bindLabel(afExpMul);
+        enc.mulsd_rr(x86::XMM0, x86::XMM1);
+        enc.sub_ri32(x86::R11, 1);
+        enc.test_rr(x86::R11, x86::R11);
+        enc.jne(afExpMul);
+        enc.jmp(afNegate);
+
+        enc.bindLabel(afExpDiv);
+        enc.divsd_rr(x86::XMM0, x86::XMM1);
+        enc.sub_ri32(x86::R11, 1);
+        enc.test_rr(x86::R11, x86::R11);
+        enc.jne(afExpDiv);
+
+        // Negative sign.
+        enc.bindLabel(afNegate);
+        enc.mov_rm_rbp(x86::R10, -16);
+        enc.test_rr(x86::R10, x86::R10);
+        enc.je(afFinish);
+        enc.subsd_rr(x86::XMM1, x86::XMM1); // XMM1 = 0.0
+        enc.subsd_rr(x86::XMM1, x86::XMM0);
+        enc.movsd_rr(x86::XMM0, x86::XMM1);
+
+        enc.bindLabel(afFinish);
+        enc.add_rsp(96);
         enc.pop(x86::RBP);
         enc.ret();
         elf.registerFuncPointer("atof", rvaAtof);
@@ -363,12 +764,13 @@ public:
         uint32_t rvaPrintf = elf.textRva + (uint32_t)enc.code.size();
         size_t pFmtStr = enc.createLabel();
         size_t pFmtInt = enc.createLabel();
+        size_t pFmtFloat = enc.createLabel();
         size_t pFmtNL  = enc.createLabel();
         size_t pDone   = enc.createLabel();
 
         enc.push(x86::RBP);
         enc.mov_rr(x86::RBP, x86::RSP);
-        enc.sub_rsp(128);
+        enc.sub_rsp(512);
 
         enc.mov_mr_rbp(-8, x86::RCX);  // fmt
         enc.mov_mr_rbp(-16, x86::RDX); // val
@@ -400,7 +802,9 @@ public:
         enc.cmp_ri32(x86::RAX, 'l');
         enc.je(pFmtInt);
         enc.cmp_ri32(x86::RAX, 'g');
-        enc.je(pFmtInt); // Treat float as number
+        enc.je(pFmtFloat);
+        enc.cmp_ri32(x86::RAX, 'f');
+        enc.je(pFmtFloat);
         enc.jmp(pDone);
 
         // Print string in RDX
@@ -426,6 +830,229 @@ public:
         enc.syscall();
         enc.bindLabel(pSkipNLStr);
         enc.jmp(pDone);
+
+        // Print double (raw IEEE-754 bits in RDX) in Thava's standard format:
+        // 6 significant digits, fixed notation, trailing zeros trimmed.
+        // Matches the x86-64 backend (printf "%g") for |v| < 1e6.
+        enc.bindLabel(pFmtFloat);
+        {
+            size_t fAbs = enc.createLabel();
+            size_t fZero = enc.createLabel();
+            size_t fCount = enc.createLabel();
+            size_t fCountLoop = enc.createLabel();
+            size_t dOk = enc.createLabel();
+            size_t powLoop = enc.createLabel();
+            size_t powDone = enc.createLabel();
+            size_t fNoDec = enc.createLabel();
+            size_t fScaled = enc.createLabel();
+            size_t fIntLoop = enc.createLabel();
+            size_t fIntPop = enc.createLabel();
+            size_t fIntDone = enc.createLabel();
+            size_t fNoFrac = enc.createLabel();
+            size_t fFracLoop = enc.createLabel();
+            size_t fFracPop = enc.createLabel();
+            size_t fTrim = enc.createLabel();
+            size_t fTrimDone = enc.createLabel();
+            size_t fSkipNL = enc.createLabel();
+
+            // slot map: -24 |v| bits, -32 scaled6, -40 d, -48 pow10, -56 scaled, -64 intPart, -72 frac
+            enc.mov_rm_rbp(x86::RAX, -16); // raw bits
+            enc.mov_mr_rbp(-24, x86::RAX);
+            enc.lea_rm_rbp(x86::RDI, -400); // output buffer cursor
+
+            // sign
+            enc.test_rr(x86::RAX, x86::RAX);
+            enc.jns(fAbs);
+            enc.mov_ri64(x86::R10, '-');
+            enc.mov_mr8(x86::RDI, 0, x86::R10);
+            enc.inc_r(x86::RDI);
+            enc.bindLabel(fAbs);
+
+            // absolute value
+            enc.mov_rm_rbp(x86::RAX, -24);
+            enc.mov_ri64(x86::R10, 0x7FFFFFFFFFFFFFFFLL);
+            enc.and_rr(x86::RAX, x86::R10);
+            enc.mov_mr_rbp(-24, x86::RAX);
+            enc.movsd_rm_rbp(x86::XMM0, -24);
+
+            // scaled6 = (int64)(|v| * 1e6 + 0.5)
+            enc.lea_rip_rdata(x86::R10, offDoubleMillion);
+            enc.movsd_rm(x86::XMM1, x86::R10, 0);
+            enc.mulsd_rr(x86::XMM0, x86::XMM1);
+            enc.lea_rip_rdata(x86::R10, offDoubleHalf);
+            enc.movsd_rm(x86::XMM1, x86::R10, 0);
+            enc.addsd_rr(x86::XMM0, x86::XMM1);
+            enc.cvttsd2si(x86::RAX, x86::XMM0);
+            enc.mov_mr_rbp(-32, x86::RAX);
+
+            enc.test_rr(x86::RAX, x86::RAX);
+            enc.je(fZero);
+
+            // digits(scaled6) -> R9, then d = 12 - digits (6 significant digits)
+            enc.mov_rr(x86::R11, x86::RAX);
+            enc.mov_ri64(x86::R9, 1);
+            enc.mov_ri64(x86::RCX, 10);
+            enc.bindLabel(fCountLoop);
+            enc.mov_ri64(x86::R10, 10);
+            enc.cmp_rr(x86::R11, x86::R10);
+            enc.jl(fCount);
+            enc.mov_rr(x86::RAX, x86::R11);
+            enc.xor_r32(x86::RDX, x86::RDX);
+            enc.div_r(x86::RCX);
+            enc.mov_rr(x86::R11, x86::RAX);
+            enc.inc_r(x86::R9);
+            enc.jmp(fCountLoop);
+            enc.bindLabel(fCount);
+
+            enc.mov_ri64(x86::R10, 12);
+            enc.sub_rr(x86::R10, x86::R9); // d
+            enc.xor_r32(x86::R11, x86::R11);
+            enc.cmp_rr(x86::R10, x86::R11);
+            enc.jge(dOk);
+            enc.mov_ri64(x86::R10, 0);
+            enc.bindLabel(dOk);
+            enc.mov_mr_rbp(-40, x86::R10);
+
+            // pow10 = 10^d
+            enc.mov_ri64(x86::R11, 1);
+            enc.mov_ri64(x86::R9, 10);
+            enc.mov_rr(x86::RCX, x86::R10);
+            enc.test_rr(x86::RCX, x86::RCX);
+            enc.je(powDone);
+            enc.bindLabel(powLoop);
+            enc.imul_rr(x86::R11, x86::R9);
+            enc.dec_r(x86::RCX);
+            enc.jne(powLoop);
+            enc.bindLabel(powDone);
+            enc.mov_mr_rbp(-48, x86::R11);
+
+            // scaled = d == 0 ? scaled6 / 1e6 : (int64)(|v| * pow10 + 0.5)
+            enc.mov_rm_rbp(x86::RCX, -40);
+            enc.test_rr(x86::RCX, x86::RCX);
+            enc.jne(fNoDec);
+            enc.mov_rm_rbp(x86::RAX, -32);
+            enc.mov_ri64(x86::RCX, 1000000);
+            enc.xor_r32(x86::RDX, x86::RDX);
+            enc.div_r(x86::RCX);
+            enc.jmp(fScaled);
+            enc.bindLabel(fNoDec);
+            enc.movsd_rm_rbp(x86::XMM0, -24);
+            enc.mov_rm_rbp(x86::RAX, -48);
+            enc.cvtsi2sd(x86::XMM1, x86::RAX);
+            enc.mulsd_rr(x86::XMM0, x86::XMM1);
+            enc.lea_rip_rdata(x86::R10, offDoubleHalf);
+            enc.movsd_rm(x86::XMM1, x86::R10, 0);
+            enc.addsd_rr(x86::XMM0, x86::XMM1);
+            enc.cvttsd2si(x86::RAX, x86::XMM0);
+            enc.bindLabel(fScaled);
+            enc.mov_mr_rbp(-56, x86::RAX);
+
+            // intPart = scaled / pow10, frac = scaled % pow10
+            enc.mov_rm_rbp(x86::RCX, -48);
+            enc.xor_r32(x86::RDX, x86::RDX);
+            enc.div_r(x86::RCX);
+            enc.mov_mr_rbp(-64, x86::RAX);
+            enc.mov_mr_rbp(-72, x86::RDX);
+
+            // integer digits
+            enc.mov_rr(x86::R11, x86::RSP);
+            enc.xor_r32(x86::R9, x86::R9);
+            enc.mov_ri64(x86::RCX, 10);
+            enc.mov_rm_rbp(x86::RAX, -64);
+            enc.bindLabel(fIntLoop);
+            enc.xor_r32(x86::RDX, x86::RDX);
+            enc.div_r(x86::RCX);
+            enc.add_ri32(x86::RDX, '0');
+            enc.push(x86::RDX);
+            enc.inc_r(x86::R9);
+            enc.test_rr(x86::RAX, x86::RAX);
+            enc.jne(fIntLoop);
+
+            enc.bindLabel(fIntPop);
+            enc.test_rr(x86::R9, x86::R9);
+            enc.je(fIntDone);
+            enc.pop(x86::RDX);
+            enc.mov_mr8(x86::RDI, 0, x86::RDX);
+            enc.inc_r(x86::RDI);
+            enc.dec_r(x86::R9);
+            enc.jmp(fIntPop);
+            enc.bindLabel(fIntDone);
+            enc.mov_rr(x86::RSP, x86::R11);
+
+            enc.mov_rm_rbp(x86::RAX, -72);
+            enc.test_rr(x86::RAX, x86::RAX);
+            enc.je(fNoFrac);
+
+            // decimal point
+            enc.mov_ri64(x86::R10, '.');
+            enc.mov_mr8(x86::RDI, 0, x86::R10);
+            enc.inc_r(x86::RDI);
+
+            // exactly d fraction digits (leading zeros included)
+            enc.mov_rm_rbp(x86::R9, -40);
+            enc.mov_ri64(x86::RCX, 10);
+            enc.bindLabel(fFracLoop);
+            enc.xor_r32(x86::RDX, x86::RDX);
+            enc.div_r(x86::RCX);
+            enc.add_ri32(x86::RDX, '0');
+            enc.push(x86::RDX);
+            enc.dec_r(x86::R9);
+            enc.jne(fFracLoop);
+
+            enc.mov_rm_rbp(x86::R9, -40);
+            enc.bindLabel(fFracPop);
+            enc.pop(x86::RDX);
+            enc.mov_mr8(x86::RDI, 0, x86::RDX);
+            enc.inc_r(x86::RDI);
+            enc.dec_r(x86::R9);
+            enc.jne(fFracPop);
+
+            // trim trailing zeros
+            enc.bindLabel(fTrim);
+            enc.dec_r(x86::RDI);
+            enc.movzx_rm8(x86::RAX, x86::RDI, 0);
+            enc.cmp_ri32(x86::RAX, '0');
+            enc.jne(fTrimDone);
+            enc.jmp(fTrim);
+            enc.bindLabel(fTrimDone);
+            enc.inc_r(x86::RDI);
+
+            enc.bindLabel(fNoFrac);
+            size_t fWriteOut = enc.createLabel();
+            enc.jmp(fWriteOut);
+
+            enc.bindLabel(fZero);
+            enc.mov_ri64(x86::R10, '0');
+            enc.mov_mr8(x86::RDI, 0, x86::R10);
+            enc.inc_r(x86::RDI);
+
+            enc.bindLabel(fWriteOut);
+            enc.mov_ri64(x86::RDX, 0);
+            enc.mov_mr8(x86::RDI, 0, x86::RDX);
+            enc.lea_rm_rbp(x86::RSI, -400);
+            enc.mov_rr(x86::RDX, x86::RDI);
+            enc.sub_rr(x86::RDX, x86::RSI);
+            enc.mov_ri64(x86::RDI, 1);
+            enc.mov_ri64(x86::RAX, 1);
+            enc.syscall();
+
+            // newline if the format string ends with '\n'
+            enc.mov_rm_rbp(x86::RCX, -8);
+            enc.call_label(lblStrlen);
+            enc.mov_rm_rbp(x86::RCX, -8);
+            enc.dec_r(x86::RAX);
+            enc.add_rr(x86::RCX, x86::RAX);
+            enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+            enc.cmp_ri32(x86::RAX, '\n');
+            enc.jne(fSkipNL);
+            enc.lea_rip_rdata(x86::RSI, offStrNL);
+            enc.mov_ri64(x86::RDX, 1);
+            enc.mov_ri64(x86::RDI, 1);
+            enc.mov_ri64(x86::RAX, 1);
+            enc.syscall();
+            enc.bindLabel(fSkipNL);
+            enc.jmp(pDone);
+        }
 
         // Print integer in RDX
         enc.bindLabel(pFmtInt);
@@ -506,20 +1133,36 @@ public:
         enc.syscall();
 
         enc.bindLabel(pDone);
-        enc.add_rsp(128);
+        enc.add_rsp(512);
         enc.pop(x86::RBP);
         enc.ret();
         elf.registerFuncPointer("printf", rvaPrintf);
         elf.registerFuncPointer("puts", rvaPrintf);
 
         // --- M. _thava_linux_scanf ---
-        // Reads from stdin (sys_read 0) into readBuf and parses
+        // Reads exactly ONE line from stdin into readBuf, then either copies the
+        // line (line formats such as " %1023[^\n]") or stores its integer value
+        // (number formats such as "%lld").
+        //
+        // One byte per sys_read: a single read(1023) swallowed every buffered
+        // line at once (piped input lost all reads after the first).
+        // Format sniffing skips leading blanks and looks at the character after
+        // '%': 'l'/'d'/'i' mean integer, anything else (a width digit or '['
+        // from " %1023[^\n]", or 's') means "hand me the raw line". The previous
+        // code peeked at byte 1, which for the leading-space format is '%' and
+        // therefore always parsed as an integer, so every key.input returned
+        // 0/false/"" on the ELF backend.
         size_t lblScanf = enc.createLabel();
         enc.bindLabel(lblScanf);
         uint32_t rvaScanf = elf.textRva + (uint32_t)enc.code.size();
         size_t sScanInt = enc.createLabel();
         size_t sScanStr = enc.createLabel();
         size_t sDoneScan = enc.createLabel();
+        size_t sReadLoop = enc.createLabel();
+        size_t sReadDone = enc.createLabel();
+        size_t sSkipTrim = enc.createLabel();
+        size_t sFmtSkipBlank = enc.createLabel();
+        size_t sFmtAfterPct = enc.createLabel();
 
         enc.push(x86::RBP);
         enc.mov_rr(x86::RBP, x86::RSP);
@@ -528,40 +1171,82 @@ public:
         enc.mov_mr_rbp(-8, x86::RCX);  // fmt
         enc.mov_mr_rbp(-16, x86::RDX); // out ptr
 
-        // sys_read(0, offReadBuf, 1023)
-        enc.xor_r32(x86::RDI, x86::RDI); // fd 0 = stdin
+        // i = 0
+        enc.mov_ri64(x86::R10, 0);
+        enc.mov_mr_rbp(-24, x86::R10);
+
+        // Read bytes until '\n', EOF or the 1023-byte limit.
+        enc.bindLabel(sReadLoop);
+        enc.mov_rm_rbp(x86::R10, -24);
+        enc.mov_ri64(x86::R11, 1023);
+        enc.cmp_rr(x86::R10, x86::R11);
+        enc.jge(sReadDone);
+
+        enc.xor_r32(x86::RDI, x86::RDI);            // fd 0 = stdin
         enc.lea_rip_rdata(x86::RSI, offReadBuf);
-        enc.mov_ri64(x86::RDX, 1023);
-        enc.mov_ri64(x86::RAX, 0); // sys_read = 0
+        enc.add_rr(x86::RSI, x86::R10);             // &readBuf[i]
+        enc.mov_ri64(x86::RDX, 1);
+        enc.xor_r32(x86::RAX, x86::RAX);            // sys_read = 0
         enc.syscall();
+        enc.cmp_ri32(x86::RAX, 0);
+        enc.jle(sReadDone);                          // EOF or error
 
-        // null terminate read string and strip newline
+        enc.mov_rm_rbp(x86::R10, -24);
         enc.lea_rip_rdata(x86::RCX, offReadBuf);
-        size_t sLoopStrip = enc.createLabel();
-        size_t sDoneStrip = enc.createLabel();
-        enc.bindLabel(sLoopStrip);
+        enc.add_rr(x86::RCX, x86::R10);
         enc.movzx_rm8(x86::RAX, x86::RCX, 0);
-        enc.test_rr(x86::RAX, x86::RAX);
-        enc.je(sDoneStrip);
         enc.cmp_ri32(x86::RAX, '\n');
-        enc.je(sDoneStrip);
+        enc.je(sReadDone);                           // newline is not stored
+
+        enc.inc_r(x86::R10);
+        enc.mov_mr_rbp(-24, x86::R10);
+        enc.jmp(sReadLoop);
+
+        // Trim the '\r' of CRLF input.
+        enc.bindLabel(sReadDone);
+        enc.mov_rm_rbp(x86::R10, -24);
+        enc.test_rr(x86::R10, x86::R10);
+        enc.je(sSkipTrim);
+        enc.mov_rm_rbp(x86::R11, -24);
+        enc.sub_ri32(x86::R11, 1);
+        enc.lea_rip_rdata(x86::RCX, offReadBuf);
+        enc.add_rr(x86::RCX, x86::R11);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
         enc.cmp_ri32(x86::RAX, '\r');
-        enc.je(sDoneStrip);
-        enc.inc_r(x86::RCX);
-        enc.jmp(sLoopStrip);
+        enc.jne(sSkipTrim);
+        enc.mov_rm_rbp(x86::R10, -24);
+        enc.sub_ri32(x86::R10, 1);
+        enc.mov_mr_rbp(-24, x86::R10);
 
-        enc.bindLabel(sDoneStrip);
+        // NUL-terminate at i.
+        enc.bindLabel(sSkipTrim);
+        enc.mov_rm_rbp(x86::R10, -24);
+        enc.lea_rip_rdata(x86::RCX, offReadBuf);
+        enc.add_rr(x86::RCX, x86::R10);
         enc.xor_r32(x86::RAX, x86::RAX);
-        enc.mov_mr8(x86::RCX, 0, x86::RAX); // replace \n with \0
+        enc.mov_mr8(x86::RCX, 0, x86::RAX);
 
-        // Parse depending on format
+        // Classify the format: skip blanks, then inspect the char after '%'.
         enc.mov_rm_rbp(x86::RCX, -8); // fmt
-        enc.movzx_rm8(x86::RAX, x86::RCX, 1);
+        enc.bindLabel(sFmtSkipBlank);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
+        enc.cmp_ri32(x86::RAX, ' ');
+        enc.jne(sFmtAfterPct);
+        enc.inc_r(x86::RCX);
+        enc.jmp(sFmtSkipBlank);
+
+        enc.bindLabel(sFmtAfterPct);
+        enc.cmp_ri32(x86::RAX, '%');
+        enc.jne(sScanInt);
+        enc.inc_r(x86::RCX);
+        enc.movzx_rm8(x86::RAX, x86::RCX, 0);
         enc.cmp_ri32(x86::RAX, 'l');
         enc.je(sScanInt);
-        enc.cmp_ri32(x86::RAX, '1'); // %1023[^\n]
-        enc.je(sScanStr);
-        enc.jmp(sScanInt);
+        enc.cmp_ri32(x86::RAX, 'd');
+        enc.je(sScanInt);
+        enc.cmp_ri32(x86::RAX, 'i');
+        enc.je(sScanInt);
+        enc.jmp(sScanStr);
 
         enc.bindLabel(sScanInt);
         enc.lea_rip_rdata(x86::RCX, offReadBuf);
@@ -636,6 +1321,233 @@ public:
         enc.pop(x86::RBP);
         enc.ret();
         elf.registerFuncPointer("sprintf", rvaSprintf);
+
+        // --- N2. _thava_linux_dtoa (buf in RCX, raw IEEE-754 bits in R8) ---
+        // "%g"-style formatting (6 significant digits, fixed notation, trailing zeros
+        // trimmed) for this zero-libc runtime. _thava_linux_sprintf only knows
+        // integers, which made <str>(double) print the raw bit pattern.
+        size_t lblDtoa = enc.createLabel();
+        enc.bindLabel(lblDtoa);
+        uint32_t rvaDtoa = elf.textRva + (uint32_t)enc.code.size();
+
+        enc.push(x86::RBP);
+        enc.mov_rr(x86::RBP, x86::RSP);
+        enc.sub_rsp(96);
+        enc.mov_rr(x86::RDI, x86::RCX); // destination cursor
+        enc.mov_rr(x86::RSI, x86::R8);  // raw bits
+
+        // Optional minus sign, then continue with the absolute value.
+        size_t dtAbs = enc.createLabel();
+        enc.test_rr(x86::RSI, x86::RSI);
+        enc.jns(dtAbs);
+        enc.mov_ri64(x86::R10, '-');
+        enc.mov_mr8(x86::RDI, 0, x86::R10);
+        enc.inc_r(x86::RDI);
+        enc.bindLabel(dtAbs);
+        enc.mov_ri64(x86::R10, 0x7FFFFFFFFFFFFFFFLL);
+        enc.mov_rr(x86::RAX, x86::RSI);
+        enc.and_rr(x86::RAX, x86::R10);
+        enc.mov_mr_rbp(-8, x86::RAX);
+        enc.movsd_rm_rbp(x86::XMM0, -8); // XMM0 = |v|
+
+        // Zero (and -0.0) is just "0".
+        size_t dtZero = enc.createLabel();
+        size_t dtFinish = enc.createLabel();
+        enc.xor_r32(x86::RAX, x86::RAX);
+        enc.mov_mr_rbp(-16, x86::RAX);
+        enc.movsd_rm_rbp(x86::XMM1, -16);
+        enc.ucomisd_rr(x86::XMM0, x86::XMM1);
+        enc.je(dtZero);
+
+        // Huge magnitudes are reduced in groups of 1e18 so that the integer
+        // conversion below cannot saturate int64.
+        enc.xor_r32(x86::R11, x86::R11);
+        enc.mov_ri64(x86::R10, 0x43ABC16D674EC800LL); // 1e18
+        enc.mov_mr_rbp(-64, x86::R10);
+        enc.movsd_rm_rbp(x86::XMM3, -64);
+        enc.ucomisd_rr(x86::XMM0, x86::XMM3);
+        size_t dtHugeDone = enc.createLabel();
+        size_t dtHuge = enc.createLabel();
+        enc.jcc(x86::Cond::B, dtHugeDone);
+        enc.bindLabel(dtHuge);
+        enc.divsd_rr(x86::XMM0, x86::XMM3);
+        enc.inc_r(x86::R11);
+        enc.ucomisd_rr(x86::XMM0, x86::XMM3);
+        enc.jcc(x86::Cond::AE, dtHuge);
+        enc.bindLabel(dtHugeDone);
+        enc.mov_mr_rbp(-48, x86::R11); // groups of 1e18
+        // The reduced value is the integer part; the scaled-path store below is
+        // skipped on this route, so write it now.
+        enc.cvttsd2si(x86::RAX, x86::XMM0);
+        enc.mov_mr_rbp(-32, x86::RAX);
+
+        // Six decimal places with trailing zeros trimmed: the same rule as the
+        // other backends. Integer magnitudes get no fraction at all.
+        size_t dtZeroFrac = enc.createLabel();
+        size_t dtNStore = enc.createLabel();
+        enc.test_rr(x86::R11, x86::R11);
+        enc.jne(dtZeroFrac);
+        enc.mov_ri64(x86::R10, 0x430C6BF526340000LL); // 1e15
+        enc.mov_mr_rbp(-64, x86::R10);
+        enc.movsd_rm_rbp(x86::XMM3, -64);
+        enc.ucomisd_rr(x86::XMM0, x86::XMM3);
+        size_t dtN6 = enc.createLabel();
+        enc.jcc(x86::Cond::B, dtN6);
+        enc.xor_r32(x86::R9, x86::R9);
+        enc.jmp(dtNStore);
+        enc.bindLabel(dtN6);
+        enc.mov_ri64(x86::R9, 6);
+        enc.jmp(dtNStore);
+        enc.bindLabel(dtZeroFrac);
+        enc.xor_r32(x86::R9, x86::R9);
+        enc.bindLabel(dtNStore);
+        enc.mov_mr_rbp(-24, x86::R9);
+        // Integer part (the fraction width N is already fixed: 6 or 0).
+        enc.cvttsd2si(x86::RAX, x86::XMM0);
+        enc.mov_mr_rbp(-32, x86::RAX);
+        size_t dtNoFrac = enc.createLabel();
+        enc.mov_rm_rbp(x86::R9, -24);
+        enc.test_rr(x86::R9, x86::R9);
+        enc.je(dtNoFrac);
+
+        // XMM1 = 10^N
+        enc.mov_ri64(x86::R10, 0x3FF0000000000000LL); // 1.0
+        enc.mov_mr_rbp(-64, x86::R10);
+        enc.movsd_rm_rbp(x86::XMM1, -64);
+        enc.mov_rm_rbp(x86::R11, -24);
+        size_t dtPowD = enc.createLabel();
+        enc.bindLabel(dtPowD);
+        enc.mov_ri64(x86::R10, 0x4024000000000000LL); // 10.0
+        enc.mov_mr_rbp(-64, x86::R10);
+        enc.movsd_rm_rbp(x86::XMM2, -64);
+        enc.mulsd_rr(x86::XMM1, x86::XMM2);
+        enc.dec_r(x86::R11);
+        enc.jne(dtPowD);
+
+        // scaled = trunc(|v| * 10^N + 0.5)
+        enc.mulsd_rr(x86::XMM0, x86::XMM1);
+        enc.mov_ri64(x86::R10, 0x3FE0000000000000LL); // 0.5
+        enc.mov_mr_rbp(-64, x86::R10);
+        enc.movsd_rm_rbp(x86::XMM2, -64);
+        enc.addsd_rr(x86::XMM0, x86::XMM2);
+        enc.cvttsd2si(x86::RAX, x86::XMM0);
+
+        // pow10 = 10^N as an integer, then split scaled into int part / fraction.
+        enc.mov_ri64(x86::R10, 1);
+        enc.mov_ri64(x86::R11, 10);
+        enc.mov_rm_rbp(x86::R9, -24);
+        size_t dtPowI = enc.createLabel();
+        enc.bindLabel(dtPowI);
+        enc.imul_rr(x86::R10, x86::R11);
+        enc.dec_r(x86::R9);
+        enc.jne(dtPowI);
+        enc.xor_r32(x86::RDX, x86::RDX);
+        enc.div_r(x86::R10);
+        enc.mov_mr_rbp(-40, x86::RDX); // fraction
+        enc.mov_mr_rbp(-32, x86::RAX); // integer part (rounded)
+        enc.bindLabel(dtNoFrac);
+
+        // Emit the integer part.
+        enc.mov_rm_rbp(x86::RAX, -32);
+        enc.xor_r32(x86::R9, x86::R9);
+        enc.mov_ri64(x86::R10, 10);
+        size_t dtIntLoop = enc.createLabel();
+        size_t dtIntPop = enc.createLabel();
+        size_t dtIntDone = enc.createLabel();
+        enc.bindLabel(dtIntLoop);
+        enc.xor_r32(x86::RDX, x86::RDX);
+        enc.div_r(x86::R10);
+        enc.add_ri32(x86::RDX, '0');
+        enc.push(x86::RDX);
+        enc.inc_r(x86::R9);
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.jne(dtIntLoop);
+        enc.bindLabel(dtIntPop);
+        enc.test_rr(x86::R9, x86::R9);
+        enc.je(dtIntDone);
+        enc.pop(x86::RDX);
+        enc.mov_mr8(x86::RDI, 0, x86::RDX);
+        enc.inc_r(x86::RDI);
+        enc.dec_r(x86::R9);
+        enc.jmp(dtIntPop);
+        enc.bindLabel(dtIntDone);
+
+        // Trailing zeros for the 1e18 groups of a huge magnitude.
+        enc.mov_rm_rbp(x86::R9, -48);
+        size_t dtNoZeros = enc.createLabel();
+        enc.test_rr(x86::R9, x86::R9);
+        enc.je(dtNoZeros);
+        enc.mov_ri64(x86::R10, 18);
+        enc.imul_rr(x86::R9, x86::R10);
+        size_t dtZeroLoop = enc.createLabel();
+        enc.bindLabel(dtZeroLoop);
+        enc.mov_ri64(x86::R10, '0');
+        enc.mov_mr8(x86::RDI, 0, x86::R10);
+        enc.inc_r(x86::RDI);
+        enc.dec_r(x86::R9);
+        enc.jne(dtZeroLoop);
+        enc.bindLabel(dtNoZeros);
+
+        // Fraction: '.', then exactly N zero-padded digits, then trim.
+        enc.mov_rm_rbp(x86::R9, -24);
+        enc.test_rr(x86::R9, x86::R9);
+        enc.je(dtFinish);
+        enc.mov_ri64(x86::R10, '.');
+        enc.mov_mr8(x86::RDI, 0, x86::R10);
+        enc.inc_r(x86::RDI);
+
+        enc.mov_rm_rbp(x86::RSI, -40); // fraction
+        enc.mov_rm_rbp(x86::R9, -24);  // N
+        enc.mov_ri64(x86::R10, 10);
+        size_t dtFracPush = enc.createLabel();
+        enc.bindLabel(dtFracPush);
+        enc.mov_rr(x86::RAX, x86::RSI);
+        enc.xor_r32(x86::RDX, x86::RDX);
+        enc.div_r(x86::R10);
+        enc.mov_rr(x86::RSI, x86::RAX);
+        enc.add_ri32(x86::RDX, '0');
+        enc.push(x86::RDX);
+        enc.dec_r(x86::R9);
+        enc.jne(dtFracPush);
+
+        enc.mov_rm_rbp(x86::R9, -24);
+        size_t dtFracPop = enc.createLabel();
+        enc.bindLabel(dtFracPop);
+        enc.pop(x86::RDX);
+        enc.mov_mr8(x86::RDI, 0, x86::RDX);
+        enc.inc_r(x86::RDI);
+        enc.dec_r(x86::R9);
+        enc.jne(dtFracPop);
+
+        size_t dtTrim = enc.createLabel();
+        size_t dtTrimDot = enc.createLabel();
+        enc.bindLabel(dtTrim);
+        enc.movzx_rm8(x86::RAX, x86::RDI, -1);
+        enc.cmp_ri32(x86::RAX, '0');
+        enc.jne(dtTrimDot);
+        enc.dec_r(x86::RDI);
+        enc.jmp(dtTrim);
+        enc.bindLabel(dtTrimDot);
+        enc.movzx_rm8(x86::RAX, x86::RDI, -1);
+        enc.cmp_ri32(x86::RAX, '.');
+        size_t dtNoDot = enc.createLabel();
+        enc.jne(dtNoDot);
+        enc.dec_r(x86::RDI);
+        enc.bindLabel(dtNoDot);
+        enc.jmp(dtFinish);
+
+        enc.bindLabel(dtZero);
+        enc.mov_ri64(x86::R10, '0');
+        enc.mov_mr8(x86::RDI, 0, x86::R10);
+        enc.inc_r(x86::RDI);
+
+        enc.bindLabel(dtFinish);
+        enc.xor_r32(x86::RAX, x86::RAX);
+        enc.mov_mr8(x86::RDI, 0, x86::RAX);
+        enc.add_rsp(96);
+        enc.pop(x86::RBP);
+        enc.ret();
+        elf.registerFuncPointer("sprintf_d", rvaDtoa);
 
         // --- O. _thava_linux_fopen (path in RCX, mode in RDX -> RAX filePtr) ---
         size_t lblFopen = enc.createLabel();

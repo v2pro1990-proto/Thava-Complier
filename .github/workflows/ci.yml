@@ -2,7 +2,7 @@ name: CI Build & Release
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "codex/global-write-ci" ]
     tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
@@ -33,6 +33,9 @@ jobs:
           ./test_hello.exe
           ./thavac.exe examples/01_hello_world.thv --target win-arm64 -o test_hello_win_arm64.exe
 
+      - name: Verify global writes
+        run: python tests/gw_verify.py ./thavac.exe
+
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
@@ -41,7 +44,7 @@ jobs:
 
   build-windows-arm64:
     name: Build Windows ARM64 (Experimental)
-    runs-on: windows-latest
+    runs-on: windows-11-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,11 +52,20 @@ jobs:
       - name: Setup MSVC for ARM64 cross-compilation
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64_arm64
+          arch: arm64
 
       - name: Compile thavac for Windows ARM64
         run: |
           cl.exe /O2 /std:c++17 /EHsc /utf-8 src\thavac.cpp /Isrc /Fe:thavac-windows-arm64.exe
+
+      - name: Execute global-write fixture on Windows ARM64
+        shell: pwsh
+        run: |
+          ./thavac-windows-arm64.exe tests/gw.thv --target win-arm64 -o gw.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = ./gw.exe
+          if ($LASTEXITCODE -ne 0 -or $output -notcontains '4 3 AB new 9') { throw "Unexpected output: $output" }
+          $output
 
       - name: Upload Windows ARM64 artifact
         uses: actions/upload-artifact@v4
@@ -71,7 +83,7 @@ jobs:
       - name: Install dependencies and cross-compilers
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-aarch64-linux-gnu file
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++-aarch64-linux-gnu file qemu-user
 
       - name: Compile thavac for Linux x86-64
         run: |
@@ -93,6 +105,9 @@ jobs:
         run: |
           ./thavac-linux-x64 examples/01_hello_world.thv --arm64 -o test_hello_arm64
           file test_hello_arm64 || true
+
+      - name: Verify global writes on ELF and AArch64
+        run: python3 tests/gw_verify.py ./thavac-linux-x64
 
       - name: Upload Linux x86-64 artifact
         uses: actions/upload-artifact@v4

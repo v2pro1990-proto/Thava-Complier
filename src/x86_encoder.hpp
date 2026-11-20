@@ -753,6 +753,13 @@ public:
         emit8(makeModRm(3, 2, r & 7));
     }
 
+    // jmp r/m64 (FF /4)
+    void jmp_r(Reg r) {
+        if (r >= 8) emit8(makeRex(false, false, false, true));
+        emit8(0xFF);
+        emit8(makeModRm(3, 4, r & 7));
+    }
+
     // ret
     void ret() {
         emit8(0xC3);
