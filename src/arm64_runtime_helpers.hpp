@@ -967,4 +967,66 @@ inline void emitRandChoice(Encoder& enc, size_t lblRandChoice, size_t lblRand, u
     enc.ret();
 }
 
+inline void emitDictFind(Encoder& enc, size_t lblDictFind, size_t lblStrCmpEq) {
+    enc.bindLabel(lblDictFind);
+    enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -80);
+    enc.mov_rr(arm64::FP, arm64::SP);
+    enc.str_imm(arm64::X0, arm64::FP, 16);
+    enc.str_imm(arm64::X1, arm64::FP, 24);
+    enc.str_imm(arm64::X2, arm64::FP, 32);
+
+    size_t notFound = enc.createLabel();
+    size_t endLbl = enc.createLabel();
+    size_t loopLbl = enc.createLabel();
+    size_t intCmp = enc.createLabel();
+    size_t foundLbl = enc.createLabel();
+    size_t nextLbl = enc.createLabel();
+
+    enc.cbz(arm64::X0, notFound);
+    enc.ldr_imm(arm64::X6, arm64::X0, 0);
+    enc.str_imm(arm64::X6, arm64::FP, 40); // count
+    enc.movz(arm64::X0, 0, 0);
+    enc.str_imm(arm64::X0, arm64::FP, 48); // i
+
+    enc.bindLabel(loopLbl);
+    enc.ldr_imm(arm64::X6, arm64::FP, 48);
+    enc.ldr_imm(arm64::X7, arm64::FP, 40);
+    enc.cmp_rr(arm64::X6, arm64::X7);
+    enc.b_cond(arm64::GE, notFound);
+
+    enc.movz(arm64::X8, 32, 0);
+    enc.mul_rrr(arm64::X9, arm64::X6, arm64::X8);
+    enc.ldr_imm(arm64::X10, arm64::FP, 16);
+    enc.add_rrr(arm64::X10, arm64::X10, arm64::X9);
+    enc.ldr_imm(arm64::X11, arm64::X10, 16); // entry key
+
+    enc.ldr_imm(arm64::X12, arm64::FP, 32);
+    enc.cbz(arm64::X12, intCmp);
+    enc.mov_rr(arm64::X0, arm64::X11);
+    enc.ldr_imm(arm64::X1, arm64::FP, 24);
+    enc.bl(lblStrCmpEq);
+    enc.cbnz(arm64::X0, foundLbl);
+    enc.b(nextLbl);
+
+    enc.bindLabel(intCmp);
+    enc.ldr_imm(arm64::X13, arm64::FP, 24);
+    enc.cmp_rr(arm64::X11, arm64::X13);
+    enc.b_cond(arm64::EQ, foundLbl);
+
+    enc.bindLabel(nextLbl);
+    enc.ldr_imm(arm64::X6, arm64::FP, 48);
+    enc.add_rri(arm64::X6, arm64::X6, 1);
+    enc.str_imm(arm64::X6, arm64::FP, 48);
+    enc.b(loopLbl);
+
+    enc.bindLabel(foundLbl);
+    enc.ldr_imm(arm64::X0, arm64::FP, 48);
+    enc.b(endLbl);
+    enc.bindLabel(notFound);
+    enc.movn(arm64::X0, 0, 0);
+    enc.bindLabel(endLbl);
+    enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 80);
+    enc.ret();
+}
+
 } // namespace arm64

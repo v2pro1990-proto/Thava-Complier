@@ -20,8 +20,6 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
 with tempfile.TemporaryDirectory() as tmp:
     for target in targets:
         for case, line in expected.items():
-            if target == "pe-arm64" and case == "gw_dict":
-                continue  # This target rejects dictionaries at compile time.
             output = Path(tmp) / (case + (".exe" if windows else ""))
             for opt in (["-O0", "-O3"] if case == "gw" and target != "cpp" else ["-O0"]):
                 subprocess.run([str(compiler), str(fixtures / (case + ".thv")), "--backend",

@@ -822,5 +822,6 @@ public:
         arm64::emitStrCmpEq(enc, lblStrCmpEq);
         arm64::emitListIn(enc, lblListIn, lblStrCmpEq);
         arm64::emitRandChoice(enc, lblRandChoice, lblRand, offEmptyStr);
+        arm64::emitDictFind(enc, lblDictFind, lblStrCmpEq);
     }
 };

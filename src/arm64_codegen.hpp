@@ -319,8 +319,6 @@ public:
     // Features that only the Linux ARM64 runtime can service (syscalls/helpers
     // that the Windows ARM64 runtime does not provide yet).
     static const char* linuxOnlyFeature(ASTNode* n) {
-        if (dynamic_cast<DictNode*>(n) || dynamic_cast<DictMethodNode*>(n))
-            return "dict";
         if (dynamic_cast<FileOpenBlockNode*>(n) || dynamic_cast<FileMethodNode*>(n))
             return "file I/O";
         if (dynamic_cast<OsMethodNode*>(n) || dynamic_cast<TimeMethodNode*>(n))
