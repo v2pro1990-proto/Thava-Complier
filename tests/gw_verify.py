@@ -14,7 +14,8 @@ targets = ("pe", "cpp", "pe-arm64") if windows else ("elf", "arm64")
 if run_windows_arm64:
     targets = ("pe-arm64",)
 expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][abc-19][Ab C][][][][][AbC-19]",
-            "strings_search": "1 -1 3 0 [cXY-XY-XY][cab-ab-ab][c--][Alpha Beta][one||three|]"}
+            "strings_search": "1 -1 3 0 [cXY-XY-XY][cab-ab-ab][c--][Alpha Beta][one||three|]",
+            "membership_rand": "true false true false true false true -4 true only"}
 
 with tempfile.TemporaryDirectory() as tmp:
     for target in targets:

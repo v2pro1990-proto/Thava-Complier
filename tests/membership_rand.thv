@@ -1,0 +1,21 @@
+<str> text = "alpha beta"
+<str> part = "beta"
+<str> missing = "gamma"
+<lst> numbers = [1, 5, 9]
+<lst> words = ["red", "blue"]
+<str> blue = "blue"
+<str> green = "green"
+<bl> substring = part in text
+<bl> noSubstring = missing in text
+<bl> number = 5 in numbers
+<bl> noNumber = 7 in numbers
+<bl> word = blue in words
+<bl> noWord = green in words
+<dbl> sample = rand()
+<bl> sampleRange = sample >= 0.0 and sample <= 1.0
+<int> fixed = randint(-4, -4)
+<int> roll = randint(-2, 3)
+<bl> rollRange = roll >= -2 and roll <= 3
+<lst> single = ["only"]
+<str> picked = randres(single)
+cons.out("@{substring} @{noSubstring} @{number} @{noNumber} @{word} @{noWord} @{sampleRange} @{fixed} @{rollRange} @{picked}")

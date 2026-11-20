@@ -319,10 +319,6 @@ public:
     // Features that only the Linux ARM64 runtime can service (syscalls/helpers
     // that the Windows ARM64 runtime does not provide yet).
     static const char* linuxOnlyFeature(ASTNode* n) {
-        if (dynamic_cast<RandCallNode*>(n))
-            return "rand()/randint()/randres()";
-        if (dynamic_cast<InNode*>(n))
-            return "'in' expressions";
         if (dynamic_cast<DictNode*>(n) || dynamic_cast<DictMethodNode*>(n))
             return "dict";
         if (dynamic_cast<FileOpenBlockNode*>(n) || dynamic_cast<FileMethodNode*>(n))
@@ -1001,7 +997,7 @@ public:
 
         // 7. CallNode (Function invocation)
         if (auto call = dynamic_cast<CallNode*>(node)) {
-            // Built-in min()/max() â€” unless the program defines its own function with that name
+            // Built-in min()/max() — unless the program defines its own function with that name
             if ((call->name == "min" || call->name == "max") && functions.find(call->name) == functions.end()) {
                 if (call->args.size() != 2) {
                     std::cerr << "[ARM64 Codegen Error]: " << call->name
@@ -3731,6 +3727,10 @@ public:
         // library itself never runs the loader: its exports are entered directly).
         if constexpr (std::is_same_v<TEmitter, ElfArm64Emitter>) {
             if (!g_isLibraryMode) emitDLAttachLoader();
+        }
+
+        if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) {
+            enc.bl(runtime.lblSeedRand);
         }
 
         // No exception handler is installed at program start.

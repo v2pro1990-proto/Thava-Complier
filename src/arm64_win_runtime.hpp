@@ -2,7 +2,7 @@
 
 #include "pe_emitter.hpp"
 #include "arm64_encoder.hpp"
-#include "arm64_string_helpers.hpp"
+#include "arm64_runtime_helpers.hpp"
 #include <string>
 #include <cstdint>
 
@@ -63,6 +63,7 @@ public:
     size_t lblInputLine = 0;
     size_t lblAtoi = 0;
     size_t lblAtoD = 0;
+    size_t lblSeedRand = 0;
     size_t lblRand = 0;
     size_t lblRandChoice = 0;
     size_t lblGetenv = 0;
@@ -126,6 +127,7 @@ public:
         lblInputLine     = enc.createLabel();
         lblAtoi          = enc.createLabel();
         lblAtoD          = enc.createLabel();
+        lblSeedRand      = enc.createLabel();
         lblRand          = enc.createLabel();
         lblRandChoice    = enc.createLabel();
         lblGetenv        = enc.createLabel();
@@ -160,6 +162,7 @@ public:
         offFmtScanLine  = pe.addStringLiteralOffset(" %1023[^\n]");
         offStrListOpen  = pe.addStringLiteralOffset("[");
         offStrListComma = pe.addStringLiteralOffset(", ");
+        offDoubleMaxRand = pe.addDoubleLiteralOffset(32767.0);
         offEmptyStr = pe.addStringLiteralOffset("");
         offStrListClose = pe.addStringLiteralOffset("]\n");
     }
@@ -797,5 +800,27 @@ public:
         arm64::emitStrReplace(enc, lblStrReplace, lblStrLen, lblStrFind, lblMalloc, lblMemCpy, offEmptyStr);
         arm64::emitStrSplit(enc, lblStrSplit, lblStrLen, lblStrFind, lblMalloc, lblMemCpy, offEmptyStr);
         arm64::emitStrJoin(enc, lblStrJoin, lblStrLen, lblMalloc, lblMemCpy, offEmptyStr);
+        // Seed msvcrt's generator once per program, as on Windows x86-64.
+        enc.bindLabel(lblSeedRand);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
+        enc.mov_rr(arm64::FP, arm64::SP);
+        enc.movz(arm64::X0, 0, 0);
+        enc.adr_data(arm64::X16, pe.getFuncIatOffsetInRdata("time"));
+        enc.ldr_imm(arm64::X16, arm64::X16, 0);
+        enc.blr(arm64::X16);
+        enc.adr_data(arm64::X16, pe.getFuncIatOffsetInRdata("srand"));
+        enc.ldr_imm(arm64::X16, arm64::X16, 0);
+        enc.blr(arm64::X16);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 16);
+        enc.ret();
+
+        enc.bindLabel(lblRand);
+        enc.adr_data(arm64::X16, pe.getFuncIatOffsetInRdata("rand"));
+        enc.ldr_imm(arm64::X16, arm64::X16, 0);
+        enc.br(arm64::X16);
+
+        arm64::emitStrCmpEq(enc, lblStrCmpEq);
+        arm64::emitListIn(enc, lblListIn, lblStrCmpEq);
+        arm64::emitRandChoice(enc, lblRandChoice, lblRand, offEmptyStr);
     }
 };
