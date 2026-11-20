@@ -13,3 +13,8 @@ __declspec(dllexport) int64_t ninth(int64_t a, int64_t b, int64_t c, int64_t d,
 __declspec(dllexport) const char* label(void) {
     return "arm64";
 }
+
+__declspec(dllexport) intptr_t address(void) {
+    static const int64_t value = 54321;
+    return (intptr_t)&value;
+}

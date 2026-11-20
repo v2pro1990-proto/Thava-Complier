@@ -66,6 +66,7 @@ public:
     size_t lblTimeFormat = 0;
     size_t lblListDir = 0;
     size_t lblSetEnv = 0;
+    size_t lblNamedModule = 0;
     size_t lblMessageIcon = 0;
     size_t lblMessageButtons = 0;
     size_t lblSeedRand = 0;
@@ -101,6 +102,7 @@ public:
 
     struct TimeToken { int field; uint32_t token; uint32_t format; };
     std::vector<TimeToken> timeTokens;
+    uint32_t offModuleCache = 0;
     uint32_t offDirWildcard = 0, offDot = 0, offDotDot = 0, offEquals = 0;
     std::vector<std::pair<uint32_t, int>> messageIcons, messageButtons;
     uint32_t offTimeDefault[2]{};
@@ -147,6 +149,7 @@ public:
         lblTimeFormat    = enc.createLabel();
         lblListDir       = enc.createLabel();
         lblSetEnv        = enc.createLabel();
+        lblNamedModule   = enc.createLabel();
         lblMessageIcon   = enc.createLabel();
         lblMessageButtons = enc.createLabel();
         lblSeedRand      = enc.createLabel();
@@ -200,6 +203,7 @@ public:
         offDot = pe.addStringLiteralOffset(".");
         offDotDot = pe.addStringLiteralOffset("..");
         offEquals = pe.addStringLiteralOffset("=");
+        offModuleCache = pe.addDataSlot();
         for (const auto& entry : std::initializer_list<std::pair<const char*, int>>{
                 {"warning", 0x30}, {"information", 0x40}, {"infomation", 0x40},
                 {"info", 0x40}, {"question", 0x20}, {"error", 0x10}})
@@ -917,6 +921,7 @@ public:
         emitTimeFormat();
         emitListDir();
         emitSetEnv();
+        emitNamedModule();
         emitMessageFlag(lblMessageIcon, messageIcons);
         emitMessageFlag(lblMessageButtons, messageButtons);
         for (const auto& entry : windowsImportLabels) {
@@ -1056,6 +1061,56 @@ private:
         enc.b(done);
         enc.bindLabel(invalid);
         enc.movz(X0, 0, 0);
+        enc.bindLabel(done);
+        enc.ldp_post(FP, LR, SP, 48);
+        enc.ret();
+    }
+
+    // Retain direct-call modules for the lifetime of the process. A function
+    // may return a pointer into the DLL even when its declared result is <int64>.
+    void emitNamedModule() {
+        using namespace arm64;
+        enc.bindLabel(lblNamedModule);
+        enc.stp_pre(FP, LR, SP, -48);
+        enc.mov_rr(FP, SP);
+        enc.str_imm(X0, FP, 16);
+        auto loop = enc.createLabel(), load = enc.createLabel();
+        auto found = enc.createLabel(), done = enc.createLabel();
+        enc.adr_data(X9, offModuleCache);
+        enc.ldr_imm(X9, X9, 0);
+        enc.bindLabel(loop);
+        enc.cbz(X9, load);
+        enc.str_imm(X9, FP, 24);
+        enc.ldr_imm(X0, X9, 8);
+        enc.ldr_imm(X1, FP, 16);
+        enc.bl(lblStrCmpEq);
+        enc.ldr_imm(X9, FP, 24);
+        enc.cbnz(X0, found);
+        enc.ldr_imm(X9, X9, 0);
+        enc.b(loop);
+
+        enc.bindLabel(load);
+        enc.ldr_imm(X0, FP, 16);
+        callCrt("LoadLibraryA");
+        enc.cbz(X0, done);
+        enc.str_imm(X0, FP, 32);
+        enc.ldr_imm(X0, FP, 16);
+        callCrt("_strdup");
+        enc.str_imm(X0, FP, 16);
+        enc.movz(X0, 24, 0);
+        enc.bl(lblMalloc);
+        enc.adr_data(X9, offModuleCache);
+        enc.ldr_imm(X10, X9, 0);
+        enc.str_imm(X10, X0, 0);
+        enc.ldr_imm(X10, FP, 16);
+        enc.str_imm(X10, X0, 8);
+        enc.ldr_imm(X10, FP, 32);
+        enc.str_imm(X10, X0, 16);
+        enc.str_imm(X0, X9, 0);
+        enc.mov_rr(X0, X10);
+        enc.b(done);
+        enc.bindLabel(found);
+        enc.ldr_imm(X0, X9, 16);
         enc.bindLabel(done);
         enc.ldp_post(FP, LR, SP, 48);
         enc.ret();

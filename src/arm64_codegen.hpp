@@ -2514,29 +2514,24 @@ public:
         if (method == "has" || method == "call" || method == "call_str" || method == "call_dbl") {
             const size_t symbol = node->target ? 0 : 1;
             require(symbol + 1);
-            enc.sub_rri(SP, SP, 32);
-            enc.movz(X9, 0, 0);
-            enc.str_imm(X9, SP, 8); // module owned by this expression
+            enc.sub_rri(SP, SP, 16);
             if (node->target) compileExpression(node->target.get());
-            else if (compileExpression(node->args[0].get()) == ThavaType::STRING) {
-                emitWindowsImport("LoadLibraryA");
-                enc.str_imm(X0, SP, 8);
-            }
+            else if (compileExpression(node->args[0].get()) == ThavaType::STRING)
+                enc.bl(runtime.lblNamedModule);
             enc.str_imm(X0, SP, 0);
             compileExpression(node->args[symbol].get());
             enc.mov_rr(X1, X0);
             enc.ldr_imm(X0, SP, 0);
             auto missing = enc.createLabel(), cleanup = enc.createLabel();
-            auto done = enc.createLabel();
             enc.cbz(X0, missing);
             emitWindowsImport("GetProcAddress");
             enc.cbz(X0, missing);
             if (method == "has") {
                 enc.movz(X0, 1, 0);
             } else {
-                enc.str_imm(X0, SP, 16);
+                enc.str_imm(X0, SP, 8);
                 const int frame = emitWindowsForeignArgs(node->args, symbol + 1);
-                enc.ldr_imm(X16, SP, frame + 16);
+                enc.ldr_imm(X16, SP, frame + 8);
                 enc.blr(X16);
                 if (frame) enc.add_rri(SP, SP, frame);
                 if (method == "call_dbl") d0BitsToX0();
@@ -2550,13 +2545,7 @@ public:
             enc.bindLabel(missing);
             if (method == "call_str") enc.adr_data(X0, runtime.offEmptyStr);
             enc.bindLabel(cleanup);
-            enc.str_imm(X0, SP, 16);
-            enc.ldr_imm(X0, SP, 8);
-            enc.cbz(X0, done);
-            emitWindowsImport("FreeLibrary");
-            enc.bindLabel(done);
-            enc.ldr_imm(X0, SP, 16);
-            enc.add_rri(SP, SP, 32);
+            enc.add_rri(SP, SP, 16);
             if (method == "has") return ThavaType::BOOL;
             if (method == "call_str") return ThavaType::STRING;
             if (method == "call_dbl") return ThavaType::DOUBLE;
