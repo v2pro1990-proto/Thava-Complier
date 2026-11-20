@@ -313,6 +313,15 @@ public:
         }
     }
 
+    // Load and store a 32-bit word at the address in Xn.
+    void ldr_w(Reg rt, Reg rn) {
+        emit32(0xB9400000 | ((rn & 31) << 5) | (rt & 31));
+    }
+
+    void str_w(Reg rt, Reg rn) {
+        emit32(0xB9000000 | ((rn & 31) << 5) | (rt & 31));
+    }
+
     // LDR Xd, [Xn, Xm] (Register offset load)
     void ldr_reg(Reg rt, Reg rn, Reg rm) {
         // 0xF8606800 | (rm << 16) | (rn << 5) | rt (LDR Xd, [Xn, Xm, LSL #0])

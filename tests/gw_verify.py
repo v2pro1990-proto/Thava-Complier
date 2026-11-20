@@ -23,6 +23,10 @@ if run_windows_arm64:
     expected["os_time_extended_arm64"] = "true true example true [] false 2 true true 0"
 
 with tempfile.TemporaryDirectory() as tmp:
+    if run_windows_arm64:
+        subprocess.run(["cl.exe", "/nologo", "/LD", str(fixtures / "ffi_arm64.c"),
+                        "/Fe:arm64-ci-fixture.dll"], cwd=tmp, check=True)
+        expected["ffi_arm64"] = "true false 8.75 45 arm64 -12 2.5 9 5000000000"
     for target in targets:
         cases = dict(expected)
         if target in ("arm64", "pe-arm64", "cpp"):

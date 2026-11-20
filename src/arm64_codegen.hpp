@@ -689,6 +689,7 @@ public:
     }
 
     void checkUnsupported(ASTNode* n) {
+        if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) return;
         std::string what;
         if (unsupportedFeatureName(n, what)) {
             std::cerr << "[ARM64 Codegen Error]: " << what
@@ -1015,7 +1016,22 @@ public:
         }
 
         // 7. CallNode (Function invocation)
+        if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) {
+            if (auto call = dynamic_cast<CCallNode*>(node))
+                return emitWindowsCFunction(call->funcName, call->args);
+            if (auto clib = dynamic_cast<CLibMethodNode*>(node))
+                return emitWindowsCLib(clib);
+            if (dynamic_cast<CVarNode*>(node)) {
+                std::cerr << "[ARM64 Codegen Error]: C globals require the C++ backend.\n";
+                exit(1);
+            }
+        }
+
         if (auto call = dynamic_cast<CallNode*>(node)) {
+            if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) {
+                if (g_isCFunc.count(call->name))
+                    return emitWindowsCFunction(call->name, call->args);
+            }
             // Built-in min()/max() — unless the program defines its own function with that name
             if ((call->name == "min" || call->name == "max") && functions.find(call->name) == functions.end()) {
                 if (call->args.size() != 2) {
@@ -2374,8 +2390,212 @@ public:
         return ThavaType::UNKNOWN;
     }
 
+    static bool isForeignScalar(ThavaType type) {
+        return type == ThavaType::INT || type == ThavaType::BOOL || type == ThavaType::STRING ||
+               type == ThavaType::FLOAT || type == ThavaType::DOUBLE;
+    }
+
+    // Stage values so a nested call cannot clobber an earlier argument.
+    // Windows ARM64 uses separate integer and SIMD register banks.
+    int emitWindowsForeignArgs(const std::vector<ASTPtr>& args, size_t first,
+                              const std::vector<ThavaType>* signature = nullptr) {
+        using namespace arm64;
+        const size_t count = args.size() - first;
+        if (count > 240) {
+            std::cerr << "[ARM64 Codegen Error]: Too many foreign arguments.\n";
+            exit(1);
+        }
+        const int frame = static_cast<int>(count * 16);
+        if (frame) enc.sub_rri(SP, SP, frame);
+        std::vector<ThavaType> types;
+        for (size_t i = 0; i < count; ++i) {
+            const auto actual = compileExpression(args[first + i].get());
+            const auto type = signature ? signature->at(i) : actual;
+            if (!isForeignScalar(actual) || !isForeignScalar(type) ||
+                ((type == ThavaType::STRING) != (actual == ThavaType::STRING))) {
+                std::cerr << "[ARM64 Codegen Error]: Expected a matching scalar C argument.\n";
+                exit(1);
+            }
+            const int slot = static_cast<int>((count + i) * 8);
+            const bool fp = type == ThavaType::FLOAT || type == ThavaType::DOUBLE;
+            const bool actualFp = actual == ThavaType::FLOAT || actual == ThavaType::DOUBLE;
+            if (fp && !actualFp) intToDoubleBits();
+            if (!fp && actualFp) doubleBitsToInt();
+            if (type == ThavaType::FLOAT) {
+                enc.movz(X9, 0, 0);
+                enc.str_imm(X9, SP, slot);
+                enc.fmov_dx(D0, X0);
+                enc.fcvt_ds(D0, D0);
+                enc.fstr_s_imm(D0, SP, slot);
+            } else enc.str_imm(X0, SP, slot);
+            types.push_back(type);
+        }
+
+        int integer = 0, simd = 0, spill = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const int slot = static_cast<int>((count + i) * 8);
+            const auto type = types[i];
+            if (type == ThavaType::FLOAT || type == ThavaType::DOUBLE) {
+                if (simd < 8) {
+                    const auto reg = static_cast<VReg>(simd++);
+                    if (type == ThavaType::FLOAT) enc.fldr_s_imm(reg, SP, slot);
+                    else enc.fldr_imm(reg, SP, slot);
+                    continue;
+                }
+            } else if (integer < 8) {
+                enc.ldr_imm(static_cast<Reg>(integer++), SP, slot);
+                continue;
+            }
+            enc.ldr_imm(X9, SP, slot);
+            enc.str_imm(X9, SP, spill);
+            spill += 8;
+        }
+        return frame;
+    }
+
+    ThavaType emitWindowsCFunction(const std::string& name, const std::vector<ASTPtr>& args) {
+        if (!g_isCFunc.count(name) || args.size() != g_funcParamTypes.at(name).size()) {
+            std::cerr << "[ARM64 Codegen Error]: c." << name
+                      << " requires a matching cfunc declaration.\n";
+            exit(1);
+        }
+        const auto result = g_funcReturnTypes.at(name);
+        if (result != ThavaType::VOID && !isForeignScalar(result)) {
+            std::cerr << "[ARM64 Codegen Error]: Unsupported C return type.\n";
+            exit(1);
+        }
+        const auto label = runtime.importFunction("msvcrt.dll", name);
+        const int frame = emitWindowsForeignArgs(args, 0, &g_funcParamTypes.at(name));
+        enc.bl(label);
+        if (frame) enc.add_rri(arm64::SP, arm64::SP, frame);
+        if (result == ThavaType::INT) narrowIntX0(g_funcReturnWidths[name]);
+        if (result == ThavaType::FLOAT) enc.fcvt_sd(arm64::D0, arm64::D0);
+        if (result == ThavaType::FLOAT || result == ThavaType::DOUBLE) d0BitsToX0();
+        return result;
+    }
+
+    ThavaType emitWindowsCLib(CLibMethodNode* node) {
+        using namespace arm64;
+        const auto& method = node->method;
+        const auto require = [&](size_t count) {
+            if (node->args.size() < count) {
+                std::cerr << "[ARM64 Codegen Error]: clib." << method
+                          << " requires " << count << " argument(s).\n";
+                exit(1);
+            }
+        };
+
+        if (method == "load" || method == "free" || method == "alloc" || method == "free_mem") {
+            if (method == "free" && node->target) compileExpression(node->target.get());
+            else {
+                require(1);
+                compileExpression(node->args[0].get());
+            }
+            if (method == "load") emitWindowsImport("LoadLibraryA");
+            else if (method == "alloc") enc.bl(runtime.lblMalloc);
+            else if (method == "free_mem") {
+                emitWindowsImport("free");
+                return ThavaType::VOID;
+            } else {
+                emitWindowsImport("FreeLibrary");
+                enc.cmp_ri(X0, 0);
+                enc.cset(X0, NE);
+                return ThavaType::BOOL;
+            }
+            return ThavaType::INT;
+        }
+
+        if (method == "has" || method == "call" || method == "call_str" || method == "call_dbl") {
+            const size_t symbol = node->target ? 0 : 1;
+            require(symbol + 1);
+            enc.sub_rri(SP, SP, 32);
+            enc.movz(X9, 0, 0);
+            enc.str_imm(X9, SP, 8); // module owned by this expression
+            if (node->target) compileExpression(node->target.get());
+            else if (compileExpression(node->args[0].get()) == ThavaType::STRING) {
+                emitWindowsImport("LoadLibraryA");
+                enc.str_imm(X0, SP, 8);
+            }
+            enc.str_imm(X0, SP, 0);
+            compileExpression(node->args[symbol].get());
+            enc.mov_rr(X1, X0);
+            enc.ldr_imm(X0, SP, 0);
+            auto missing = enc.createLabel(), cleanup = enc.createLabel();
+            auto done = enc.createLabel();
+            enc.cbz(X0, missing);
+            emitWindowsImport("GetProcAddress");
+            enc.cbz(X0, missing);
+            if (method == "has") {
+                enc.movz(X0, 1, 0);
+            } else {
+                enc.str_imm(X0, SP, 16);
+                const int frame = emitWindowsForeignArgs(node->args, symbol + 1);
+                enc.ldr_imm(X16, SP, frame + 16);
+                enc.blr(X16);
+                if (frame) enc.add_rri(SP, SP, frame);
+                if (method == "call_dbl") d0BitsToX0();
+                if (method == "call_str") {
+                    enc.cbz(X0, missing);
+                    emitWindowsImport("_strdup");
+                    enc.cbz(X0, missing);
+                }
+            }
+            enc.b(cleanup);
+            enc.bindLabel(missing);
+            if (method == "call_str") enc.adr_data(X0, runtime.offEmptyStr);
+            enc.bindLabel(cleanup);
+            enc.str_imm(X0, SP, 16);
+            enc.ldr_imm(X0, SP, 8);
+            enc.cbz(X0, done);
+            emitWindowsImport("FreeLibrary");
+            enc.bindLabel(done);
+            enc.ldr_imm(X0, SP, 16);
+            enc.add_rri(SP, SP, 32);
+            if (method == "has") return ThavaType::BOOL;
+            if (method == "call_str") return ThavaType::STRING;
+            if (method == "call_dbl") return ThavaType::DOUBLE;
+            return ThavaType::INT;
+        }
+
+        const bool store = method == "poke" || method == "poke32" || method == "poke64" || method == "poke_f";
+        if (store || method == "peek" || method == "peek32" || method == "peek64" ||
+            method == "peek_f" || method == "peek_u8") {
+            require(store ? 3 : 1);
+            enc.sub_rri(SP, SP, 16);
+            compileExpression(node->args[0].get());
+            enc.str_imm(X0, SP, 0);
+            if (node->args.size() > 1) {
+                compileExpression(node->args[1].get());
+                enc.ldr_imm(X9, SP, 0);
+                enc.add_rrr(X0, X9, X0);
+                enc.str_imm(X0, SP, 0);
+            }
+            if (store) {
+                const auto type = compileExpression(node->args[2].get());
+                if (method == "poke_f" && type != ThavaType::FLOAT && type != ThavaType::DOUBLE)
+                    intToDoubleBits();
+                enc.ldr_imm(X9, SP, 0);
+                if (method == "poke" || method == "poke32") enc.str_w(X0, X9);
+                else enc.str_imm(X0, X9, 0);
+                enc.add_rri(SP, SP, 16);
+                return ThavaType::VOID;
+            }
+            enc.ldr_imm(X9, SP, 0);
+            if (method == "peek_u8") enc.ldrb_imm(X0, X9, 0);
+            else if (method == "peek" || method == "peek32") {
+                enc.ldr_w(X0, X9);
+                narrowIntX0("");
+            } else enc.ldr_imm(X0, X9, 0);
+            enc.add_rri(SP, SP, 16);
+            return method == "peek_f" ? ThavaType::DOUBLE : ThavaType::INT;
+        }
+
+        std::cerr << "[ARM64 Codegen Error]: Unsupported clib method: " << method << "\n";
+        exit(1);
+    }
+
     void emitWindowsImport(const std::string& name) {
-        enc.bl(runtime.osImportLabels.at(name));
+        enc.bl(runtime.windowsImportLabels.at(name));
     }
 
     void emitWindowsSleep(const std::vector<ASTPtr>& args) {
@@ -2425,6 +2645,10 @@ public:
             } else {
                 compileExpression(os->args.at(0).get());
                 emitWindowsImport("getenv");
+                auto missing = enc.createLabel();
+                enc.cbz(arm64::X0, missing);
+                emitWindowsImport("_strdup");
+                enc.bindLabel(missing);
             }
             auto found = enc.createLabel();
             enc.cbnz(arm64::X0, found);

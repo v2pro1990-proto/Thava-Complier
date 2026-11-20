@@ -106,7 +106,7 @@ public:
     uint32_t offTimeDefault[2]{};
     uint32_t offTimeAliases[3]{};
     uint32_t offTimePatterns[3]{};
-    std::map<std::string, size_t> osImportLabels;
+    std::map<std::string, size_t> windowsImportLabels;
     bool initialized = false;
 
     Arm64WinRuntime(arm64::Encoder& e, PeEmitter& p)
@@ -170,6 +170,13 @@ public:
         lblFileReadLines = enc.createLabel();
     }
 
+    size_t importFunction(const char* dll, const std::string& name) {
+        auto found = windowsImportLabels.find(name);
+        if (found != windowsImportLabels.end()) return found->second;
+        pe.addImport(dll, name);
+        return windowsImportLabels.emplace(name, enc.createLabel()).first->second;
+    }
+
     void init() {
         if (initialized) return;
         initialized = true;
@@ -177,16 +184,16 @@ public:
         for (const char* name : {"GetCurrentProcessId", "Sleep", "GetLocalTime",
                                  "GetFileAttributesA", "GetFileAttributesExA",
                                  "GetActiveProcessorCount", "FindFirstFileA",
-                                 "FindNextFileA", "FindClose"}) {
+                                 "FindNextFileA", "FindClose", "LoadLibraryA", "GetProcAddress", "FreeLibrary"}) {
             pe.addImport("kernel32.dll", name);
-            osImportLabels.emplace(name, enc.createLabel());
+            windowsImportLabels.emplace(name, enc.createLabel());
         }
         for (const char* name : {"system", "_chdir", "_mkdir", "_rmdir", "remove",
-                                 "rename", "getenv", "_getcwd", "time"}) {
-            osImportLabels.emplace(name, enc.createLabel());
+                                 "rename", "getenv", "_getcwd", "time", "free", "_strdup"}) {
+            windowsImportLabels.emplace(name, enc.createLabel());
         }
 
-        osImportLabels.emplace("MessageBoxA", enc.createLabel());
+        windowsImportLabels.emplace("MessageBoxA", enc.createLabel());
         pe.addImport("msvcrt.dll", "_putenv");
         pe.addImport("msvcrt.dll", "_strdup");
         offDirWildcard = pe.addStringLiteralOffset("\\*");
@@ -912,7 +919,7 @@ public:
         emitSetEnv();
         emitMessageFlag(lblMessageIcon, messageIcons);
         emitMessageFlag(lblMessageButtons, messageButtons);
-        for (const auto& entry : osImportLabels) {
+        for (const auto& entry : windowsImportLabels) {
             enc.bindLabel(entry.second);
             tailCallImport(entry.first.c_str());
         }

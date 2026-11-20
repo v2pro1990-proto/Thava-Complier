@@ -5768,14 +5768,15 @@ class Parser {
     }
 
     ASTPtr cfuncDeclStatement(bool hasPrefixType) {
+        std::string returnWidth;
         ThavaType returnType = ThavaType::VOID;
         if (hasPrefixType) {
-            returnType = parseType();
+            returnType = parseType(&returnWidth);
             match(TokenType::CFUNC);
         } else {
             match(TokenType::CFUNC);
             if (isTypeToken(peek().type)) {
-                returnType = parseType();
+                returnType = parseType(&returnWidth);
             }
         }
 
@@ -5844,14 +5845,14 @@ class Parser {
                 std::cerr << "Parser Error: Expected return type after '->' at line " << peek().line << "\n";
                 exit(1);
             }
-            returnType = parseType();
+            returnType = parseType(&returnWidth);
         }
 
         std::vector<ThavaType> pTypes;
         for (auto& p : params) pTypes.push_back(p.first);
 
         g_funcReturnTypes[name] = returnType;
-        if (returnType == ThavaType::INT) g_funcReturnWidths[name] = "";
+        if (returnType == ThavaType::INT) g_funcReturnWidths[name] = returnWidth;
         g_funcParamTypes[name] = pTypes;
         g_funcMinArgs[name] = minArgs;
         g_funcDefaultArgTokens[name] = defaultArgTokens;
