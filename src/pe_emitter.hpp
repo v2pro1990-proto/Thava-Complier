@@ -200,7 +200,21 @@ public:
     }
 
     void setTextBytes(const std::vector<uint8_t>& bytes) {
+        const uint32_t oldRdataRva = getRdataRva();
         textBytes = bytes;
+        const uint32_t delta = getRdataRva() - oldRdataRva;
+        if (idtSizeCached == 0 || delta == 0) return;
+
+        // ARM64 helpers need IAT offsets while the text size is still provisional.
+        // Shift the stored RVAs when the final text changes the data section's base.
+        for (uint32_t offset : importRvaFields) {
+            uint32_t rva;
+            std::memcpy(&rva, rdataBytes.data() + offset, sizeof(rva));
+            writeVal<uint32_t>(rdataBytes, offset, rva + delta);
+        }
+        for (auto& entry : funcToIatRva) entry.second += delta;
+        idtRvaCached += delta;
+        iatRvaCached += delta;
     }
 
     void setTextCode(const std::vector<uint8_t>& code) {
@@ -226,6 +240,16 @@ public:
 
     const std::map<std::string, uint32_t>& getFuncToIatMap() const {
         return funcToIatRva;
+    }
+
+    void appendImportRva(uint32_t rva) {
+        importRvaFields.push_back(static_cast<uint32_t>(rdataBytes.size()));
+        appendVal<uint32_t>(rdataBytes, rva);
+    }
+
+    void appendImportThunk(uint32_t rva) {
+        appendImportRva(rva);
+        appendVal<uint32_t>(rdataBytes, 0);
     }
 
     // Pre-calculate RVAs of strings and imports so code generator knows targets
@@ -272,28 +296,23 @@ public:
         std::map<std::string, uint32_t> iltRvas;
         std::map<std::string, uint32_t> iatRvas;
 
-        for (auto& pair : dllEntries) {
-            const std::string& dll = pair.first;
-            auto& entries = pair.second;
-
-            // ILT
-            uint32_t iltOff = (uint32_t)rdataBytes.size();
-            iltRvas[dll] = rdataRva + iltOff;
-            for (const auto& fe : entries) {
-                appendVal<uint64_t>(rdataBytes, fe.hintNameRva);
-            }
-            appendVal<uint64_t>(rdataBytes, 0); // null terminator
-
-            // IAT
-            uint32_t iatOff = (uint32_t)rdataBytes.size();
-            iatRvas[dll] = rdataRva + iatOff;
-            for (size_t i = 0; i < entries.size(); ++i) {
-                entries[i].iatRva = rdataRva + (uint32_t)(iatOff + i * 8);
-                funcToIatRva[entries[i].name] = entries[i].iatRva;
-                appendVal<uint64_t>(rdataBytes, entries[i].hintNameRva);
-            }
-            appendVal<uint64_t>(rdataBytes, 0); // null terminator
+        for (const auto& pair : dllEntries) {
+            iltRvas[pair.first] = rdataRva + static_cast<uint32_t>(rdataBytes.size());
+            for (const auto& entry : pair.second) appendImportThunk(entry.hintNameRva);
+            appendVal<uint64_t>(rdataBytes, 0);
         }
+
+        const uint32_t iatOffset = static_cast<uint32_t>(rdataBytes.size());
+        iatRvaCached = rdataRva + iatOffset;
+        for (const auto& pair : dllEntries) {
+            iatRvas[pair.first] = rdataRva + static_cast<uint32_t>(rdataBytes.size());
+            for (const auto& entry : pair.second) {
+                funcToIatRva[entry.name] = rdataRva + static_cast<uint32_t>(rdataBytes.size());
+                appendImportThunk(entry.hintNameRva);
+            }
+            appendVal<uint64_t>(rdataBytes, 0);
+        }
+        iatSizeCached = static_cast<uint32_t>(rdataBytes.size()) - iatOffset;
 
         // DLL name strings
         std::map<std::string, uint32_t> dllNameRvas;
@@ -312,11 +331,11 @@ public:
 
         for (const auto& pair : dllEntries) {
             const std::string& dll = pair.first;
-            appendVal<uint32_t>(rdataBytes, iltRvas[dll]);       // OriginalFirstThunk (ILT)
+            appendImportRva(iltRvas[dll]);       // OriginalFirstThunk (ILT)
             appendVal<uint32_t>(rdataBytes, 0);                  // TimeDateStamp
             appendVal<uint32_t>(rdataBytes, 0);                  // ForwarderChain
-            appendVal<uint32_t>(rdataBytes, dllNameRvas[dll]);   // Name RVA
-            appendVal<uint32_t>(rdataBytes, iatRvas[dll]);       // FirstThunk (IAT)
+            appendImportRva(dllNameRvas[dll]);   // Name RVA
+            appendImportRva(iatRvas[dll]);       // FirstThunk (IAT)
         }
         // Terminating 20-byte null descriptor
         appendZeroes(rdataBytes, 20);
@@ -389,6 +408,9 @@ private:
     uint32_t exportSizeCached = 0;
     uint32_t idtRvaCached = 0;
     uint32_t idtSizeCached = 0;
+    uint32_t iatRvaCached = 0;
+    uint32_t iatSizeCached = 0;
+    std::vector<uint32_t> importRvaFields;
 
 public:
     bool buildAndWrite(const std::string& outputPath) {
@@ -506,6 +528,10 @@ public:
             writeVal<uint32_t>(peFile, optOffset + 152, relocRva);
             writeVal<uint32_t>(peFile, optOffset + 156, relocVirtualSize);
         }
+
+        // Entry 12: Import Address Table
+        writeVal<uint32_t>(peFile, optOffset + 208, iatRvaCached);
+        writeVal<uint32_t>(peFile, optOffset + 212, iatSizeCached);
 
         // 5. Section Headers (at optOffset + 240)
         size_t secHdrOffset = optOffset + 240;
