@@ -319,8 +319,6 @@ public:
     // Features that only the Linux ARM64 runtime can service (syscalls/helpers
     // that the Windows ARM64 runtime does not provide yet).
     static const char* linuxOnlyFeature(ASTNode* n) {
-        if (dynamic_cast<FileOpenBlockNode*>(n) || dynamic_cast<FileMethodNode*>(n))
-            return "file I/O";
         if (dynamic_cast<OsMethodNode*>(n) || dynamic_cast<TimeMethodNode*>(n))
             return "os.* / time.*";
         return nullptr;
@@ -2030,7 +2028,7 @@ public:
             return fld.type;
         }
 
-        // 19b. File methods (Linux AArch64 syscalls)
+        // 19b. File methods
         if (auto fm = dynamic_cast<FileMethodNode*>(node)) {
             VarInfo* vi = lookupVar(fm->varName);
             if (!vi) {

@@ -7986,9 +7986,13 @@ int main(int argc, char* argv[]) {
               << "    for (const auto& v : vec) if (_thava_value_equals(v, val)) return true;\n"
               << "    return false;\n"
               << "}\n\n"
+              << "inline bool _thava_value_in(const ThavaValue& val, const std::string& s) {\n"
+              << "    return val.type == 4 && s.find(val.sVal) != std::string::npos;\n"
+              << "}\n\n"
               << "inline bool _thava_value_in(const ThavaValue& val, const ThavaValue& v) {\n"
               << "    if (v.type == 6 && v.dVal) return v.dVal->has(val);\n"
               << "    if (v.type == 5) return _thava_value_in(val, v.lVal);\n"
+              << "    if (v.type == 4) return _thava_value_in(val, v.sVal);\n"
               << "    return false;\n"
               << "}\n\n"
               // List/tuple mutation functions: addval / removeval / assign / delval

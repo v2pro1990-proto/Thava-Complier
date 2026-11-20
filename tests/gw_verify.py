@@ -15,7 +15,8 @@ if run_windows_arm64:
     targets = ("pe-arm64",)
 expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][abc-19][Ab C][][][][][AbC-19]",
             "strings_search": "1 -1 3 0 [cXY-XY-XY][cab-ab-ab][c--][Alpha Beta][one||three|]",
-            "membership_rand": "true false true false true false true -4 true only"}
+            "membership_rand": "true false true false true false true -4 true only",
+            "file_arm64": "[alpha][17]\n18\n4 [2.5][true]"}
 
 with tempfile.TemporaryDirectory() as tmp:
     for target in targets:
@@ -37,7 +38,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 print(result.stdout, end="", flush=True)
                 result.check_returncode()
                 lines = [s for s in result.stdout.splitlines() if s and not s.startswith("[Thava Native]")]
-                assert lines == [line], (target, case, opt, lines)
+                assert lines == line.splitlines(), (target, case, opt, lines)
                 print(target, case, opt, line, flush=True)
 
     for source in [

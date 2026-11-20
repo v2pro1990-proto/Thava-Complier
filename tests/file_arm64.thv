@@ -1,0 +1,23 @@
+file.open("arm64-fixture.txt", "w") as f {
+    f.write("alpha")
+    f.write_line("")
+    f.write_line(17)
+    f.write_line(2.5)
+}
+file.open("arm64-fixture.txt", "a") as f {
+    f.write_line(true)
+}
+file.open("arm64-fixture.txt", "r") as f {
+    <str> first = f.read_line()
+    <str> second = f.read_line()
+    cons.out("[@{first}][@{second}]")
+}
+file.open("arm64-fixture.txt", "r") as f {
+    <str> allText = f.read()
+    <int> length = allText.len()
+    cons.out("@{length}")
+}
+file.open("arm64-fixture.txt", "r") as f {
+    <lst> lines = f.read_lines()
+    cons.out("@{lines.len()} [@{lines[2]}][@{lines[3]}]")
+}

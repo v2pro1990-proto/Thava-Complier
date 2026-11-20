@@ -78,8 +78,10 @@ public:
     size_t lblFileFmtDouble = 0;
     size_t lblFileWriteDouble = 0;
     size_t lblFileReadLine = 0;
+    size_t lblFileReadBuffer = 0;
     size_t lblFileReadAll = 0;
     size_t lblFileReadLines = 0;
+    uint32_t offFmtIntString = 0;
     uint32_t offFileReadErr = 0;
     uint32_t offStrQuoteNL = 0;
 
@@ -142,6 +144,7 @@ public:
         lblFileFmtDouble = enc.createLabel();
         lblFileWriteDouble = enc.createLabel();
         lblFileReadLine  = enc.createLabel();
+        lblFileReadBuffer = enc.createLabel();
         lblFileReadAll   = enc.createLabel();
         lblFileReadLines = enc.createLabel();
     }
@@ -164,6 +167,10 @@ public:
         offStrListComma = pe.addStringLiteralOffset(", ");
         offDoubleMaxRand = pe.addDoubleLiteralOffset(32767.0);
         offEmptyStr = pe.addStringLiteralOffset("");
+        offFmtIntString = pe.addStringLiteralOffset("%lld");
+        offFileReadErr = pe.addStringLiteralOffset("[Runtime Error (RuntimeError)]: Cannot open file '");
+        offStrQuoteNL = pe.addStringLiteralOffset("'\n");
+        pe.addImport("msvcrt.dll", "fgetc");
         offStrListClose = pe.addStringLiteralOffset("]\n");
     }
 
@@ -823,5 +830,230 @@ public:
         arm64::emitListIn(enc, lblListIn, lblStrCmpEq);
         arm64::emitRandChoice(enc, lblRandChoice, lblRand, offEmptyStr);
         arm64::emitDictFind(enc, lblDictFind, lblStrCmpEq);
+        emitFileHelpers();
+    }
+
+private:
+    void loadCrtAddress(const char* name) {
+        enc.adr_data(arm64::X16, pe.getFuncIatOffsetInRdata(name));
+        enc.ldr_imm(arm64::X16, arm64::X16, 0);
+    }
+
+    void callCrt(const char* name) {
+        loadCrtAddress(name);
+        enc.blr(arm64::X16);
+    }
+
+    void tailCallCrt(const char* name) {
+        loadCrtAddress(name);
+        enc.br(arm64::X16);
+    }
+
+    // Convert the bits in X0 using the Windows ARM64 variadic calling convention.
+    void emitNumberToString(size_t label, uint32_t format) {
+        enc.bindLabel(label);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -32);
+        enc.mov_rr(arm64::FP, arm64::SP);
+        enc.str_imm(arm64::X0, arm64::FP, 16);
+        enc.movz(arm64::X0, 64, 0);
+        enc.bl(lblMalloc);
+        enc.str_imm(arm64::X0, arm64::FP, 24);
+        enc.adr_data(arm64::X1, format);
+        enc.ldr_imm(arm64::X2, arm64::FP, 16);
+        callCrt("sprintf");
+        enc.ldr_imm(arm64::X0, arm64::FP, 24);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 32);
+        enc.ret();
+    }
+
+    void emitFileWriteNumber(size_t label, size_t formatter) {
+        enc.bindLabel(label);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -32);
+        enc.mov_rr(arm64::FP, arm64::SP);
+        enc.str_imm(arm64::X0, arm64::FP, 16);
+        enc.mov_rr(arm64::X0, arm64::X1);
+        enc.bl(formatter);
+        enc.str_imm(arm64::X0, arm64::FP, 24);
+        enc.bl(lblStrLen);
+        enc.mov_rr(arm64::X2, arm64::X0);
+        enc.ldr_imm(arm64::X1, arm64::FP, 24);
+        enc.ldr_imm(arm64::X0, arm64::FP, 16);
+        enc.bl(lblFileWrite);
+        enc.ldr_imm(arm64::X0, arm64::FP, 24);
+        callCrt("free");
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 32);
+        enc.ret();
+    }
+
+    void emitRewind() {
+        // fseek(FILE*, 0, SEEK_SET)
+        enc.movz(arm64::X1, 0, 0);
+        enc.movz(arm64::X2, 0, 0);
+        callCrt("fseek");
+    }
+
+    void emitFileHelpers() {
+        enc.bindLabel(lblFileOpen);
+        tailCallCrt("fopen");
+        enc.bindLabel(lblFileClose);
+        tailCallCrt("fclose");
+
+        // write(file, buffer, length) -> fwrite(buffer, 1, length, file)
+        enc.bindLabel(lblFileWrite);
+        enc.mov_rr(arm64::X3, arm64::X0);
+        enc.mov_rr(arm64::X0, arm64::X1);
+        enc.movz(arm64::X1, 1, 0);
+        tailCallCrt("fwrite");
+
+        emitNumberToString(lblIntToStr, offFmtIntString);
+        emitNumberToString(lblFileFmtDouble, offFmtFloat);
+        emitFileWriteNumber(lblFileWriteInt, lblIntToStr);
+        emitFileWriteNumber(lblFileWriteDouble, lblFileFmtDouble);
+
+        enc.bindLabel(lblFileReadAll);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -32);
+        enc.mov_rr(arm64::FP, arm64::SP);
+        enc.str_imm(arm64::X0, arm64::FP, 16);
+        emitRewind();
+        enc.ldr_imm(arm64::X0, arm64::FP, 16);
+        enc.movz(arm64::X1, 0, 0);
+        enc.bl(lblFileReadBuffer);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 32);
+        enc.ret();
+
+        enc.bindLabel(lblFileReadLine);
+        enc.movz(arm64::X1, 1, 0);
+        enc.b(lblFileReadBuffer);
+
+        emitFileReadBuffer();
+        emitFileReadLines();
+    }
+
+    // Read until EOF or (in line mode) LF. X1 returns 1 when a line was read,
+    // including a blank line, and 0 at EOF before any characters.
+    void emitFileReadBuffer() {
+        enc.bindLabel(lblFileReadBuffer);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -80);
+        enc.mov_rr(arm64::FP, arm64::SP);
+        enc.str_imm(arm64::X0, arm64::FP, 16); // file
+        enc.str_imm(arm64::X1, arm64::FP, 24); // line mode
+        enc.movz(arm64::X0, 128, 0);
+        enc.str_imm(arm64::X0, arm64::FP, 40); // capacity
+        enc.bl(lblMalloc);
+        enc.str_imm(arm64::X0, arm64::FP, 32); // buffer
+        enc.movz(arm64::X0, 0, 0);
+        enc.str_imm(arm64::X0, arm64::FP, 48); // length
+        enc.str_imm(arm64::X0, arm64::FP, 56); // consumed input
+
+        auto loop = enc.createLabel(), append = enc.createLabel();
+        auto store = enc.createLabel(), done = enc.createLabel(), failed = enc.createLabel();
+        enc.bindLabel(loop);
+        enc.ldr_imm(arm64::X0, arm64::FP, 16);
+        callCrt("fgetc");
+        // fgetc returns a 32-bit int; EOF is -1 in W0.
+        enc.mov_ri64(arm64::X9, 0xffffffff);
+        enc.and_rrr(arm64::X0, arm64::X0, arm64::X9);
+        enc.cmp_rr(arm64::X0, arm64::X9);
+        enc.b_cond(arm64::EQ, done);
+        enc.movz(arm64::X9, 1, 0);
+        enc.str_imm(arm64::X9, arm64::FP, 56);
+        enc.ldr_imm(arm64::X9, arm64::FP, 24);
+        enc.cbz(arm64::X9, append);
+        enc.cmp_ri(arm64::X0, '\n');
+        enc.b_cond(arm64::EQ, done);
+        enc.cmp_ri(arm64::X0, '\r');
+        enc.b_cond(arm64::EQ, loop);
+        enc.bindLabel(append);
+        enc.str_imm(arm64::X0, arm64::FP, 64);
+        enc.ldr_imm(arm64::X9, arm64::FP, 48);
+        enc.add_rri(arm64::X9, arm64::X9, 1);
+        enc.ldr_imm(arm64::X1, arm64::FP, 40);
+        enc.cmp_rr(arm64::X9, arm64::X1);
+        enc.b_cond(arm64::LT, store);
+        enc.add_rrr(arm64::X1, arm64::X1, arm64::X1);
+        enc.str_imm(arm64::X1, arm64::FP, 40);
+        enc.ldr_imm(arm64::X0, arm64::FP, 32);
+        callCrt("realloc");
+        enc.cbz(arm64::X0, failed);
+        enc.str_imm(arm64::X0, arm64::FP, 32);
+        enc.bindLabel(store);
+        enc.ldr_imm(arm64::X9, arm64::FP, 32);
+        enc.ldr_imm(arm64::X10, arm64::FP, 48);
+        enc.add_rrr(arm64::X9, arm64::X9, arm64::X10);
+        enc.ldr_imm(arm64::X11, arm64::FP, 64);
+        enc.strb_imm(arm64::X11, arm64::X9, 0);
+        enc.add_rri(arm64::X10, arm64::X10, 1);
+        enc.str_imm(arm64::X10, arm64::FP, 48);
+        enc.b(loop);
+
+        enc.bindLabel(done);
+        enc.ldr_imm(arm64::X0, arm64::FP, 32);
+        enc.ldr_imm(arm64::X9, arm64::FP, 48);
+        enc.add_rrr(arm64::X9, arm64::X0, arm64::X9);
+        enc.movz(arm64::X10, 0, 0);
+        enc.strb_imm(arm64::X10, arm64::X9, 0);
+        enc.ldr_imm(arm64::X1, arm64::FP, 56);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 80);
+        enc.ret();
+
+        enc.bindLabel(failed);
+        enc.movz(arm64::X0, 1, 0);
+        enc.bl(lblExit);
+    }
+
+    void emitFileReadLines() {
+        enc.bindLabel(lblFileReadLines);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -64);
+        enc.mov_rr(arm64::FP, arm64::SP);
+        enc.str_imm(arm64::X0, arm64::FP, 16); // file
+        emitRewind();
+        enc.movz(arm64::X0, 16, 0); // count word and one element
+        enc.bl(lblMalloc);
+        enc.str_imm(arm64::X0, arm64::FP, 24); // list
+        enc.movz(arm64::X9, 0, 0);
+        enc.str_imm(arm64::X9, arm64::FP, 32); // count
+        enc.movz(arm64::X9, 1, 0);
+        enc.str_imm(arm64::X9, arm64::FP, 40); // capacity
+
+        auto loop = enc.createLabel(), store = enc.createLabel();
+        auto done = enc.createLabel(), failed = enc.createLabel();
+        enc.bindLabel(loop);
+        enc.ldr_imm(arm64::X0, arm64::FP, 16);
+        enc.bl(lblFileReadLine);
+        enc.cbz(arm64::X1, done);
+        enc.str_imm(arm64::X0, arm64::FP, 48);
+        enc.ldr_imm(arm64::X9, arm64::FP, 32);
+        enc.ldr_imm(arm64::X1, arm64::FP, 40);
+        enc.cmp_rr(arm64::X9, arm64::X1);
+        enc.b_cond(arm64::LT, store);
+        enc.add_rrr(arm64::X1, arm64::X1, arm64::X1);
+        enc.str_imm(arm64::X1, arm64::FP, 40);
+        enc.add_rri(arm64::X1, arm64::X1, 1);
+        enc.lsl_ri(arm64::X1, arm64::X1, 3);
+        enc.ldr_imm(arm64::X0, arm64::FP, 24);
+        callCrt("realloc");
+        enc.cbz(arm64::X0, failed);
+        enc.str_imm(arm64::X0, arm64::FP, 24);
+        enc.bindLabel(store);
+        enc.ldr_imm(arm64::X9, arm64::FP, 32);
+        enc.ldr_imm(arm64::X10, arm64::FP, 24);
+        enc.ldr_imm(arm64::X11, arm64::FP, 48);
+        enc.lsl_ri(arm64::X12, arm64::X9, 3);
+        enc.add_rrr(arm64::X10, arm64::X10, arm64::X12);
+        enc.str_imm(arm64::X11, arm64::X10, 8);
+        enc.add_rri(arm64::X9, arm64::X9, 1);
+        enc.str_imm(arm64::X9, arm64::FP, 32);
+        enc.b(loop);
+        enc.bindLabel(done);
+        callCrt("free");
+        enc.ldr_imm(arm64::X0, arm64::FP, 24);
+        enc.ldr_imm(arm64::X9, arm64::FP, 32);
+        enc.str_imm(arm64::X9, arm64::X0, 0);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 64);
+        enc.ret();
+
+        enc.bindLabel(failed);
+        enc.movz(arm64::X0, 1, 0);
+        enc.bl(lblExit);
     }
 };
