@@ -72,6 +72,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
         for filename, expected, input_data in [
+            ("i686_collections.thv", [
+                "[5, 21, 11] 3 11 37 9 true false",
+                "2 8 99 true false b|c 13",
+                "đẹp 2 4 một||hai|",
+            ], None),
             ("i686_scalars.thv", [
                 "3.75 4.5 -4 true -4.5",
                 "hôm nay trời mát êêêßß true",
@@ -106,7 +111,7 @@ with tempfile.TemporaryDirectory() as tmp:
             print(target, filename, "OK")
 
         source = Path(tmp) / "unsupported.thv"
-        source.write_text('<lst> collection = [1, 2, 3]\n', encoding="utf-8")
+        source.write_text('<lst> collection = [1, "mixed"]\n', encoding="utf-8")
         rejected = Path(tmp) / ("unsupported.exe" if windows else "unsupported")
         result = subprocess.run([str(compiler), str(source), "--target", target, "--native",
                                  "-o", str(rejected)], cwd=tmp, env=env, stdout=subprocess.PIPE,

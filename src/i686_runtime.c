@@ -386,3 +386,211 @@ char *rt_str_index(const char *s, i64 index, Allocate allocate, u32 image) {
     if (index < 0 || (u64)index >= bytes(s)) return "";
     return rt_substring(s, index + 1, index + 1, allocate, image);
 }
+
+typedef struct { u64 key, value; } Entry;
+typedef struct { u32 length, capacity; Entry *entries; } Collection;
+
+Collection *rt_collection_new(Allocate allocate, u32 image) {
+    Collection *list = (Collection *)allocate(sizeof(Collection), image);
+    if (list) list->length = list->capacity = 0, list->entries = 0;
+    return list;
+}
+
+static int reserve(Collection *list, Allocate allocate, u32 image) {
+    if (!list) return 0;
+    if (list->length < list->capacity) return 1;
+    u32 cap = list->capacity ? 2 * list->capacity : 8;
+    if (cap <= list->length || cap > ~0u / sizeof(Entry)) return 0;
+    Entry *next = (Entry *)allocate(cap * sizeof(Entry), image);
+    if (!next) return 0;
+    for (u32 i = 0; i < list->length; ++i) next[i] = list->entries[i];
+    list->entries = next;
+    list->capacity = cap;
+    return 1;
+}
+
+static i64 position(Collection *list, i64 index) {
+    return index < 0 ? index + list->length : index;
+}
+
+u32 rt_collection_len(Collection *list) { return list ? list->length : 0; }
+void rt_collection_clear(Collection *list) { if (list) list->length = 0; }
+
+u64 rt_list_get(Collection *list, i64 index, u64 fallback) {
+    if (!list) return fallback;
+    index = position(list, index);
+    return index >= 0 && index < list->length ? list->entries[(u32)index].value : fallback;
+}
+
+void rt_list_set(Collection *list, i64 index, u64 value) {
+    if (!list) return;
+    index = position(list, index);
+    if (index >= 0 && index < list->length) list->entries[(u32)index].value = value;
+}
+
+void rt_list_insert(Collection *list, i64 index, u64 value, Allocate allocate, u32 image) {
+    if (!reserve(list, allocate, image)) return;
+    index = position(list, index);
+    if (index < 0) index = 0;
+    if (index > list->length) index = list->length;
+    for (u32 i = list->length; i > (u32)index; --i) list->entries[i] = list->entries[i - 1];
+    list->entries[(u32)index].key = 0;
+    list->entries[(u32)index].value = value;
+    ++list->length;
+}
+
+static int scalar_equal(u64 a, u64 b, u32 kind) {
+    if (kind == 1) {
+        const char *x = (const char *)(u32)a, *y = (const char *)(u32)b;
+        while (*x && *x == *y) ++x, ++y;
+        return *x == *y;
+    }
+    if (kind == 2) {
+        Float x = {.bits = a}, y = {.bits = b};
+        return x.number == y.number;
+    }
+    return a == b;
+}
+
+static void erase(Collection *list, u32 index) {
+    for (u32 i = index + 1; i < list->length; ++i) list->entries[i - 1] = list->entries[i];
+    --list->length;
+}
+
+void rt_list_remove_at(Collection *list, i64 index) {
+    if (!list) return;
+    index = position(list, index);
+    if (index >= 0 && index < list->length) erase(list, (u32)index);
+}
+
+int rt_list_find(Collection *list, u64 value, u32 kind) {
+    for (u32 i = 0; list && i < list->length; ++i)
+        if (scalar_equal(list->entries[i].value, value, kind)) return i;
+    return -1;
+}
+
+void rt_list_remove_value(Collection *list, u64 value, u32 kind) {
+    int index = rt_list_find(list, value, kind);
+    if (index >= 0) erase(list, (u32)index);
+}
+
+static int dict_find(Collection *dict, u64 key, u32 kind) {
+    for (u32 i = 0; dict && i < dict->length; ++i)
+        if (scalar_equal(dict->entries[i].key, key, kind)) return i;
+    return -1;
+}
+
+u32 rt_dict_has(Collection *dict, u64 key, u32 kind) {
+    return dict_find(dict, key, kind) >= 0;
+}
+
+u64 rt_dict_get(Collection *dict, u64 key, u32 kind, u64 fallback) {
+    int index = dict_find(dict, key, kind);
+    return index < 0 ? fallback : dict->entries[index].value;
+}
+
+void rt_dict_remove(Collection *dict, u64 key, u32 kind) {
+    int index = dict_find(dict, key, kind);
+    if (index >= 0) erase(dict, (u32)index);
+}
+
+void rt_dict_set(Collection *dict, u64 key, u64 value, u32 kind, Allocate allocate, u32 image) {
+    int index = dict_find(dict, key, kind);
+    if (index < 0) {
+        if (!reserve(dict, allocate, image)) return;
+        index = dict->length++;
+        dict->entries[index].key = key;
+    }
+    dict->entries[index].value = value;
+}
+
+Collection *rt_dict_project(Collection *dict, u32 keys, Allocate allocate, u32 image) {
+    Collection *result = rt_collection_new(allocate, image);
+    for (u32 i = 0; dict && i < dict->length; ++i)
+        rt_list_insert(result, i, keys ? dict->entries[i].key : dict->entries[i].value, allocate, image);
+    return result;
+}
+
+Collection *rt_split(const char *s, const char *delimiter, Allocate allocate, u32 image) {
+    Collection *list = rt_collection_new(allocate, image);
+    u32 n = bytes(delimiter), i = 0;
+    if (!n) {
+        while (*s) {
+            const char *end = next_utf8(s);
+            rt_list_insert(list, i++, (u32)slice(s, end - s, allocate, image), allocate, image);
+            s = end;
+        }
+        return list;
+    }
+    const char *part = s;
+    for (;;) {
+        if (!*s || matches(s, delimiter)) {
+            rt_list_insert(list, i++, (u32)slice(part, s - part, allocate, image), allocate, image);
+            if (!*s) break;
+            s += n;
+            part = s;
+        } else ++s;
+    }
+    return list;
+}
+
+char *rt_join(const char *delimiter, Collection *list, Allocate allocate, u32 image) {
+    u32 size = 0, n = bytes(delimiter), length = rt_collection_len(list);
+    for (u32 i = 0; i < length; ++i) {
+        u32 item = bytes((const char *)(u32)list->entries[i].value);
+        if (item >= ~0u - size) return "";
+        size += item;
+        if (i) {
+            if (n >= ~0u - size) return "";
+            size += n;
+        }
+    }
+    char *result = allocate(size + 1, image);
+    if (!result) return "";
+    char *out = result;
+    for (u32 i = 0; i < length; ++i) {
+        if (i) out = copy(out, delimiter, n);
+        const char *item = (const char *)(u32)list->entries[i].value;
+        out = copy(out, item, bytes(item));
+    }
+    *out = 0;
+    return result;
+}
+
+const char *rt_collection_format(Collection *collection, u32 format, Allocate allocate, u32 image) {
+    u32 length = rt_collection_len(collection), size = 3;
+    if (length > (~0u / 2) / sizeof(const char *)) return "";
+    const char **pieces = length ? (const char **)allocate(length * 2 * sizeof(*pieces), image) : 0;
+    if (!pieces && length) return "";
+    int dict = format & 0x100;
+    unsigned kinds[] = {format & 15, (format >> 4) & 15};
+    for (u32 i = 0; i < length; ++i) {
+        u64 values[] = {collection->entries[i].key, collection->entries[i].value};
+        for (int k = !dict; k < 2; ++k) {
+            const char *piece;
+            if (kinds[k] == 1) piece = (const char *)(u32)values[k];
+            else if (kinds[k] == 2) piece = rt_format_float(values[k], allocate, image);
+            else if (kinds[k] == 3) piece = values[k] ? "true" : "false";
+            else piece = rt_format_int(values[k], allocate, image);
+            pieces[i * 2 + k] = piece;
+            u32 n = bytes(piece);
+            if (n > ~0u - size - 4) return "";
+            size += n + 4;
+        }
+    }
+    char *result = allocate(size, image);
+    if (!result) return "";
+    char *out = result;
+    *out++ = dict ? '{' : '[';
+    for (u32 i = 0; i < length; ++i) {
+        if (i) *out++ = ',', *out++ = ' ';
+        for (int k = !dict; k < 2; ++k) {
+            const char *piece = pieces[i * 2 + k];
+            out = copy(out, piece, bytes(piece));
+            if (k == 0) *out++ = ':', *out++ = ' ';
+        }
+    }
+    *out++ = dict ? '}' : ']';
+    *out = 0;
+    return result;
+}

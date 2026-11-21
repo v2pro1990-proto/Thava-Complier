@@ -1,0 +1,44 @@
+<lst> numbers = [1, 2, 3, 4]
+<dict> counts = {"a": 3, "b": 9}
+
+func change(<lst> xs) {
+    xs = [5, 6]
+    xs.addval(7)
+}
+func edit_counts() {
+    global <dict> counts
+    counts["b"] = 8
+    counts["c"] = 13
+    counts.del("a")
+}
+change(numbers)
+numbers.addval([1], 21)
+numbers.removeval(6)
+numbers[-1] = 11
+<int> total = 0
+for <int> value in numbers {
+    total += value
+}
+<int> range_total = 0
+for <int> value in range(5, 0, -2) {
+    range_total += value
+}
+<bl> found = 21 in numbers
+<bl> missing_number = 6 in numbers
+cons.out("@{numbers} @{numbers.len()} @{numbers[-1]} @{total} @{range_total} @{found} @{missing_number}")
+
+edit_counts()
+<bl> has_b = "b" in counts
+<bl> has_a = counts.has("a")
+<int> missing = counts.get("a", 99)
+<lst> keys = counts.keys()
+<lst> amounts = counts.values()
+<str> key_names = "|".join(keys)
+<int> b_value = counts["b"]
+cons.out("@{counts.len()} @{b_value} @{missing} @{has_b} @{has_a} @{key_names} @{amounts[-1]}")
+
+<tple> pair = {"trời", "đẹp"}
+<str> last = pair[-1]
+<lst> parts = "một::hai:".split(":")
+<str> joined = "|".join(parts)
+cons.out("@{last} @{pair.len()} @{parts.len()} @{joined}")
