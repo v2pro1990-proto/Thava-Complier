@@ -72,6 +72,10 @@ with tempfile.TemporaryDirectory() as tmp:
 
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
         for filename, expected, input_data in [
+            ("i686_unwind.thv", [
+                "5000000042 BA012I outer Division by zero",
+                "file closed body|deferred", "replacement BA012IZ", "end", "program cleanup",
+            ], None),
             ("os_time_arm64.thv", [
                 ("windows" if windows else "linux") +
                 " true [] true true true true true true 3 -1 true true true true 0",
@@ -130,3 +134,13 @@ with tempfile.TemporaryDirectory() as tmp:
                                 stderr=subprocess.STDOUT, text=True)
         assert result.returncode != 0 and "native i686 backend yet" in result.stdout, result.stdout
         assert not rejected.exists()
+
+        uncaught_source = Path(tmp) / "uncaught.thv"
+        uncaught_source.write_text('defer cons.out("cleanup")\nthrow "unhandled"\n', encoding="utf-8")
+        uncaught = Path(tmp) / ("uncaught.exe" if windows else "uncaught")
+        subprocess.run([str(compiler), str(uncaught_source), "--target", target, "--native",
+                        "-o", str(uncaught)], cwd=tmp, env=env, check=True, timeout=30)
+        result = subprocess.run([str(uncaught)], cwd=tmp, stdout=subprocess.PIPE,
+                                encoding="utf-8", timeout=10)
+        assert result.returncode == 1, result.returncode
+        assert result.stdout.splitlines() == ["cleanup", "[Runtime Exception]: unhandled"]

@@ -22,7 +22,10 @@ class Codegen {
         bool indirect = false;
     };
     struct LoopSlots { Slot first, second; };
-    struct LoopTarget { size_t end, next, files; };
+    struct LoopTarget { size_t end, next, scopes; };
+    struct Cleanup { int32_t offset; size_t action; };
+    enum RecordField { Previous = 0, Frame = 4, Action = 8, Stack = 12, Defers = 16, RecordBytes = 24 };
+    enum DeferField { NextDefer = 0, DeferAction = 4, DeferBytes = 8 };
     struct Function {
         const FunctionDeclNode* decl;
         size_t entry;
@@ -42,7 +45,17 @@ class Codegen {
     std::map<ASTNode*, LoopSlots> loopSlots;
     std::vector<LoopTarget> loops;
     std::map<FileOpenBlockNode*, Slot> fileSlots;
-    std::vector<std::pair<std::string, const Slot*>> activeFiles;
+    std::map<const FileOpenBlockNode*, Cleanup> fileCleanups;
+    std::map<const TryExceptNode*, Cleanup> handlers;
+    std::map<const ExceptClause*, Slot> catchSlots;
+    std::map<const DeferNode*, int32_t> deferSlots;
+    std::vector<Cleanup> scopes;
+    Cleanup functionCleanup{};
+    bool inDefer = false;
+    uint32_t cleanupHead = 0, pendingException = 0;
+    size_t unwindLabel = enc.label(), runDefersLabel = enc.label();
+    struct OpenFile { std::string name; const Slot* slot; Cleanup cleanup; };
+    std::vector<OpenFile> activeFiles;
     bool fileUsed = false;
     size_t fileReadLabel = enc.label(), fileWriteLabel = enc.label();
     const FunctionDeclNode* currentFunction = nullptr;
@@ -757,7 +770,7 @@ class Codegen {
 
     const Slot& file(const std::string& name) {
         for (auto it = activeFiles.rbegin(); it != activeFiles.rend(); ++it)
-            if (it->first == name) return *it->second;
+            if (it->name == name) return *it->slot;
         unsupported("An unbound file handle '" + name + "'");
     }
 
@@ -1169,7 +1182,7 @@ class Codegen {
         const auto test = enc.label(), next = update ? enc.label() : test, end = enc.label();
         enc.bind(test);
         jumpIfFalse(cond, end);
-        loops.push_back({end, next, activeFiles.size()});
+        loops.push_back({end, next, scopes.size()});
         statement(body);
         loops.pop_back();
         if (update) {
@@ -1217,7 +1230,7 @@ class Codegen {
         enc.bind(body);
         testValue();
         enc.jump(Equal, end);
-        loops.push_back({end, next, activeFiles.size()});
+        loops.push_back({end, next, scopes.size()});
         statement(node->body.get());
         loops.pop_back();
         enc.bind(next);
@@ -1262,7 +1275,7 @@ class Codegen {
         storeArgument(12);
         callRuntime(runtime::rt_list_get, 20);
         storeValue(variable, element);
-        loops.push_back({end, next, activeFiles.size()});
+        loops.push_back({end, next, scopes.size()});
         statement(node->body.get());
         loops.pop_back();
         enc.bind(next);
@@ -1293,8 +1306,127 @@ class Codegen {
         enc.bind(done);
     }
 
-    void closeFiles(size_t depth) {
-        for (size_t i = activeFiles.size(); i > depth; --i) closeFile(*activeFiles[i - 1].second);
+    void enterCleanup(Cleanup record) {
+        dataAddress(EDI, cleanupHead);
+        enc.load(EAX, EDI);
+        enc.store(EBP, record.offset + Previous, EAX);
+        enc.store(EBP, record.offset + Frame, EBP);
+        codeAddress(EAX, record.action);
+        enc.store(EBP, record.offset + Action, EAX);
+        enc.store(EBP, record.offset + Stack, ESP);
+        enc.alu(Xor, EAX, EAX);
+        enc.store(EBP, record.offset + Defers, EAX);
+        enc.lea(EAX, EBP, record.offset);
+        enc.store(EDI, 0, EAX);
+    }
+
+    void popCleanup(Cleanup record) {
+        enc.load(EAX, EBP, record.offset + Previous);
+        dataAddress(EDI, cleanupHead);
+        enc.store(EDI, 0, EAX);
+    }
+
+    void callCleanup(Cleanup record) {
+        enc.lea(ECX, EBP, record.offset);
+        enc.call(record.action);
+    }
+
+    void leaveScopes(size_t depth) {
+        for (size_t i = scopes.size(); i > depth; --i) {
+            const auto record = scopes[i - 1];
+            if (record.action) callCleanup(record);
+            else popCleanup(record); // Normal control flow drops the handler.
+        }
+    }
+
+    void raiseException(ASTNode* message, ASTNode* type = nullptr) {
+        if (message) formatScalar(expression(message));
+        else stringValue("Runtime Error!");
+        enc.push(EAX);
+        if (type) formatScalar(expression(type));
+        else stringValue("RuntimeError");
+        enc.pop(ECX);
+        dataAddress(EDI, pendingException);
+        enc.store(EDI, 0, ECX);
+        enc.store(EDI, 4, EAX);
+        enc.jump(unwindLabel);
+    }
+
+    void protectedBlock(TryExceptNode* node) {
+        const auto handler = handlers.at(node);
+        const auto end = enc.label();
+        enterCleanup(handler);
+        scopes.push_back({handler.offset, 0});
+        for (const auto& child : node->tryBody) statement(child.get());
+        scopes.pop_back();
+        popCleanup(handler);
+        enc.jump(end);
+
+        enc.bind(handler.action);
+        // The dispatcher restored EBP and passed this record in ECX.
+        enc.load(ESP, ECX, Stack);
+        popCleanup(handler);
+        bool catchAll = false;
+        for (const auto& clause : node->exceptClauses) {
+            catchAll = clause.exceptionType.empty() || clause.exceptionType == "Exception" ||
+                       clause.exceptionType == "RuntimeError";
+            size_t next = 0;
+            if (!catchAll) {
+                next = enc.label();
+                dataAddress(EDI, pendingException);
+                enc.load(ECX, EDI, 4);
+                stringValue(clause.exceptionType);
+                enc.call(compareStringsLabel);
+                enc.alu(Cmp, EAX, 0);
+                enc.jump(NotEqual, next);
+            }
+            decltype(locals)::node_type shadow;
+            if (!clause.varName.empty()) {
+                shadow = locals.extract(clause.varName);
+                const auto& slot = catchSlots.at(&clause);
+                locals.emplace(clause.varName, slot);
+                dataAddress(EAX, pendingException);
+                enc.load(EAX, EAX);
+                enc.alu(Xor, EDX, EDX);
+                storeValue(slot, ThavaType::STRING);
+            }
+            for (const auto& child : clause.body) statement(child.get());
+            if (!clause.varName.empty()) {
+                locals.erase(clause.varName);
+                if (!shadow.empty()) locals.insert(std::move(shadow));
+            }
+            enc.jump(end);
+            if (catchAll) break;
+            enc.bind(next);
+        }
+        if (!catchAll) enc.jump(unwindLabel);
+        enc.bind(end);
+    }
+
+    void registerDefer(DeferNode* node) {
+        const auto scope = activeFiles.empty() ? functionCleanup : activeFiles.back().cleanup;
+        const auto entry = enc.label(), next = enc.label();
+        const auto slot = deferSlots.at(node);
+        enc.load(EAX, EBP, slot + DeferAction);
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(NotEqual, next); // One registration per site in this scope.
+        enc.load(EAX, EBP, scope.offset + Defers);
+        enc.store(EBP, slot + NextDefer, EAX);
+        codeAddress(EAX, entry);
+        enc.store(EBP, slot + DeferAction, EAX);
+        enc.lea(EAX, EBP, slot);
+        enc.store(EBP, scope.offset + Defers, EAX);
+        enc.jump(next);
+        enc.bind(entry);
+        const bool alreadyDeferred = inDefer;
+        auto surroundingLoops = std::move(loops);
+        loops.clear();
+        inDefer = true;
+        statement(node->stmt.get());
+        inDefer = alreadyDeferred;
+        loops = std::move(surroundingLoops);
+        enc.ret();
+        enc.bind(next);
     }
 
     void scopedFile(FileOpenBlockNode* node) {
@@ -1340,10 +1472,22 @@ class Codegen {
         enc.alu(Xor, EDX, EDX);
         const auto& slot = fileSlots.at(node);
         storeValue(slot, ThavaType::FILE);
-        activeFiles.emplace_back(node->varName, &slot);
+        const auto cleanup = fileCleanups.at(node);
+        enterCleanup(cleanup);
+        activeFiles.push_back({node->varName, &slot, cleanup});
+        scopes.push_back(cleanup);
         for (const auto& child : node->body) statement(child.get());
+        scopes.pop_back();
         activeFiles.pop_back();
+        callCleanup(cleanup);
+        const auto afterClose = enc.label();
+        enc.jump(afterClose);
+        enc.bind(cleanup.action);
+        enc.call(runDefersLabel);
+        popCleanup(cleanup);
         closeFile(slot);
+        enc.ret();
+        enc.bind(afterClose);
     }
 
     void statement(ASTNode* node) {
@@ -1365,6 +1509,14 @@ class Codegen {
             }
         } else if (auto open = dynamic_cast<FileOpenBlockNode*>(node)) {
             scopedFile(open);
+        } else if (auto block = dynamic_cast<TryExceptNode*>(node)) {
+            protectedBlock(block);
+        } else if (auto thrown = dynamic_cast<ThrowNode*>(node)) {
+            raiseException(thrown->expr.get());
+        } else if (auto raised = dynamic_cast<RaiseErrorNode*>(node)) {
+            if (!raised->isCompileTime) raiseException(raised->msgExpr.get(), raised->typeExpr.get());
+        } else if (auto defer = dynamic_cast<DeferNode*>(node)) {
+            registerDefer(defer);
         } else if (auto index = dynamic_cast<IndexAssignNode*>(node)) {
             if (index->op != "=") unsupported("A compound indexed assignment");
             mutateCollection(lookup(index->varName), index->indexExpr.get(), index->valExpr.get(), false);
@@ -1392,19 +1544,20 @@ class Codegen {
             collectionRange(each);
         } else if (dynamic_cast<BreakNode*>(node) || dynamic_cast<ContinueNode*>(node)) {
             if (loops.empty()) unsupported("Loop control outside a loop");
-            closeFiles(loops.back().files);
+            leaveScopes(loops.back().scopes);
             enc.jump(dynamic_cast<BreakNode*>(node) ? loops.back().end : loops.back().next);
         } else if (auto out = dynamic_cast<ConsOutNode*>(node)) {
             printLine(out->getExpr());
         } else if (auto ret = dynamic_cast<ReturnNode*>(node)) {
+            if (inDefer) unsupported("Returning from a deferred action");
             if (!currentFunction) unsupported("Return outside a function");
             if (ret->expr) {
                 const auto value = expression(ret->expr.get());
                 normalize(currentFunction->returnType, currentFunction->customReturnType, value);
             } else integer(0);
-            if (!activeFiles.empty()) {
+            if (!scopes.empty()) {
                 saveValue();
-                closeFiles(0);
+                leaveScopes(0);
                 enc.pop(EAX);
                 enc.pop(EDX);
             }
@@ -1446,10 +1599,27 @@ class Codegen {
             collectLoopSlots(range->body.get(), bytes);
         } else if (auto open = dynamic_cast<FileOpenBlockNode*>(node)) {
             fileSlots.emplace(open, temporary(ThavaType::FILE));
+            bytes += RecordBytes;
+            fileCleanups.emplace(open, Cleanup{-bytes, enc.label()});
             std::vector<VarDeclNode*> decls;
             for (const auto& child : open->body) thavaCollectVarDecls(child.get(), decls);
             declareFrameLocals(decls, bytes);
             for (const auto& child : open->body) collectLoopSlots(child.get(), bytes);
+        } else if (auto protect = dynamic_cast<TryExceptNode*>(node)) {
+            bytes += RecordBytes;
+            handlers.emplace(protect, Cleanup{-bytes, enc.label()});
+            for (const auto& child : protect->tryBody) collectLoopSlots(child.get(), bytes);
+            for (const auto& clause : protect->exceptClauses) {
+                if (!clause.varName.empty()) catchSlots.emplace(&clause, temporary(ThavaType::STRING));
+                for (const auto& child : clause.body) collectLoopSlots(child.get(), bytes);
+            }
+        } else if (auto deferred = dynamic_cast<DeferNode*>(node)) {
+            bytes += DeferBytes;
+            deferSlots.emplace(deferred, -bytes);
+            std::vector<VarDeclNode*> decls;
+            thavaCollectVarDecls(deferred->stmt.get(), decls);
+            declareFrameLocals(decls, bytes);
+            collectLoopSlots(deferred->stmt.get(), bytes);
         } else if (auto each = dynamic_cast<ForEachNode*>(node)) {
             if (!locals.count(each->varName)) locals.emplace(each->varName, temporary(each->varType));
             loopSlots.emplace(node, LoopSlots{temporary(ThavaType::LIST), temporary(ThavaType::INT)});
@@ -1463,6 +1633,11 @@ class Codegen {
         locals.clear();
         loopSlots.clear();
         fileSlots.clear();
+        fileCleanups.clear();
+        handlers.clear();
+        catchSlots.clear();
+        deferSlots.clear();
+        functionCleanup = {};
         if (!entry) {
             const auto& fn = *currentFunction;
             for (size_t i = 0; i < fn.params.size(); ++i) {
@@ -1485,6 +1660,10 @@ class Codegen {
         int32_t frame = 0;
         declareFrameLocals(decls, frame);
         for (const auto& node : body) collectLoopSlots(node.get(), frame);
+        if (!deferSlots.empty()) {
+            frame += RecordBytes;
+            functionCleanup = {-frame, enc.label()};
+        }
         if (frame > 4080) unsupported("A local stack frame larger than 4080 bytes");
         if (frame) enc.alu(Sub, ESP, uint32_t(frame));
         for (const auto& [name, slot] : locals) {
@@ -1492,6 +1671,19 @@ class Codegen {
             defaultValue(slot.type);
             storeValue(slot, slot.type);
         }
+        if (functionCleanup.offset) {
+            enc.alu(Xor, EAX, EAX);
+            for (const auto& entry : deferSlots) enc.store(EBP, entry.second + DeferAction, EAX);
+            enterCleanup(functionCleanup);
+        }
+    }
+
+    void emitFunctionCleanup() {
+        if (!functionCleanup.offset) return;
+        enc.bind(functionCleanup.action);
+        enc.call(runDefersLabel);
+        popCleanup(functionCleanup);
+        enc.ret();
     }
 
     void emitFunction(const Function& function) {
@@ -1505,8 +1697,15 @@ class Codegen {
         for (const auto& node : fn.body) statement(node.get());
         defaultValue(fn.returnType);
         enc.bind(returnLabel);
+        if (functionCleanup.offset) {
+            saveValue();
+            callCleanup(functionCleanup);
+            enc.pop(EAX);
+            enc.pop(EDX);
+        }
         enc.leave();
         enc.ret();
+        emitFunctionCleanup();
         currentFunction = nullptr;
     }
 
@@ -1694,6 +1893,65 @@ class Codegen {
         enc.bind(quotientReady);
         enc.load(EBX, EBP, -4);
         enc.leave();
+        enc.ret();
+    }
+
+    void emitUnwind() {
+        // Division reaches the error path before borrowing EBX for arithmetic.
+        enc.bind(errorLabel);
+        dataAddress(EDI, pendingException);
+        dataAddress(EAX, addString("Division by zero"));
+        enc.store(EDI, 0, EAX);
+        dataAddress(EAX, addString("RuntimeError"));
+        enc.store(EDI, 4, EAX);
+
+        enc.bind(unwindLabel);
+        dataAddress(EDI, cleanupHead);
+        enc.load(ECX, EDI);
+        enc.alu(Cmp, ECX, 0);
+        const auto fatal = enc.label();
+        enc.jump(Equal, fatal);
+        // Cleanups may catch their own exception and then return to this unwind.
+        dataAddress(EDI, pendingException);
+        enc.load(EAX, EDI, 0);
+        enc.push(EAX);
+        enc.load(EAX, EDI, 4);
+        enc.push(EAX);
+        enc.load(EBP, ECX, Frame);
+        enc.load(EAX, ECX, Action);
+        enc.callReg(EAX);
+        dataAddress(EDI, pendingException);
+        enc.pop(EAX);
+        enc.store(EDI, 4, EAX);
+        enc.pop(EAX);
+        enc.store(EDI, 0, EAX);
+        enc.jump(unwindLabel);
+
+        enc.bind(fatal);
+        printText("[Runtime Exception]: ");
+        dataAddress(EAX, pendingException);
+        enc.load(EAX, EAX);
+        enc.call(printStringLabel);
+        printText("\n");
+        exitProcess(1);
+
+        enc.bind(runDefersLabel);
+        enc.push(ECX);
+        const auto next = enc.label(), done = enc.label();
+        enc.bind(next);
+        enc.load(ECX, ESP);
+        enc.load(EAX, ECX, Defers);
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, done);
+        enc.load(EDX, EAX, NextDefer);
+        enc.store(ECX, Defers, EDX);
+        enc.load(EDX, EAX, DeferAction);
+        enc.alu(Xor, ECX, ECX);
+        enc.store(EAX, DeferAction, ECX);
+        enc.callReg(EDX);
+        enc.jump(next);
+        enc.bind(done);
+        enc.alu(Add, ESP, 4);
         enc.ret();
     }
 
@@ -1965,6 +2223,8 @@ public:
 
     bool compile(const std::vector<ASTPtr>& ast, const std::string& output) {
         if (g_isLibraryMode || g_hasDLAttach) unsupported("Dynamic libraries");
+        cleanupHead = addSlot();
+        pendingException = addSlot();
         for (const auto& node : ast) {
             if (auto func = dynamic_cast<FunctionDeclNode*>(node.get()))
                 functions.emplace(func->name, Function{func, enc.label()});
@@ -2018,13 +2278,14 @@ public:
                 continue;
             statement(node.get());
         }
+        if (functionCleanup.offset) callCleanup(functionCleanup);
         exitProcess(0);
+        emitFunctionCleanup();
 
         for (const auto& entry : functions) emitFunction(entry.second);
         emitOutput();
         emitDivision();
-        enc.bind(errorLabel);
-        exitProcess(1);
+        emitUnwind();
         emitInput();
         emitFileCallbacks();
         emitAllocator();

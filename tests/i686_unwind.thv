@@ -1,0 +1,100 @@
+<str> events = ""
+
+func record(<str> text) {
+    global <str> events
+    events += text
+}
+
+<int64> func finish() {
+    defer record("A")
+    if false {
+        defer record("never")
+    }
+    for <int> i in range(0, 3, 1) {
+        defer record("B")
+    }
+    try {
+        return 5000000042
+    } except Exception {
+        record("wrong-return")
+    }
+    return 0
+}
+
+func recurse(<int> depth) {
+    defer record(<str>depth)
+    if depth > 0 {
+        recurse(depth - 1)
+    } else {
+        raise_error(r, "ValueError", "outer")
+    }
+}
+
+func nested_cleanup() {
+    defer {
+        try {
+            throw "inside defer"
+        } except RuntimeError as inner {
+            record("I")
+        }
+    }
+    recurse(2)
+}
+
+<int64> result = finish()
+<str> caught = ""
+try {
+    try {
+        nested_cleanup()
+    } except OtherError {
+        record("wrong-type")
+    }
+} except ValueError as message {
+    caught = message
+}
+
+for <int> j in range(0, 3, 1) {
+    try {
+        if j == 0 { continue }
+        break
+    } except Exception {
+        record("wrong-loop")
+    }
+}
+
+<str> division = ""
+<int> zero = 0
+try {
+    <int> ignored = 10 / zero
+} except RuntimeError as message {
+    division = message
+}
+cons.out("@{result} @{events} @{caught} @{division}")
+
+try {
+    file.open("unwind-i686.txt", "w") as output {
+        defer output.write_line("deferred")
+        output.write_line("body")
+        throw "file closed"
+    }
+} except Exception as message {
+    file.open("unwind-i686.txt", "r") as input_file {
+        <lst> lines = input_file.read_lines()
+        <str> text = "|".join(lines)
+        cons.out("@{message} @{text}")
+    }
+}
+
+func replacement() {
+    defer record("Z")
+    defer raise_error(r, "ReplacementError", "replacement")
+    throw "superseded"
+}
+try {
+    replacement()
+} except ReplacementError as message {
+    cons.out("@{message} @{events}")
+}
+
+defer cons.out("program cleanup")
+cons.out("end")
