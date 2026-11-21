@@ -574,7 +574,7 @@ const char *rt_collection_format(Collection *collection, u32 format, Allocate al
             else piece = rt_format_int(values[k], allocate, image);
             pieces[i * 2 + k] = piece;
             u32 n = bytes(piece);
-            if (n > ~0u - size - 4) return "";
+            if (size > ~0u - 4 || n > ~0u - size - 4) return "";
             size += n + 4;
         }
     }
@@ -593,4 +593,151 @@ const char *rt_collection_format(Collection *collection, u32 format, Allocate al
     *out++ = dict ? '}' : ']';
     *out = 0;
     return result;
+}
+
+typedef int (*ReadFileByte)(u32 handle, u32 image);
+typedef void (*WriteFileBytes)(u32 handle, const char *data, u32 size, u32 image);
+
+int rt_linux_open_flags(const char *mode) {
+    int plus = 0;
+    for (const char *p = mode; *p; ++p) if (*p == '+') plus = 1;
+    switch (*mode) {
+    case 'r': return plus ? 2 : 0;
+    case 'w': return (plus ? 2 : 1) | 0x40 | 0x200;
+    case 'a': return (plus ? 2 : 1) | 0x40 | 0x400;
+    default: return -1;
+    }
+}
+
+/* Return null only for EOF before the next line, or allocation failure. */
+static char *read_file(u32 handle, u32 line, ReadFileByte read_byte, Allocate allocate, u32 image) {
+    if (!handle) return 0;
+    int ch = read_byte(handle, image);
+    if (ch < 0) return 0;
+    u32 capacity = 1024, n = 0;
+    char *s = allocate(capacity, image);
+    if (!s) return 0;
+    while (ch >= 0 && (!line || ch != '\n')) {
+        if (n == capacity - 1) {
+            if (capacity > (~0u >> 1)) return 0;
+            char *larger = allocate(capacity * 2, image);
+            if (!larger) return 0;
+            copy(larger, s, n);
+            s = larger;
+            capacity *= 2;
+        }
+        s[n++] = (char)ch;
+        ch = read_byte(handle, image);
+    }
+    if (line) return rt_terminate_line(s, n);
+    s[n] = 0;
+    return s;
+}
+
+const char *rt_file_read(u32 handle, u32 line, ReadFileByte read_byte, Allocate allocate, u32 image) {
+    const char *s = read_file(handle, line, read_byte, allocate, image);
+    return s ? s : "";
+}
+
+Collection *rt_file_lines(u32 handle, ReadFileByte read_byte, Allocate allocate, u32 image) {
+    Collection *lines = rt_collection_new(allocate, image);
+    if (!lines) return 0;
+    const char *line;
+    while ((line = read_file(handle, 1, read_byte, allocate, image)) != 0)
+        rt_list_insert(lines, lines->length, (u32)line, allocate, image);
+    return lines;
+}
+
+void rt_file_write(u32 handle, const char *s, u32 line, WriteFileBytes write_bytes, u32 image) {
+    if (!handle) return;
+    write_bytes(handle, s, bytes(s), image);
+    if (line) write_bytes(handle, "\n", 1, image);
+}
+
+static u32 random_word(u32 *state) {
+    u32 x = *state;
+    if (!x) {
+        u32 hi;
+        __asm__ volatile("rdtsc" : "=a"(x), "=d"(hi));
+        x ^= hi ^ (u32)state;
+        if (!x) x = 0x9e3779b9;
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return *state = x;
+}
+
+static u64 random_bits(u32 *state) {
+    u64 high = random_word(state);
+    return (high << 32) | random_word(state);
+}
+
+static u64 residue(u64 value, u64 bound) {
+    u64 mod = 0;
+    for (unsigned i = 0; i < 64; ++i) {
+        unsigned carry = mod >> 63;
+        mod = (mod << 1) | (value >> 63);
+        value <<= 1;
+        if (carry || mod >= bound) mod -= bound;
+    }
+    return mod;
+}
+
+static u64 random_less_than(u64 bound, u32 *state) {
+    if (!bound) return random_bits(state);
+    const u64 threshold = residue(0 - bound, bound);
+    u64 number;
+    do { number = random_bits(state); } while (number < threshold);
+    return residue(number, bound);
+}
+
+static double random_unit(u32 *state) { return random_word(state) * 0x1p-32; }
+
+u64 rt_randint(i64 first, i64 last, u32 *state) {
+    if (first > last) { i64 t = first; first = last; last = t; }
+    const u64 width = (u64)last - (u64)first + 1;
+    return (u64)first + random_less_than(width, state);
+}
+
+u64 rt_randfloat(u64 a, u64 b, u32 *state) {
+    Float x = {.bits = a}, y = {.bits = b}, result;
+    double unit = random_unit(state);
+    /* A weighted sum also avoids overflow when the interval spans zero. */
+    result.number = x.number * (1 - unit) + y.number * unit;
+    return result.bits;
+}
+
+static double list_weight(Collection *weights, u32 index, u32 floating_values) {
+    if (!weights || index >= weights->length) return 0.0;
+    Float n = {.bits = weights->entries[index].value};
+    double value = floating_values ? n.number : (double)(i64)n.bits;
+    return value > 0.0 && value <= 0x1.fffffffffffffp1023 ? value : 0.0;
+}
+
+u64 rt_randres(Collection *items, Collection *weights, u32 floating_values, u64 fallback, u32 *state) {
+    const u32 n = rt_collection_len(items);
+    if (!n) return fallback;
+    if (weights) {
+        double maximum = 0.0;
+        for (u32 i = 0; i < n; ++i) {
+            double w = list_weight(weights, i, floating_values);
+            if (w > maximum) maximum = w;
+        }
+        if (maximum > 0.0) {
+            long double sum = 0.0;
+            u32 last = 0;
+            for (u32 i = 0; i < n; ++i) {
+                double w = list_weight(weights, i, floating_values);
+                if (w > 0.0) sum += (long double)w / maximum, last = i;
+            }
+            long double choice = sum * random_unit(state);
+            for (u32 i = 0; i < n; ++i) {
+                choice -= (long double)list_weight(weights, i, floating_values) / maximum;
+                if (choice < 0.0) return items->entries[i].value;
+            }
+            return items->entries[last].value;
+        }
+    }
+    return items->entries[(u32)random_less_than(n, state)].value;
 }

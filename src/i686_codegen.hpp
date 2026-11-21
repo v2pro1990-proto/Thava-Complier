@@ -21,6 +21,7 @@ class Codegen {
         bool indirect = false;
     };
     struct LoopSlots { Slot first, second; };
+    struct LoopTarget { size_t end, next, files; };
     struct Function {
         const FunctionDeclNode* decl;
         size_t entry;
@@ -38,7 +39,11 @@ class Codegen {
     std::map<std::string, Function> functions;
     Shape lastShape;
     std::map<ASTNode*, LoopSlots> loopSlots;
-    std::vector<std::pair<size_t, size_t>> loops; // break, continue
+    std::vector<LoopTarget> loops;
+    std::map<FileOpenBlockNode*, Slot> fileSlots;
+    std::vector<std::pair<std::string, const Slot*>> activeFiles;
+    bool fileUsed = false;
+    size_t fileReadLabel = enc.label(), fileWriteLabel = enc.label();
     const FunctionDeclNode* currentFunction = nullptr;
     size_t returnLabel = 0;
     size_t writeLabel = enc.label(), printStringLabel = enc.label(), printIntLabel = enc.label();
@@ -47,6 +52,7 @@ class Codegen {
     size_t readLineLabel = enc.label(), readByteLabel = enc.label();
     bool readUsed = false;
     uint32_t caseTable = UINT32_MAX;
+    uint32_t randomState = UINT32_MAX;
     size_t allocateLabel = enc.label();
     bool allocatorUsed = false;
     std::vector<DataFixup> textFixups;
@@ -741,6 +747,99 @@ class Codegen {
         return ThavaType::BOOL;
     }
 
+    const Slot& file(const std::string& name) {
+        for (auto it = activeFiles.rbegin(); it != activeFiles.rend(); ++it)
+            if (it->first == name) return *it->second;
+        unsupported("An unbound file handle '" + name + "'");
+    }
+
+    ThavaType fileMethod(FileMethodNode* node) {
+        const auto& slot = file(node->varName);
+        const auto& method = node->method;
+        if ((method == "write" || method == "write_line" || method == "writeline") &&
+            node->args.size() == 1) {
+            const auto type = expression(node->args[0].get());
+            formatScalar(type);
+            enc.push(EBX);
+            codeAddress(EDI, fileWriteLabel);
+            enc.push(EDI);
+            enc.pushImm(method != "write");
+            enc.push(EAX);
+            loadValue(slot);
+            enc.push(EAX);
+            callRuntime(runtime::rt_file_write, 20);
+            return ThavaType::VOID;
+        }
+        if (node->args.empty() && (method == "read" || method == "read_line" || method == "readline" ||
+                                   method == "read_lines" || method == "readlines")) {
+            pushAllocationContext();
+            codeAddress(EDI, fileReadLabel);
+            enc.push(EDI);
+            const bool lines = method == "read_lines" || method == "readlines";
+            if (!lines) enc.pushImm(method != "read");
+            loadValue(slot);
+            enc.push(EAX);
+            callRuntime(lines ? runtime::rt_file_lines : runtime::rt_file_read, lines ? 16 : 20);
+            enc.alu(Xor, EDX, EDX);
+            lastShape = lines ? Shape{ThavaType::UNKNOWN, ThavaType::STRING} : Shape{};
+            return lines ? ThavaType::LIST : ThavaType::STRING;
+        }
+        unsupported("File method '" + method + "'");
+    }
+
+    ThavaType randomCall(RandCallNode* node) {
+        if (randomState == UINT32_MAX) randomState = addSlot();
+        if (node->funcName == "rand" || node->funcName == "randint") {
+            const bool real = node->funcName == "rand";
+            const auto type = real ? ThavaType::DOUBLE : ThavaType::INT;
+            if (!node->args.empty() && node->args.size() != 2)
+                unsupported("Random bounds other than a pair");
+            enc.alu(Sub, ESP, 20);
+            if (node->args.empty()) {
+                integer(0);
+                storeArgument(0);
+                integer(real ? 0x3ff0000000000000ULL : 10ULL);
+                storeArgument(8);
+            } else {
+                for (size_t i = 0; i < 2; ++i) {
+                    normalize(type, "int64", expression(node->args[i].get()));
+                    storeArgument(int32_t(8 * i));
+                }
+            }
+            dataAddress(EAX, randomState);
+            enc.store(ESP, 16, EAX);
+            callRuntime(real ? runtime::rt_randfloat : runtime::rt_randint, 20);
+            return type;
+        }
+
+        if (node->funcName != "randres" || node->args.size() != 1)
+            unsupported("This randres invocation");
+        enc.alu(Sub, ESP, 24);
+        const auto type = expression(node->args[0].get());
+        if (type != ThavaType::LIST && type != ThavaType::TUPLE)
+            unsupported("Choosing from this type");
+        const auto elem = lastShape.element == ThavaType::UNKNOWN ? ThavaType::INT : lastShape.element;
+        enc.store(ESP, 0, EAX);
+        auto weight = ThavaType::UNKNOWN;
+        if (node->weightExpr) {
+            const auto weights = expression(node->weightExpr.get());
+            if (weights != ThavaType::LIST && weights != ThavaType::TUPLE)
+                unsupported("Non-collection weights");
+            weight = lastShape.element;
+            if (weight != ThavaType::UNKNOWN && weight != ThavaType::INT && !floating(weight))
+                unsupported("Non-numeric randres weights");
+        } else integer(0);
+        enc.store(ESP, 4, EAX);
+        enc.imm(EAX, floating(weight));
+        enc.store(ESP, 8, EAX);
+        defaultValue(elem);
+        storeArgument(12);
+        dataAddress(EAX, randomState);
+        enc.store(ESP, 20, EAX);
+        callRuntime(runtime::rt_randres, 24);
+        return elem;
+    }
+
     ThavaType expression(ASTNode* node) {
         if (auto lit = dynamic_cast<LiteralNode*>(node)) {
             const auto type = lit->getLitType();
@@ -835,6 +934,7 @@ class Codegen {
         if (auto method = dynamic_cast<DictMethodNode*>(node)) return dictMethod(method);
         if (auto method = dynamic_cast<StrMethodNode*>(node)) return stringMethod(method);
         if (auto method = dynamic_cast<StrAdvMethodNode*>(node)) return stringSearch(method);
+        if (auto method = dynamic_cast<FileMethodNode*>(node)) return fileMethod(method);
         if (auto len = dynamic_cast<LenNode*>(node)) {
             const auto type = expression(len->arg.get());
             if (type != ThavaType::STRING && !collection(type)) unsupported("Length of this type");
@@ -844,13 +944,17 @@ class Codegen {
             return ThavaType::INT;
         }
         if (auto contains = dynamic_cast<InNode*>(node)) return membership(contains);
+        if (auto random = dynamic_cast<RandCallNode*>(node)) return randomCall(random);
         if (auto call = dynamic_cast<CallNode*>(node)) {
             const auto fn = functions.find(call->name);
             if (fn == functions.end()) unsupported("Call to '" + call->name + "'");
             const auto& callee = *fn->second.decl;
             if (callee.params.size() != call->args.size()) unsupported("Arguments to '" + call->name + "'");
-            const auto bytes = uint32_t(16 * call->args.size());
-            if (bytes > 4080) unsupported("A call with more than 255 arguments");
+            const bool references = std::any_of(callee.params.begin(), callee.params.end(),
+                                                [](const auto& param) { return collection(param.first); });
+            if (call->args.size() > (references ? 255u : 510u))
+                unsupported("A call frame larger than 4080 bytes");
+            const auto bytes = static_cast<uint32_t>((references ? 16 : 8) * call->args.size());
             if (bytes) enc.alu(Sub, ESP, bytes);
             for (size_t i = 0; i < call->args.size(); ++i) {
                 const auto type = expression(call->args[i].get());
@@ -924,7 +1028,7 @@ class Codegen {
         const auto test = enc.label(), next = update ? enc.label() : test, end = enc.label();
         enc.bind(test);
         jumpIfFalse(cond, end);
-        loops.emplace_back(end, next);
+        loops.push_back({end, next, activeFiles.size()});
         statement(body);
         loops.pop_back();
         if (update) {
@@ -972,7 +1076,7 @@ class Codegen {
         enc.bind(body);
         testValue();
         enc.jump(Equal, end);
-        loops.emplace_back(end, next);
+        loops.push_back({end, next, activeFiles.size()});
         statement(node->body.get());
         loops.pop_back();
         enc.bind(next);
@@ -1017,7 +1121,7 @@ class Codegen {
         storeArgument(12);
         callRuntime(runtime::rt_list_get, 20);
         storeValue(variable, element);
-        loops.emplace_back(end, next);
+        loops.push_back({end, next, activeFiles.size()});
         statement(node->body.get());
         loops.pop_back();
         enc.bind(next);
@@ -1027,6 +1131,78 @@ class Codegen {
         storeValue(index, ThavaType::INT);
         enc.jump(test);
         enc.bind(end);
+    }
+
+    void closeFile(const Slot& slot) {
+        const auto done = enc.label();
+        loadValue(slot);
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, done);
+        if (windows) {
+            enc.push(EAX);
+            callWindows("fclose");
+            enc.alu(Add, ESP, 4);
+        } else {
+            enc.push(EBX);
+            enc.lea(EBX, EAX, -1); // Handles are fd + 1; zero is invalid.
+            enc.imm(EAX, 6); // sys_close
+            enc.syscall();
+            enc.pop(EBX);
+        }
+        enc.bind(done);
+    }
+
+    void closeFiles(size_t depth) {
+        for (size_t i = activeFiles.size(); i > depth; --i) closeFile(*activeFiles[i - 1].second);
+    }
+
+    void scopedFile(FileOpenBlockNode* node) {
+        fileUsed = true;
+        if (windows) {
+            for (const char* name : {"fopen", "fclose", "fgetc", "fwrite"})
+                pe.addImport("msvcrt.dll", name);
+        }
+
+        expectString(node->pathExpr.get());
+        enc.push(EAX);
+        if (node->modeExpr) expectString(node->modeExpr.get());
+        else stringValue("r");
+        const auto done = enc.label(), fail = enc.label();
+        if (windows) {
+            enc.pop(ECX);
+            enc.push(EAX);
+            enc.push(ECX);
+            callWindows("fopen");
+            enc.alu(Add, ESP, 8);
+        } else {
+            enc.push(EAX);
+            callRuntime(runtime::rt_linux_open_flags, 4);
+            enc.pop(ECX);
+            enc.alu(Cmp, EAX, 0);
+            enc.jump(Less, fail);
+            enc.push(EBX);
+            enc.mov(EBX, ECX);
+            enc.mov(ECX, EAX);
+            enc.imm(EDX, 0666);
+            enc.imm(EAX, 5); // sys_open
+            enc.syscall();
+            enc.pop(EBX);
+            enc.alu(Cmp, EAX, 0);
+            enc.jump(Less, fail);
+            enc.alu(Add, EAX, 1);
+            enc.jump(done);
+        }
+        enc.jump(done);
+        enc.bind(fail);
+        enc.alu(Xor, EAX, EAX);
+        enc.bind(done);
+        enc.alu(Xor, EDX, EDX);
+        const auto& slot = fileSlots.at(node);
+        storeValue(slot, ThavaType::FILE);
+        activeFiles.emplace_back(node->varName, &slot);
+        for (const auto& child : node->body) statement(child.get());
+        activeFiles.pop_back();
+        closeFile(slot);
     }
 
     void statement(ASTNode* node) {
@@ -1046,6 +1222,8 @@ class Codegen {
                 const auto value = expression(assign->expr.get());
                 storeValue(slot, emitBinary(assign->op.substr(0, assign->op.size() - 1), slot.type, value));
             }
+        } else if (auto open = dynamic_cast<FileOpenBlockNode*>(node)) {
+            scopedFile(open);
         } else if (auto index = dynamic_cast<IndexAssignNode*>(node)) {
             if (index->op != "=") unsupported("A compound indexed assignment");
             mutateCollection(lookup(index->varName), index->indexExpr.get(), index->valExpr.get(), false);
@@ -1073,7 +1251,8 @@ class Codegen {
             collectionRange(each);
         } else if (dynamic_cast<BreakNode*>(node) || dynamic_cast<ContinueNode*>(node)) {
             if (loops.empty()) unsupported("Loop control outside a loop");
-            enc.jump(dynamic_cast<BreakNode*>(node) ? loops.back().first : loops.back().second);
+            closeFiles(loops.back().files);
+            enc.jump(dynamic_cast<BreakNode*>(node) ? loops.back().end : loops.back().next);
         } else if (auto out = dynamic_cast<ConsOutNode*>(node)) {
             printLine(out->getExpr());
         } else if (auto ret = dynamic_cast<ReturnNode*>(node)) {
@@ -1082,11 +1261,26 @@ class Codegen {
                 const auto value = expression(ret->expr.get());
                 normalize(currentFunction->returnType, currentFunction->customReturnType, value);
             } else integer(0);
+            if (!activeFiles.empty()) {
+                saveValue();
+                closeFiles(0);
+                enc.pop(EAX);
+                enc.pop(EDX);
+            }
             enc.jump(returnLabel);
         } else if (auto expr = dynamic_cast<ExpressionStatementNode*>(node)) {
             expression(expr->expr.get());
         } else if (!dynamic_cast<GlobalDeclNode*>(node)) {
             unsupported("This statement");
+        }
+    }
+
+    void declareFrameLocals(const std::vector<VarDeclNode*>& decls, int32_t& frame) {
+        for (const auto* decl : decls) {
+            if (!scalar(decl->varType) && !collection(decl->varType))
+                unsupported("Type of variable '" + decl->varName + "'");
+            if (locals.try_emplace(decl->varName, Slot{EBP, -frame - 8, decl->varType, decl->customTypeName}).second)
+                frame += 8;
         }
     }
 
@@ -1109,6 +1303,12 @@ class Codegen {
             else if (locals.at(range->varName).type != range->varType) unsupported("Conflicting range loop variable");
             loopSlots.emplace(node, LoopSlots{temporary(range->varType), temporary(range->varType)});
             collectLoopSlots(range->body.get(), bytes);
+        } else if (auto open = dynamic_cast<FileOpenBlockNode*>(node)) {
+            fileSlots.emplace(open, temporary(ThavaType::FILE));
+            std::vector<VarDeclNode*> decls;
+            for (const auto& child : open->body) thavaCollectVarDecls(child.get(), decls);
+            declareFrameLocals(decls, bytes);
+            for (const auto& child : open->body) collectLoopSlots(child.get(), bytes);
         } else if (auto each = dynamic_cast<ForEachNode*>(node)) {
             if (!locals.count(each->varName)) locals.emplace(each->varName, temporary(each->varType));
             loopSlots.emplace(node, LoopSlots{temporary(ThavaType::LIST), temporary(ThavaType::INT)});
@@ -1121,6 +1321,7 @@ class Codegen {
         enc.mov(EBP, ESP);
         locals.clear();
         loopSlots.clear();
+        fileSlots.clear();
         if (!entry) {
             const auto& fn = *currentFunction;
             for (size_t i = 0; i < fn.params.size(); ++i) {
@@ -1141,11 +1342,7 @@ class Codegen {
             thavaCollectVarDecls(node.get(), decls);
         }
         int32_t frame = 0;
-        for (const auto* decl : decls) {
-            if (!scalar(decl->varType) && !collection(decl->varType)) unsupported("Type of variable '" + decl->varName + "'");
-            if (locals.try_emplace(decl->varName, Slot{EBP, -frame - 8, decl->varType, decl->customTypeName}).second)
-                frame += 8;
-        }
+        declareFrameLocals(decls, frame);
         for (const auto& node : body) collectLoopSlots(node.get(), frame);
         if (frame > 4080) unsupported("A local stack frame larger than 4080 bytes");
         if (frame) enc.alu(Sub, ESP, uint32_t(frame));
@@ -1482,6 +1679,73 @@ class Codegen {
         enc.leave();
     }
 
+    void emitFileCallbacks() {
+        if (!fileUsed) return;
+        enc.bind(fileReadLabel);
+        enc.push(EBX);
+        enc.load(EAX, ESP, 8);
+        if (windows) {
+            enc.load(EBX, ESP, 12);
+            enc.push(EAX);
+            callWindows("fgetc");
+            enc.alu(Add, ESP, 4);
+        } else {
+            enc.lea(EBX, EAX, -1);
+            enc.alu(Sub, ESP, 4);
+            enc.mov(ECX, ESP);
+            enc.imm(EDX, 1);
+            const auto retry = enc.label(), eof = enc.label(), done = enc.label();
+            enc.bind(retry);
+            enc.imm(EAX, 3); // sys_read
+            enc.syscall();
+            enc.alu(Cmp, EAX, uint32_t(-4));
+            enc.jump(Equal, retry);
+            enc.alu(Cmp, EAX, 1);
+            enc.jump(NotEqual, eof);
+            enc.loadByte(EAX, ESP);
+            enc.jump(done);
+            enc.bind(eof);
+            enc.imm(EAX, uint32_t(-1));
+            enc.bind(done);
+            enc.alu(Add, ESP, 4);
+        }
+        enc.pop(EBX);
+        enc.ret();
+
+        enc.bind(fileWriteLabel);
+        enc.push(EBX);
+        enc.load(EAX, ESP, 8);
+        enc.load(ECX, ESP, 12);
+        enc.load(EDX, ESP, 16);
+        if (windows) {
+            enc.load(EBX, ESP, 20);
+            enc.push(EAX);
+            enc.push(EDX);
+            enc.pushImm(1);
+            enc.push(ECX);
+            callWindows("fwrite");
+            enc.alu(Add, ESP, 16);
+        } else {
+            enc.lea(EBX, EAX, -1);
+            const auto retry = enc.label(), done = enc.label();
+            enc.bind(retry);
+            enc.alu(Cmp, EDX, 0);
+            enc.jump(Equal, done);
+            enc.imm(EAX, 4); // sys_write
+            enc.syscall();
+            enc.alu(Cmp, EAX, uint32_t(-4));
+            enc.jump(Equal, retry);
+            enc.alu(Cmp, EAX, 0);
+            enc.jump(LessEqual, done);
+            enc.alu(Add, ECX, EAX);
+            enc.alu(Sub, EDX, EAX);
+            enc.jump(retry);
+            enc.bind(done);
+        }
+        enc.pop(EBX);
+        enc.ret();
+    }
+
     void emitAllocator() {
         if (!allocatorUsed) return;
         enc.bind(allocateLabel);
@@ -1612,6 +1876,7 @@ public:
         enc.bind(errorLabel);
         exitProcess(1);
         emitInput();
+        emitFileCallbacks();
         emitAllocator();
         if (!runtimeCalls.empty()) {
             const auto base = enc.code.size();

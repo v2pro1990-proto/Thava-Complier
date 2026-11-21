@@ -72,6 +72,10 @@ with tempfile.TemporaryDirectory() as tmp:
 
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
         for filename, expected, input_data in [
+            ("file_arm64.thv", ["[alpha][17]", "18", "4 [2.5][true]"], None),
+            ("i686_file_scope.thv", ["42 return|continue|break"], None),
+            ("membership_rand.thv", ["true false true false true false true -4 true only"], None),
+            ("weighted_arm64.thv", ["pick 7 fallback"], None),
             ("i686_collections.thv", [
                 "[5, 21, 11] 3 11 37 9 true false",
                 "2 8 99 true false b|c 13",
