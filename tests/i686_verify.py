@@ -29,7 +29,8 @@ with tempfile.TemporaryDirectory() as tmp:
         assert struct.unpack_from("<H", data, 18)[0] == 3
     result = subprocess.run([str(output)], cwd=tmp, check=True,
                             stdout=subprocess.PIPE, encoding="utf-8")
-    assert result.stdout.strip() == "5000000006 2.5 TRỜI ĐẸP", result.stdout
+    lines = [line for line in result.stdout.splitlines() if line and not line.startswith("[Thava Native]")]
+    assert lines == ["5000000006 2.5 TRỜI ĐẸP"], result.stdout
     print(target, "executable format and runtime output OK")
 
     if not arm64:
