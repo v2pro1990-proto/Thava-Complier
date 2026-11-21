@@ -1,0 +1,29 @@
+<dbl> func scale(<dbl> number, <int> factor) {
+    return number * factor / 2
+}
+<dbl> decimal = scale(2.5, 3)
+<fl> offset = 0.75
+<dbl> combined = decimal + offset
+<int64> truncated = <int64>(-combined)
+<bl> comparable = combined > 4
+<str> formatted = <str>(-combined)
+cons.out("@{decimal} @{combined} @{truncated} @{comparable} @{formatted}")
+
+<str> pad = " \tHÔM NAY "
+<str> word = "TRỜI ĐẸP"
+<str> clean = pad.strip()
+<str> phrase = clean + " " + word
+<str> formatted_phrase = phrase.lower()
+<str> selected = formatted_phrase.replace("đẹp", "mát")
+<str> repeated = ("ê" * 3) + (2 * "ß")
+<bl> contained = "trời" in selected
+cons.out("@{selected} @{repeated} @{contained}")
+
+<str> search = "cab-ab-ab"
+<int> position = search.find("ab")
+<int> missing = search.index("xyz")
+<int> count = search.count("ab")
+<bl> starts = search.startswith("ca")
+<bl> ends = search.endswith("ab")
+<int> length = len("đẹp")
+cons.out("@{position} @{missing} @{count} @{starts} @{ends} @{length}")

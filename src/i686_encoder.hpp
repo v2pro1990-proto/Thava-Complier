@@ -45,6 +45,8 @@ public:
 
     size_t label() { labels.push_back(size_t(-1)); return labels.size() - 1; }
     void bind(size_t label) { labels.at(label) = code.size(); }
+    void bindAt(size_t label, size_t offset) { labels.at(label) = offset; }
+    size_t offset(size_t label) const { return labels.at(label); }
     bool resolveBranches() {
         for (const auto& branch : branches) {
             const auto target = labels.at(branch.label);

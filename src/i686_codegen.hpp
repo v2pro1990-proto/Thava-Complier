@@ -2,6 +2,8 @@
 
 #include "elf_i686_emitter.hpp"
 #include "i686_encoder.hpp"
+#include "i686_runtime_data.hpp"
+#include "unicode_case.hpp"
 #include <stdexcept>
 
 namespace i686 {
@@ -35,15 +37,26 @@ class Codegen {
     size_t returnLabel = 0;
     size_t writeLabel = enc.label(), printStringLabel = enc.label(), printIntLabel = enc.label();
     size_t compareStringsLabel = enc.label(), divideLabel = enc.label(), errorLabel = enc.label();
-    uint32_t stdoutSlot = 0;
+    uint32_t stdoutSlot = 0, stdinSlot = 0;
+    size_t readLineLabel = enc.label(), readByteLabel = enc.label();
+    bool readUsed = false;
+    uint32_t caseTable = UINT32_MAX;
+    size_t allocateLabel = enc.label();
+    bool allocatorUsed = false;
+    std::vector<DataFixup> textFixups;
+    std::map<uint32_t, size_t> runtimeCalls;
 
     [[noreturn]] static void unsupported(const std::string& feature) {
         throw std::runtime_error(feature + " is not supported by the native i686 backend yet. "
                                  "Use the same --target with --cpp for this program.");
     }
 
+    static bool floating(ThavaType t) {
+        return t == ThavaType::FLOAT || t == ThavaType::DOUBLE;
+    }
+
     static bool scalar(ThavaType t) {
-        return t == ThavaType::INT || t == ThavaType::BOOL || t == ThavaType::STRING;
+        return t == ThavaType::INT || t == ThavaType::BOOL || t == ThavaType::STRING || floating(t);
     }
 
     uint32_t addSlot() {
@@ -73,6 +86,45 @@ class Codegen {
         importFixups.emplace_back(enc.callImport(), name);
     }
 
+    void callRuntime(uint32_t offset, uint32_t argumentBytes) {
+        auto found = runtimeCalls.find(offset);
+        if (found == runtimeCalls.end()) found = runtimeCalls.emplace(offset, enc.label()).first;
+        enc.call(found->second);
+        enc.alu(Add, ESP, argumentBytes);
+    }
+
+    void codeAddress(Reg reg, size_t label) {
+        enc.lea(reg, EBX, 0);
+        textFixups.push_back({enc.code.size() - 4, static_cast<uint32_t>(label)});
+    }
+
+    void pushAllocationContext() {
+        allocatorUsed = true;
+        enc.push(EBX);
+        codeAddress(EDI, allocateLabel);
+        enc.push(EDI);
+    }
+
+    uint32_t caseMappings() {
+        if (caseTable != UINT32_MAX) return caseTable;
+        if (windows) caseTable = thava_unicode::addCaseMappings(pe);
+        else {
+            while (elfData.size() % 8) elfData.push_back(0);
+            caseTable = static_cast<uint32_t>(elfData.size());
+            for (const auto& row : thava_unicode::caseMappings)
+                for (auto field : row)
+                    for (int byte = 0; byte < 8; ++byte)
+                        elfData.push_back(static_cast<uint8_t>(field >> (8 * byte)));
+        }
+        return caseTable;
+    }
+
+    void floatCast(uint32_t operation) {
+        enc.pushImm(operation);
+        saveValue();
+        callRuntime(runtime::rt_float_cast, 12);
+    }
+
     void loadValue(const Slot& slot) {
         enc.load(EAX, slot.base, slot.base == EBX ? 0 : slot.offset);
         if (slot.base == EBX) dataFixups.push_back({enc.code.size() - 4, uint32_t(slot.offset)});
@@ -81,7 +133,11 @@ class Codegen {
     }
 
     void normalize(ThavaType expected, const std::string& width, ThavaType actual) {
-        if (expected != actual) unsupported("This implicit type conversion");
+        if (floating(expected) && actual == ThavaType::INT) floatCast(0);
+        else if (expected == ThavaType::INT && floating(actual)) floatCast(1);
+        else if (expected != actual && !(floating(expected) && floating(actual)))
+            unsupported("This type conversion");
+        if (expected == ThavaType::FLOAT) floatCast(2);
         if (expected == ThavaType::INT && width != "int64") {
             if (width == "int16") enc.signExtendWord();
             enc.signExtend();
@@ -142,6 +198,49 @@ class Codegen {
 
     ThavaType emitBinary(const std::string& op, ThavaType left, ThavaType right) {
         loadLeft();
+        if (floating(left) || floating(right)) {
+            if ((!floating(left) && left != ThavaType::INT) ||
+                (!floating(right) && right != ThavaType::INT)) unsupported("Floating-point operands");
+            static const std::map<std::string, uint32_t> operations = {
+                {"+",0}, {"-",1}, {"*",2}, {"/",3}, {"//",3},
+                {"==",4}, {"!=",5}, {"<",6}, {"<=",7}, {">",8}, {">=",9}
+            };
+            auto operation = operations.find(op);
+            if (operation == operations.end()) unsupported("Floating-point operator '" + op + "'");
+            enc.pushImm(operation->second);
+            enc.pushImm((left == ThavaType::INT ? 1 : 0) | (right == ThavaType::INT ? 2 : 0));
+            saveValue();
+            enc.push(ESI);
+            enc.push(ECX);
+            callRuntime(runtime::rt_float_binary, 24);
+            if (comparison(op)) return ThavaType::BOOL;
+            if (left == ThavaType::DOUBLE || right == ThavaType::DOUBLE) return ThavaType::DOUBLE;
+            floatCast(2);
+            return ThavaType::FLOAT;
+        }
+        if (op == "+" && left == ThavaType::STRING && right == ThavaType::STRING) {
+            pushAllocationContext();
+            enc.push(EAX);
+            enc.push(ECX);
+            callRuntime(runtime::rt_concat, 16);
+            enc.alu(Xor, EDX, EDX);
+            return ThavaType::STRING;
+        }
+        if (op == "*" && ((left == ThavaType::STRING && right == ThavaType::INT) ||
+                          (left == ThavaType::INT && right == ThavaType::STRING))) {
+            pushAllocationContext();
+            if (left == ThavaType::STRING) {
+                saveValue();
+                enc.push(ECX);
+            } else {
+                enc.push(ESI);
+                enc.push(ECX);
+                enc.push(EAX);
+            }
+            callRuntime(runtime::rt_repeat, 20);
+            enc.alu(Xor, EDX, EDX);
+            return ThavaType::STRING;
+        }
         if (comparison(op) && left == right && scalar(left)) {
             const auto yes = enc.label(), done = enc.label();
             if (left == ThavaType::STRING) {
@@ -219,6 +318,89 @@ class Codegen {
         return ThavaType::INT;
     }
 
+    void expectString(ASTNode* node) {
+        if (expression(node) != ThavaType::STRING) unsupported("This string operand");
+    }
+
+    void convertCase(const std::string& method) {
+        const auto mode = method == "lower" ? 1 : method == "upper" ? 2 : method == "title" ? 3 : 0;
+        if (!mode) unsupported("String method '" + method + "'");
+        pushAllocationContext();
+        enc.pushImm(thava_unicode::caseMappingCount);
+        dataAddress(ECX, caseMappings());
+        enc.push(ECX);
+        enc.pushImm(mode);
+        enc.push(EAX);
+        callRuntime(runtime::rt_case, 24);
+        enc.alu(Xor, EDX, EDX);
+    }
+
+    ThavaType stringMethod(StrMethodNode* node) {
+        expectString(node->base.get());
+        if (node->method == "strip") {
+            pushAllocationContext();
+            enc.push(EAX);
+            callRuntime(runtime::rt_strip, 12);
+            enc.alu(Xor, EDX, EDX);
+        } else convertCase(node->method);
+        return ThavaType::STRING;
+    }
+
+    void readString(const std::string& prompt) {
+        readUsed = true;
+        printText(prompt);
+        enc.call(readLineLabel);
+        enc.alu(Xor, EDX, EDX);
+    }
+
+    ThavaType stringSearch(StrAdvMethodNode* node) {
+        const bool replace = node->method == "replace";
+        if (node->args.size() != (replace ? 2u : 1u)) unsupported("Arguments to '" + node->method + "'");
+        if (replace) pushAllocationContext();
+        const uint32_t slots = replace ? 12 : 8;
+        enc.alu(Sub, ESP, slots);
+        expectString(node->base.get());
+        enc.store(ESP, 0, EAX);
+        for (size_t i = 0; i < node->args.size(); ++i) {
+            expectString(node->args[i].get());
+            enc.store(ESP, static_cast<int32_t>(4 * (i + 1)), EAX);
+        }
+        if (replace) {
+            callRuntime(runtime::rt_replace, 20);
+            enc.alu(Xor, EDX, EDX);
+            return ThavaType::STRING;
+        }
+        static const std::map<std::string, uint32_t> search = {
+            {"find",runtime::rt_find}, {"index",runtime::rt_find}, {"count",runtime::rt_count},
+            {"startswith",runtime::rt_startswith}, {"endswith",runtime::rt_endswith}
+        };
+        auto fn = search.find(node->method);
+        if (fn == search.end()) unsupported("String method '" + node->method + "'");
+        callRuntime(fn->second, 8);
+        enc.signExtend();
+        return node->method == "startswith" || node->method == "endswith" ? ThavaType::BOOL : ThavaType::INT;
+    }
+
+    void formatScalar(ThavaType type) {
+        if (type == ThavaType::STRING) return;
+        if (type == ThavaType::BOOL) {
+            const auto isTrue = enc.label(), done = enc.label();
+            enc.alu(Cmp, EAX, 0);
+            enc.jump(NotEqual, isTrue);
+            stringValue("false");
+            enc.jump(done);
+            enc.bind(isTrue);
+            stringValue("true");
+            enc.bind(done);
+            return;
+        }
+        if (type != ThavaType::INT && !floating(type)) unsupported("Formatting this type");
+        pushAllocationContext();
+        saveValue();
+        callRuntime(floating(type) ? runtime::rt_format_float : runtime::rt_format_int, 16);
+        enc.alu(Xor, EDX, EDX);
+    }
+
     ThavaType expression(ASTNode* node) {
         if (auto lit = dynamic_cast<LiteralNode*>(node)) {
             const auto type = lit->getLitType();
@@ -226,6 +408,12 @@ class Codegen {
             if (type == ThavaType::STRING) stringValue(value);
             else if (type == ThavaType::INT) integer(std::stoll(value));
             else if (type == ThavaType::BOOL) integer(value == "true");
+            else if (floating(type)) {
+                const double real = type == ThavaType::FLOAT ? static_cast<double>(std::strtof(value.c_str(), nullptr)) : std::strtod(value.c_str(), nullptr);
+                uint64_t bits;
+                std::memcpy(&bits, &real, sizeof(bits));
+                integer(bits);
+            }
             else unsupported("This literal type");
             return type;
         }
@@ -241,9 +429,11 @@ class Codegen {
                 integer(uint64_t(1) << 63);
                 return ThavaType::INT;
             }
-            if (expression(unary->expr.get()) != ThavaType::INT) unsupported("Non-integer negation");
-            negate(EAX, EDX);
-            return ThavaType::INT;
+            const auto type = expression(unary->expr.get());
+            if (floating(type)) enc.alu(Xor, EDX, 0x80000000u);
+            else if (type == ThavaType::INT) negate(EAX, EDX);
+            else unsupported("Negating this type");
+            return type;
         }
         if (auto unary = dynamic_cast<UnaryBNotNode*>(node)) {
             if (expression(unary->expr.get()) != ThavaType::INT) unsupported("Non-integer bitwise NOT");
@@ -271,6 +461,40 @@ class Codegen {
             const auto right = expression(op->right.get());
             return emitBinary(op->op, left, right);
         }
+        if (auto input = dynamic_cast<InputNode*>(node)) {
+            if (input->inputType != ThavaType::STRING) unsupported("Non-string console input");
+            readString(input->prompt);
+            return ThavaType::STRING;
+        }
+        if (auto input = dynamic_cast<InputCaseNode*>(node)) {
+            readString(input->prompt);
+            convertCase(input->mode);
+            return ThavaType::STRING;
+        }
+        if (auto cast = dynamic_cast<CastNode*>(node)) {
+            const auto type = expression(cast->expr.get());
+            if (cast->targetType == ThavaType::STRING) formatScalar(type);
+            else normalize(cast->targetType, cast->customTarget, type);
+            return cast->targetType;
+        }
+        if (auto method = dynamic_cast<StrMethodNode*>(node)) return stringMethod(method);
+        if (auto method = dynamic_cast<StrAdvMethodNode*>(node)) return stringSearch(method);
+        if (auto len = dynamic_cast<LenNode*>(node)) {
+            expectString(len->arg.get());
+            enc.push(EAX);
+            callRuntime(runtime::rt_len, 4);
+            enc.signExtend();
+            return ThavaType::INT;
+        }
+        if (auto contains = dynamic_cast<InNode*>(node)) {
+            expectString(contains->left.get());
+            enc.push(EAX);
+            expectString(contains->listExpr.get());
+            enc.push(EAX);
+            callRuntime(runtime::rt_contains, 8);
+            enc.alu(Xor, EDX, EDX);
+            return ThavaType::BOOL;
+        }
         if (auto call = dynamic_cast<CallNode*>(node)) {
             const auto fn = functions.find(call->name);
             if (fn == functions.end()) unsupported("Call to '" + call->name + "'");
@@ -292,20 +516,11 @@ class Codegen {
     }
 
     void print(ThavaType type) {
-        if (type == ThavaType::BOOL) {
-            const auto isTrue = enc.label(), done = enc.label();
-            enc.alu(Cmp, EAX, 0);
-            enc.jump(NotEqual, isTrue);
-            stringValue("false");
-            enc.jump(done);
-            enc.bind(isTrue);
-            stringValue("true");
-            enc.bind(done);
-            type = ThavaType::STRING;
+        if (type == ThavaType::INT) enc.call(printIntLabel);
+        else {
+            formatScalar(type);
+            enc.call(printStringLabel);
         }
-        if (type == ThavaType::STRING) enc.call(printStringLabel);
-        else if (type == ThavaType::INT) enc.call(printIntLabel);
-        else unsupported("Printing this type");
     }
 
     void printText(const std::string& value) {
@@ -646,6 +861,202 @@ class Codegen {
         enc.ret();
     }
 
+    void emitInput() {
+        if (!readUsed) return;
+        enc.bind(readLineLabel);
+        if (windows) emitWindowsConsoleLine();
+
+        // Redirected Windows input and Linux input are byte streams.
+        pushAllocationContext();
+        codeAddress(EDI, readByteLabel);
+        enc.push(EDI);
+        callRuntime(runtime::rt_read_line, 12);
+        enc.ret();
+
+        enc.bind(readByteLabel);
+        enc.push(EBX);
+        const auto error = enc.label(), done = enc.label();
+        if (windows) {
+            pe.addImport("kernel32.dll", "ReadFile");
+            enc.load(EBX, ESP, 8);
+            enc.alu(Sub, ESP, 8);
+            enc.mov(ECX, ESP);
+            enc.lea(EDX, ESP, 4);
+            enc.pushImm(0);
+            enc.push(EDX);
+            enc.pushImm(1);
+            enc.push(ECX);
+            dataAddress(EAX, stdinSlot);
+            enc.load(EAX, EAX);
+            enc.push(EAX);
+            callWindows("ReadFile");
+            enc.alu(Cmp, EAX, 0);
+            enc.jump(Equal, error);
+            enc.load(EAX, ESP, 4);
+            enc.alu(Cmp, EAX, 1);
+            enc.jump(NotEqual, error);
+        } else {
+            enc.alu(Sub, ESP, 8);
+            enc.alu(Xor, EBX, EBX);
+            enc.mov(ECX, ESP);
+            enc.imm(EDX, 1);
+            const auto retry = enc.label();
+            enc.bind(retry);
+            enc.imm(EAX, 3); // sys_read
+            enc.syscall();
+            enc.alu(Cmp, EAX, uint32_t(-4)); // EINTR
+            enc.jump(Equal, retry);
+            enc.alu(Cmp, EAX, 1);
+            enc.jump(NotEqual, error);
+        }
+        enc.loadByte(EAX, ESP);
+        enc.jump(done);
+        enc.bind(error);
+        enc.imm(EAX, uint32_t(-1));
+        enc.bind(done);
+        enc.alu(Add, ESP, 8);
+        enc.pop(EBX);
+        enc.ret();
+    }
+
+    void emitWindowsConsoleLine() {
+        for (const char* name : {"GetConsoleMode", "ReadConsoleW", "WideCharToMultiByte"})
+            pe.addImport("kernel32.dll", name);
+        const auto redirected = enc.label(), empty = enc.label();
+        constexpr int32_t wide = -2080, handle = -4, count = -8, output = -12;
+        enc.push(EBP);
+        enc.mov(EBP, ESP);
+        enc.alu(Sub, ESP, -wide);
+        dataAddress(EAX, stdinSlot);
+        enc.load(EAX, EAX);
+        enc.store(EBP, handle, EAX);
+        enc.lea(ECX, EBP, count);
+        enc.push(ECX);
+        enc.push(EAX);
+        callWindows("GetConsoleMode");
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, redirected);
+
+        enc.pushImm(0);
+        enc.lea(EAX, EBP, count);
+        enc.push(EAX);
+        enc.pushImm(1024);
+        enc.lea(EAX, EBP, wide);
+        enc.push(EAX);
+        enc.load(EAX, EBP, handle);
+        enc.push(EAX);
+        callWindows("ReadConsoleW");
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, empty);
+
+        allocatorUsed = true;
+        enc.push(EBX);
+        enc.pushImm(3073);
+        enc.call(allocateLabel);
+        enc.alu(Add, ESP, 8);
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, empty);
+        enc.store(EBP, output, EAX);
+        enc.pushImm(0);
+        enc.pushImm(0);
+        enc.pushImm(3072);
+        enc.push(EAX);
+        enc.load(EAX, EBP, count);
+        enc.push(EAX);
+        enc.lea(EAX, EBP, wide);
+        enc.push(EAX);
+        enc.pushImm(0);
+        enc.pushImm(65001); // CP_UTF8
+        callWindows("WideCharToMultiByte");
+        enc.push(EAX);
+        enc.load(EAX, EBP, output);
+        enc.push(EAX);
+        callRuntime(runtime::rt_terminate_line, 8);
+        enc.leave();
+        enc.ret();
+
+        enc.bind(empty);
+        stringValue("");
+        enc.leave();
+        enc.ret();
+
+        enc.bind(redirected);
+        enc.leave();
+    }
+
+    void emitAllocator() {
+        if (!allocatorUsed) return;
+        enc.bind(allocateLabel);
+        if (windows) {
+            pe.addImport("kernel32.dll", "GetProcessHeap");
+            pe.addImport("kernel32.dll", "HeapAlloc");
+            enc.push(EBX);
+            enc.load(EBX, ESP, 12);
+            callWindows("GetProcessHeap");
+            enc.load(ECX, ESP, 8);
+            enc.push(ECX);
+            enc.pushImm(0);
+            enc.push(EAX);
+            callWindows("HeapAlloc");
+            enc.pop(EBX);
+            enc.ret();
+            return;
+        }
+
+        const auto arena = addSlot();
+        const auto serve = enc.label(), map = enc.label(), fail = enc.label(), done = enc.label();
+        enc.push(EBP);
+        enc.mov(EBP, ESP);
+        enc.push(EBX);
+        enc.push(ESI);
+        enc.push(EDI);
+        enc.load(EBX, EBP, 12);
+        enc.load(ECX, EBP, 8);
+        enc.alu(Add, ECX, 7);
+        enc.jump(Below, fail);
+        enc.alu(And, ECX, uint32_t(-8));
+        enc.push(ECX); // size at EBP - 16
+        dataAddress(EDI, arena);
+        enc.load(EAX, EDI);
+        enc.load(EDX, EDI, 4);
+        enc.alu(Cmp, ECX, EDX);
+        enc.jump(BelowEqual, serve);
+        enc.alu(Cmp, ECX, 65536);
+        enc.jump(AboveEqual, map);
+        enc.imm(ECX, 65536);
+        enc.bind(map);
+        enc.push(EDI);
+        enc.push(ECX);
+        enc.push(EBP);
+        enc.alu(Xor, EBX, EBX);
+        enc.imm(EDX, 3); // PROT_READ | PROT_WRITE
+        enc.imm(ESI, 0x22); // MAP_PRIVATE | MAP_ANONYMOUS
+        enc.imm(EDI, uint32_t(-1));
+        enc.alu(Xor, EBP, EBP);
+        enc.imm(EAX, 192); // mmap2
+        enc.syscall();
+        enc.pop(EBP);
+        enc.pop(EDX);
+        enc.pop(EDI);
+        enc.alu(Cmp, EAX, uint32_t(-4095));
+        enc.jump(AboveEqual, fail);
+        enc.load(ECX, EBP, -16);
+        enc.bind(serve);
+        enc.alu(Sub, EDX, ECX);
+        enc.alu(Add, ECX, EAX);
+        enc.store(EDI, 0, ECX);
+        enc.store(EDI, 4, EDX);
+        enc.jump(done);
+        enc.bind(fail);
+        enc.alu(Xor, EAX, EAX);
+        enc.bind(done);
+        enc.load(EBX, EBP, -4);
+        enc.load(ESI, EBP, -8);
+        enc.load(EDI, EBP, -12);
+        enc.leave();
+        enc.ret();
+    }
+
 public:
     explicit Codegen(bool windowsTarget) : windows(windowsTarget) {}
 
@@ -669,11 +1080,16 @@ public:
         enc.alu(Sub, EBX, uint32_t(entryAddressRva));
         if (windows) {
             stdoutSlot = addSlot();
+            stdinSlot = addSlot();
             enc.pushImm(65001);
             callWindows("SetConsoleOutputCP");
             enc.pushImm(uint32_t(-11)); // STD_OUTPUT_HANDLE
             callWindows("GetStdHandle");
             dataAddress(ECX, stdoutSlot);
+            enc.store(ECX, 0, EAX);
+            enc.pushImm(uint32_t(-10)); // STD_INPUT_HANDLE
+            callWindows("GetStdHandle");
+            dataAddress(ECX, stdinSlot);
             enc.store(ECX, 0, EAX);
         }
         for (const auto& [name, slot] : globals) {
@@ -694,6 +1110,15 @@ public:
         emitDivision();
         enc.bind(errorLabel);
         exitProcess(1);
+        emitInput();
+        emitAllocator();
+        if (!runtimeCalls.empty()) {
+            const auto base = enc.code.size();
+            for (const auto& [offset, label] : runtimeCalls) enc.bindAt(label, base + offset);
+            enc.code.insert(enc.code.end(), std::begin(runtime::code), std::end(runtime::code));
+        }
+        for (const auto& fixup : textFixups)
+            enc.patch(fixup.at, ElfI686Emitter::textRva + static_cast<uint32_t>(enc.offset(fixup.offset)));
         if (!enc.resolveBranches()) throw std::runtime_error("Unresolved native i686 branch.");
 
         uint32_t dataRva = ElfI686Emitter::dataRva(enc.code.size());

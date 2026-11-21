@@ -70,6 +70,42 @@ with tempfile.TemporaryDirectory() as tmp:
             ], result.stdout
         print(target, "native code generation and runtime output OK")
 
+        unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
+        for filename, expected, input_data in [
+            ("i686_scalars.thv", [
+                "3.75 4.5 -4 true -4.5",
+                "hôm nay trời mát êêêßß true",
+                "1 -1 3 true true 6",
+            ], None),
+            ("unicode_case.thv", [
+                "hôm nay trời đẹp quá", "HÔM NAY TRỜI ĐẸP QUÁ", "Hôm Nay Trời Đẹp Quá",
+                "SSTRAẞE\u00a0ÉLAN\tΩΜΈΓΑ 😀 𐐀", "ßtraße\u00a0élan\tωμέγα 😀 𐐨",
+                "Sstraße\u00a0Élan\tΩμέγα 😀 𐐀", "A\u0302\u0301", "ab",
+                "hôm nay trời đẹp quá", "HÔM NAY TRỜI ĐẸP QUÁ",
+            ], unicode_input),
+        ]:
+            test_source = source.with_name(filename)
+            native = Path(tmp) / (test_source.stem + (".exe" if windows else ""))
+            subprocess.run([str(compiler), str(test_source), "--target", target, "--native",
+                            "-O0", "-o", str(native)], cwd=tmp, env=env, check=True, timeout=30)
+            output = subprocess.run([str(native)], cwd=tmp, input=input_data, check=True,
+                                    stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+            assert output.stdout.splitlines() == expected, output.stdout
+            if windows and input_data is not None:
+                window = subprocess.STARTUPINFO()
+                window.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                window.wShowWindow = subprocess.SW_HIDE
+                output = subprocess.run(
+                    [sys.executable, str(source.with_name("windows_console.py")), str(native)],
+                    cwd=tmp, input=input_data, check=True, stdout=subprocess.PIPE,
+                    encoding="utf-8", creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    startupinfo=window, timeout=30,
+                )
+                assert output.stdout.splitlines() == expected, output.stdout
+            print(target, filename, "OK")
+
+        source = Path(tmp) / "unsupported.thv"
+        source.write_text('<lst> collection = [1, 2, 3]\n', encoding="utf-8")
         rejected = Path(tmp) / ("unsupported.exe" if windows else "unsupported")
         result = subprocess.run([str(compiler), str(source), "--target", target, "--native",
                                  "-o", str(rejected)], cwd=tmp, env=env, stdout=subprocess.PIPE,
