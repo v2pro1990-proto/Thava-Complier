@@ -606,12 +606,13 @@ When loading a Thava dynamic library (`.thdl` or `.so`), the compiler reads embe
 Import resolution depends on the target:
 
 - **Windows PE x86-64** loads the `.thdl`/`.dll` at run time through the Windows loader (IAT thunks), exactly like before.
+- **Windows PE ARM64** builds an ARM64 `.thdl` as a DLL with a PE export table. The consumer imports the functions by name and calls each module's initializer once before running its own top-level code. The module's global values persist across calls. Place the DLLs, including transitive dependencies, beside the executable. Rebuild any ARM64 `.thdl` from before this support with `thavac library.thv --target win-arm64 --lib -o library.thdl`. Native ARM64 imports currently accept up to eight arguments per function.
 - **`--backend cpp`** keeps its dynamic linking through the host compiler.
 - **Native Linux ELF64 (x86-64 and AArch64)** are zero-libc, so the generated program carries its own loader: at start-up it maps the `.so` with `mmap`, applies the module's relocations, runs its top-level initializer once, and calls the exports through the mapped image. The library is **not** inlined, so — exactly like on Windows — the `.so` has to exist at run time; the executable itself stays a single self-contained file. The `.so` is located by its absolute path at compile time, so the directory you run the executable from does not matter.
 
-The loader first opens the absolute path recorded at compile time and, if that fails (for example a binary built on Windows and run under Linux), retries the plain file name in the current directory.
+The Linux loader first opens the absolute path recorded at compile time and, if that fails (for example a binary built on Windows and run under Linux), retries the plain file name in the current directory.
 
-Several libraries can be attached at once: every attached library gets its own fixed window (`0x10000000`, `0x14000000`, ...) while the executable keeps `0x400000`. Attaching the same library twice is de-duplicated. If a library cannot be mapped the program prints
+On Linux, every attached library gets its own fixed window (`0x10000000`, `0x14000000`, ...) while the executable keeps `0x400000`. Attaching the same library twice is de-duplicated. If a library cannot be mapped the program prints
 ```
 [Thava Runtime] cannot load library '/path/to/thava_math.so'
 ```
