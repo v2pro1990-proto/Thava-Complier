@@ -74,6 +74,11 @@ with tempfile.TemporaryDirectory() as tmp:
         for filename, expected, input_data in [
             ("gw.thv", ["4 3 AB new 9"], None),
             ("i686_class.thv", ["true 5000000021 boxed 3.75 5000000003", "Cannot access a member of none"], None),
+            ("i686_struct.thv", [
+                "ABD -25536 5000000017 7 true true true boxed",
+                "ABDD -1 5000000000 box",
+                "ABDD full true",
+            ], None),
             ("i686_unwind.thv", [
                 "5000000042 BA012I outer Division by zero",
                 "file closed body|deferred", "replacement BA012IZ", "end", "program cleanup",

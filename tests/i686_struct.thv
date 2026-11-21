@@ -1,0 +1,69 @@
+<str> trace = ""
+
+<int> func mark(<str> token, <int> value) {
+    global <str> trace
+    trace += token
+    return value
+}
+
+enum Status {
+    READY = 7
+}
+
+struct Tag {
+    <str> name = "box"
+}
+
+struct Packet {
+    <int16> code = -1
+    <int64> serial = 5000000000
+    <int> status = mark("D", Status.READY)
+    <bool> open = true
+    <fl> rate = 1.25
+    <dbl> weight = 2.5
+    <Tag> tag = Tag()
+}
+
+class Envelope {
+    <Packet> packet
+
+    func Envelope(<Packet> packet) {
+        locvar.packet = packet
+    }
+}
+
+<Packet> func makePacket() {
+    return Packet(mark("A", 40000), mark("B", 17))
+}
+
+func mutate(<Packet> packet) {
+    packet.serial += 5000000000
+    packet.rate += 0.75
+    packet.tag.name += "ed"
+}
+
+<Packet> packet = makePacket()
+mutate(packet)
+<Envelope> envelope = Envelope(packet)
+<str> name = envelope.packet.tag.name
+<bool> open = packet.open
+<bool> rightRate = packet.rate == 2.0
+<bool> rightWeight = packet.weight == 2.5
+<int> code = packet.code
+<int64> serial = packet.serial
+<int> status = packet.status
+cons.out("@{trace} @{code} @{serial} @{status} @{open} @{rightRate} @{rightWeight} @{name}")
+
+func defaults() {
+    <Packet> packet
+    <int> code = packet.code
+    <int64> serial = packet.serial
+    <str> name = packet.tag.name
+    cons.out("@{trace} @{code} @{serial} @{name}")
+}
+
+defaults()
+<Packet> full = Packet(1, 2, 3, false, 4, 5, Tag("full"))
+<str> fullName = full.tag.name
+<bool> fullWeight = full.weight == 5.0
+cons.out("@{trace} @{fullName} @{fullWeight}")
