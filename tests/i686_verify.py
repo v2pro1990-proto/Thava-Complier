@@ -76,7 +76,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 "3.75 4.5 -4 true -4.5",
                 "hôm nay trời mát êêêßß true",
                 "1 -1 3 true true 6",
-            ], None),
+                "Ờ TRỜI 81 5000000000 -0.125 true -12345",
+            ], "5000000000\n-12.5e-2\nYES\n"),
             ("unicode_case.thv", [
                 "hôm nay trời đẹp quá", "HÔM NAY TRỜI ĐẸP QUÁ", "Hôm Nay Trời Đẹp Quá",
                 "SSTRAẞE\u00a0ÉLAN\tΩΜΈΓΑ 😀 𐐀", "ßtraße\u00a0élan\tωμέγα 😀 𐐨",

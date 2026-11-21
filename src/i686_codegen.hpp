@@ -214,6 +214,10 @@ class Codegen {
             enc.push(ECX);
             callRuntime(runtime::rt_float_binary, 24);
             if (comparison(op)) return ThavaType::BOOL;
+            if (op == "//") {
+                floatCast(1);
+                return ThavaType::INT;
+            }
             if (left == ThavaType::DOUBLE || right == ThavaType::DOUBLE) return ThavaType::DOUBLE;
             floatCast(2);
             return ThavaType::FLOAT;
@@ -288,6 +292,11 @@ class Codegen {
                 enc.mov(EAX, EDI);
                 enc.mov(EDX, ECX);
             }
+        } else if (op == "**") {
+            saveValue();
+            enc.push(ESI);
+            enc.push(ECX);
+            callRuntime(runtime::rt_int_pow, 16);
         } else if (op == "bshl" || op == "bshr") {
             const bool rightShift = op == "bshr";
             enc.mov(EDI, ECX);
@@ -351,6 +360,38 @@ class Codegen {
         printText(prompt);
         enc.call(readLineLabel);
         enc.alu(Xor, EDX, EDX);
+    }
+
+    void parseScalar(ThavaType type) {
+        if (type == ThavaType::STRING) return;
+        uint32_t routine;
+        if (type == ThavaType::INT) routine = runtime::rt_parse_int;
+        else if (type == ThavaType::BOOL) routine = runtime::rt_parse_bool;
+        else if (floating(type)) routine = runtime::rt_parse_float;
+        else unsupported("Console input of this type");
+        enc.push(EAX);
+        callRuntime(routine, 4);
+        if (type == ThavaType::BOOL) enc.alu(Xor, EDX, EDX);
+        if (type == ThavaType::FLOAT) floatCast(2);
+    }
+
+    ThavaType substring(ASTNode* base, ASTNode* first, ASTNode* last) {
+        const uint32_t bytes = last ? 20 : 12;
+        pushAllocationContext();
+        enc.alu(Sub, ESP, bytes);
+        expectString(base);
+        enc.store(ESP, 0, EAX);
+        if (expression(first) != ThavaType::INT) unsupported("Non-integer string index");
+        enc.store(ESP, 4, EAX);
+        enc.store(ESP, 8, EDX);
+        if (last) {
+            if (expression(last) != ThavaType::INT) unsupported("Non-integer substring bound");
+            enc.store(ESP, 12, EAX);
+            enc.store(ESP, 16, EDX);
+        }
+        callRuntime(last ? runtime::rt_substring : runtime::rt_str_index, bytes + 8);
+        enc.alu(Xor, EDX, EDX);
+        return ThavaType::STRING;
     }
 
     ThavaType stringSearch(StrAdvMethodNode* node) {
@@ -462,9 +503,9 @@ class Codegen {
             return emitBinary(op->op, left, right);
         }
         if (auto input = dynamic_cast<InputNode*>(node)) {
-            if (input->inputType != ThavaType::STRING) unsupported("Non-string console input");
             readString(input->prompt);
-            return ThavaType::STRING;
+            parseScalar(input->inputType);
+            return input->inputType;
         }
         if (auto input = dynamic_cast<InputCaseNode*>(node)) {
             readString(input->prompt);
@@ -474,9 +515,17 @@ class Codegen {
         if (auto cast = dynamic_cast<CastNode*>(node)) {
             const auto type = expression(cast->expr.get());
             if (cast->targetType == ThavaType::STRING) formatScalar(type);
-            else normalize(cast->targetType, cast->customTarget, type);
+            else if (type == ThavaType::STRING && (cast->targetType == ThavaType::INT || floating(cast->targetType))) {
+                parseScalar(cast->targetType);
+                if (cast->targetType == ThavaType::INT)
+                    normalize(ThavaType::INT, cast->customTarget, ThavaType::INT);
+            } else normalize(cast->targetType, cast->customTarget, type);
             return cast->targetType;
         }
+        if (auto sub = dynamic_cast<StrSubstringNode*>(node))
+            return substring(sub->base.get(), sub->startExpr.get(), sub->endExpr.get());
+        if (auto index = dynamic_cast<IndexNode*>(node))
+            return substring(index->base.get(), index->indexExpr.get(), nullptr);
         if (auto method = dynamic_cast<StrMethodNode*>(node)) return stringMethod(method);
         if (auto method = dynamic_cast<StrAdvMethodNode*>(node)) return stringSearch(method);
         if (auto len = dynamic_cast<LenNode*>(node)) {

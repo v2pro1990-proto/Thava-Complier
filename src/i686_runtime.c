@@ -279,3 +279,110 @@ char *rt_format_float(u64 bits, Allocate allocate, u32 image) {
     }
     return slice(buffer, out - buffer, allocate, image);
 }
+
+static int digit_char(unsigned char ch) { return ch >= '0' && ch <= '9'; }
+
+i64 rt_parse_int(const char *s) {
+    while (space(*s)) ++s;
+    int negative = *s == '-';
+    if (negative || *s == '+') ++s;
+    u64 value = 0;
+    while (digit_char(*s)) {
+        unsigned digit = *s++ - '0';
+        if (value > 922337203685477580ULL ||
+            (value == 922337203685477580ULL && digit > 7u + (unsigned)negative))
+            return 0;
+        value = value * 10 + digit;
+    }
+    return (i64)(negative ? 0 - value : value);
+}
+
+static int equals_ascii_folded(const char *s, const char *lower) {
+    while (*lower) {
+        unsigned char ch = *s++;
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (ch != *lower++) return 0;
+    }
+    return *s == 0;
+}
+
+u32 rt_parse_bool(const char *s) {
+    return equals_ascii_folded(s, "true") || equals_ascii_folded(s, "yes") ||
+           equals_ascii_folded(s, "1");
+}
+
+u64 rt_parse_float(const char *s) {
+    while (space(*s)) ++s;
+    int negative = *s == '-';
+    if (negative || *s == '+') ++s;
+    Float result;
+    if (equals_ascii_folded(s, "inf") || equals_ascii_folded(s, "infinity"))
+        result.bits = 0x7ff0000000000000ULL;
+    else if (equals_ascii_folded(s, "nan")) result.bits = 0x7ff8000000000000ULL;
+    else {
+        long double mantissa = 0;
+        int exponent = 0, significant = 0, decimal = 0;
+        for (;;) {
+            if (*s == '.' && !decimal) { decimal = 1; ++s; continue; }
+            if (!digit_char(*s)) break;
+            unsigned digit = *s++ - '0';
+            if (significant < 19) {
+                if (significant || digit) ++significant;
+                mantissa = mantissa * 10 + digit;
+                if (decimal && exponent > -10000) --exponent;
+            } else if (!decimal && exponent < 10000) ++exponent;
+        }
+        if (*s == 'e' || *s == 'E') {
+            ++s;
+            int down = *s == '-';
+            if (down || *s == '+') ++s;
+            int explicit_exp = 0;
+            while (digit_char(*s)) {
+                if (explicit_exp < 10000) explicit_exp = explicit_exp * 10 + (*s - '0');
+                ++s;
+            }
+            exponent += down ? -explicit_exp : explicit_exp;
+        }
+        if (mantissa == 0 || exponent < -400) result.bits = 0;
+        else if (exponent > 400) result.bits = 0x7ff0000000000000ULL;
+        else {
+            while (exponent < 0) mantissa /= 10, ++exponent;
+            while (exponent > 0) mantissa *= 10, --exponent;
+            result.number = (double)mantissa;
+        }
+    }
+    return result.bits | ((u64)negative << 63);
+}
+
+u64 rt_int_pow(u64 base, i64 exponent) {
+    u64 result = 1;
+    while (exponent > 0) {
+        if (exponent & 1) result *= base;
+        exponent >>= 1;
+        base *= base;
+    }
+    return result;
+}
+
+static const char *next_utf8(const char *s) {
+    unsigned char first = *s++;
+    unsigned width = first < 0xc2 || first > 0xf4 ? 1 :
+                     first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
+    for (unsigned i = 1; i < width && ((unsigned char)*s & 0xc0) == 0x80; ++i) ++s;
+    return s;
+}
+
+char *rt_substring(const char *s, i64 start, i64 end, Allocate allocate, u32 image) {
+    if (start < 1) start = 1;
+    if (end < start) return "";
+    i64 index = 1;
+    while (*s && index < start) s = next_utf8(s), ++index;
+    const char *first = s;
+    while (*s && index <= end) s = next_utf8(s), ++index;
+    return slice(first, s - first, allocate, image);
+}
+
+char *rt_str_index(const char *s, i64 index, Allocate allocate, u32 image) {
+    if (index < 0 || (u64)index >= bytes(s)) return "";
+    return rt_substring(s, index + 1, index + 1, allocate, image);
+}

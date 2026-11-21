@@ -27,3 +27,12 @@ cons.out("@{selected} @{repeated} @{contained}")
 <bl> ends = search.endswith("ab")
 <int> length = len("đẹp")
 cons.out("@{position} @{missing} @{count} @{starts} @{ends} @{length}")
+
+<str> letter = word[2]
+<str> prefix = word.getsubstring(1, 4)
+<int64> power = 3 ** 4
+<int64> typed_integer = key.input(<int64>"")
+<dbl> typed_decimal = key.input(<dbl>"")
+<bl> typed_boolean = key.input(<bl>"")
+<int64> parsed = <int64>("  -12345")
+cons.out("@{letter} @{prefix} @{power} @{typed_integer} @{typed_decimal} @{typed_boolean} @{parsed}")
