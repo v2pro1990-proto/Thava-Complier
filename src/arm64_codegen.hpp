@@ -484,7 +484,7 @@ public:
         enc.bindLabel(labelId);
         enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
         enc.mov_rr(arm64::FP, arm64::SP);
-        enc.sub_rri(arm64::SP, arm64::SP, 512);
+        const auto localFrame = reserveLocalFrame();
 
         enterFunctionScope();
         currentFrameOffset = 0;
@@ -556,6 +556,7 @@ public:
             enc.str_imm(arm64::X9, arm64::X10, 0);
         }
 
+        finalizeLocalFrame(localFrame);
         exitFunctionScope();
         functionDefers = prevDefers;
 
@@ -571,14 +572,70 @@ public:
     // slot when the argument is a plain variable, otherwise the temporary slot at
     // [SP + fallbackSpOffset].
     void emitArgAddress(arm64::Reg dst, ASTNode* argNode, int32_t fallbackSpOffset) {
-        VarInfo* av = nullptr;
-        if (auto vn = dynamic_cast<VarNode*>(argNode)) av = lookupVar(vn->getName());
-        if (av) {
-            if (av->offset < 0) enc.sub_rri(dst, arm64::FP, (uint32_t)(-av->offset));
-            else enc.add_rri(dst, arm64::FP, (uint32_t)av->offset);
-        } else {
-            enc.add_rri(dst, arm64::SP, (uint32_t)fallbackSpOffset);
+        if (auto variable = dynamic_cast<VarNode*>(argNode)) {
+            const auto& name = variable->getName();
+            if (auto local = lookupVar(name)) {
+                enc.sub_rri(dst, arm64::FP, static_cast<uint32_t>(-local->offset));
+                return;
+            }
+            if (auto global = globalVarSlots.find(name); global != globalVarSlots.end()) {
+                emitGlobalBase(dst);
+                enc.sub_rri(dst, dst, static_cast<uint32_t>(-global->second));
+                return;
+            }
         }
+        enc.add_rri(dst, arm64::SP, static_cast<uint32_t>(fallbackSpOffset));
+    }
+
+    static uint32_t alignedStackBytes(size_t slots) {
+        return static_cast<uint32_t>((slots * 8 + 15) & ~size_t(15));
+    }
+
+    template<class ParameterType>
+    uint32_t emitThavaCallArguments(const std::vector<ASTPtr>& args, ParameterType parameterType) {
+        using namespace arm64;
+        const size_t count = args.size();
+        if (count > 240) {
+            std::cerr << "[ARM64 Codegen Error]: Too many function arguments.\n";
+            exit(1);
+        }
+        const uint32_t outgoing = alignedStackBytes(count > 8 ? count - 8 : 0);
+        const uint32_t frame = outgoing + alignedStackBytes(count);
+        if (frame) enc.sub_rri(SP, SP, frame);
+        for (size_t i = 0; i < count; ++i) {
+            const auto actual = compileExpression(args[i].get());
+            const auto formal = parameterType(i);
+            if ((formal == ThavaType::DOUBLE || formal == ThavaType::FLOAT) && actual == ThavaType::INT)
+                intToDoubleBits();
+            else if (formal == ThavaType::INT && (actual == ThavaType::DOUBLE || actual == ThavaType::FLOAT))
+                doubleBitsToInt();
+            enc.str_imm(X0, SP, outgoing + 8 * i);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const int32_t slot = outgoing + 8 * i;
+            const auto destination = i < 8 ? static_cast<Reg>(i) : X9;
+            if (isCollectionType(parameterType(i))) emitArgAddress(destination, args[i].get(), slot);
+            else enc.ldr_imm(destination, SP, slot);
+            if (i >= 8) enc.str_imm(destination, SP, 8 * (i - 8));
+        }
+        return frame;
+    }
+
+    size_t reserveLocalFrame() {
+        const size_t offset = enc.code.size();
+        enc.sub_rri(arm64::SP, arm64::SP, 0);
+        return offset;
+    }
+
+    void finalizeLocalFrame(size_t offset) {
+        const uint32_t bytes = alignedStackBytes(static_cast<size_t>(-currentFrameOffset) / 8);
+        // A single allocation below one page keeps Windows guard-page probing unnecessary.
+        if (bytes > 4080) {
+            std::cerr << "[ARM64 Codegen Error]: Local variables require more than 4080 stack bytes.\n";
+            exit(1);
+        }
+        enc.code[offset + 1] |= static_cast<uint8_t>(bytes << 2);
+        enc.code[offset + 2] |= static_cast<uint8_t>(bytes >> 6);
     }
 
     // Emit a class method / constructor call: this in X0, args in X1..X7,
@@ -586,7 +643,11 @@ public:
     void emitClassCall(size_t lbl, const std::vector<ASTPtr>& args, ASTNode* target, bool thisOnStack,
                        const std::vector<std::pair<ThavaType, std::string>>* formal = nullptr) {
         const size_t n = args.size();
-        const uint32_t reserve = (uint32_t)(16 * (n + 1));
+        if (n > 160) {
+            std::cerr << "[ARM64 Codegen Error]: Too many method arguments.\n";
+            exit(1);
+        }
+        const uint32_t reserve = static_cast<uint32_t>(16 * (n + 1));
 
         if (thisOnStack) {
             enc.ldr_imm(arm64::X9, arm64::SP, 0);
@@ -617,24 +678,25 @@ public:
         }
 
         const size_t extras = (n > 7) ? (n - 7) : 0;
-        if (extras > 0) {
-            enc.sub_rri(arm64::SP, arm64::SP, (uint32_t)(8 * extras));
+        const uint32_t outgoing = alignedStackBytes(extras);
+        if (outgoing) {
+            enc.sub_rri(arm64::SP, arm64::SP, outgoing);
             for (size_t k = 0; k < extras; ++k) {
                 bool byRef = formal && ((7 + k) < formal->size()) &&
                              isCollectionType((*formal)[7 + k].first);
                 if (byRef) {
                     emitArgAddress(arm64::X9, args[7 + k].get(),
-                                   (int32_t)(8 * extras + 16 * (n - 1 - (7 + k))));
+                                   (int32_t)(outgoing + 16 * (n - 1 - (7 + k))));
                 } else {
                     enc.ldr_imm(arm64::X9, arm64::SP,
-                                (int32_t)(8 * extras + 16 * (n - 1 - (7 + k))));
+                                (int32_t)(outgoing + 16 * (n - 1 - (7 + k))));
                 }
                 enc.str_imm(arm64::X9, arm64::SP, (int32_t)(8 * k));
             }
         }
 
         enc.bl(lbl);
-        enc.add_rri(arm64::SP, arm64::SP, (uint32_t)(16 * (n + 1) + 8 * extras));
+        enc.add_rri(arm64::SP, arm64::SP, reserve + outgoing);
     }
 
     // X0 = message, X1 = type name. Never returns.
@@ -651,7 +713,8 @@ public:
         enc.ldr_imm(arm64::X10, arm64::X28, 24); // resume address
         enc.ldr_imm(arm64::X11, arm64::X28, 16); // previous handler
         enc.mov_rr(arm64::FP, arm64::X9);
-        enc.sub_rri(arm64::SP, arm64::FP, 512);
+        enc.ldr_imm(arm64::X12, arm64::X28, 40); // saved SP
+        enc.mov_rr(arm64::SP, arm64::X12);
         enc.mov_rr(arm64::X28, arm64::X11);
         enc.br(arm64::X10);
 
@@ -1105,53 +1168,12 @@ public:
 
             auto fit = functions.find(call->name);
             if (fit != functions.end()) {
-                const size_t n = call->args.size();
-                const uint32_t reserve = (uint32_t)(16 * n);
-                if (n > 0) enc.sub_rri(arm64::SP, arm64::SP, reserve);
-                for (size_t a = 0; a < n; ++a) {
-                    ThavaType at = compileExpression(call->args[a].get());
-                    ThavaType pt = (a < fit->second.params.size()) ? fit->second.params[a].first
-                                                                  : ThavaType::UNKNOWN;
-                    if ((pt == ThavaType::DOUBLE || pt == ThavaType::FLOAT) && at == ThavaType::INT) {
-                        intToDoubleBits();
-                    } else if (pt == ThavaType::INT &&
-                               (at == ThavaType::DOUBLE || at == ThavaType::FLOAT)) {
-                        doubleBitsToInt();
-                    }
-                    enc.str_imm(arm64::X0, arm64::SP, (int32_t)(16 * (n - 1 - a)));
-                }
-                const size_t regCount = (n < 8) ? n : 8;
-                for (size_t a = 0; a < regCount; ++a) {
-                    arm64::Reg targetReg = static_cast<arm64::Reg>(a);
-                    bool byRef = (a < fit->second.params.size()) &&
-                                 isCollectionType(fit->second.params[a].first);
-                    if (byRef) {
-                        // Address of the caller's variable (or of the temp slot).
-                        emitArgAddress(targetReg, call->args[a].get(),
-                                       (int32_t)(16 * (n - 1 - a)));
-                    } else {
-                        enc.ldr_imm(targetReg, arm64::SP, (int32_t)(16 * (n - 1 - a)));
-                    }
-                }
-                const size_t extras = (n > 8) ? (n - 8) : 0;
-                if (extras > 0) {
-                    enc.sub_rri(arm64::SP, arm64::SP, (uint32_t)(8 * extras));
-                    for (size_t k = 0; k < extras; ++k) {
-                        bool byRef = ((8 + k) < fit->second.params.size()) &&
-                                     isCollectionType(fit->second.params[8 + k].first);
-                        if (byRef) {
-                            emitArgAddress(arm64::X9, call->args[8 + k].get(),
-                                           (int32_t)(8 * extras + 16 * (n - 1 - (8 + k))));
-                        } else {
-                            enc.ldr_imm(arm64::X9, arm64::SP,
-                                        (int32_t)(8 * extras + 16 * (n - 1 - (8 + k))));
-                        }
-                        enc.str_imm(arm64::X9, arm64::SP, (int32_t)(8 * k));
-                    }
-                }
+                const auto& params = fit->second.params;
+                const auto frame = emitThavaCallArguments(call->args, [&](size_t index) {
+                    return index < params.size() ? params[index].first : ThavaType::UNKNOWN;
+                });
                 enc.bl(fit->second.labelId);
-                if (reserve > 0 || extras > 0)
-                    enc.add_rri(arm64::SP, arm64::SP, (uint32_t)(reserve + 8 * extras));
+                if (frame) enc.add_rri(arm64::SP, arm64::SP, frame);
                 return fit->second.returnType;
             }
 
@@ -1164,36 +1186,9 @@ public:
                               << "' exports no function offsets; rebuild it with --lib using this compiler.\n";
                     exit(1);
                 }
-                const size_t n = call->args.size();
-                if (n > 8) {
-                    std::cerr << "[ARM64 Codegen Error]: imported function '" << call->name
-                              << "' takes more than 8 arguments\n";
-                    exit(1);
-                }
-                const uint32_t reserve = (uint32_t)(16 * n);
-                if (n > 0) enc.sub_rri(arm64::SP, arm64::SP, reserve);
-                for (size_t a = 0; a < n; ++a) {
-                    ThavaType at = compileExpression(call->args[a].get());
-                    ThavaType pt = (a < dlinfo.paramTypes.size()) ? dlinfo.paramTypes[a] : ThavaType::INT;
-                    if ((pt == ThavaType::DOUBLE || pt == ThavaType::FLOAT) && at == ThavaType::INT) {
-                        intToDoubleBits();
-                    } else if (pt == ThavaType::INT &&
-                               (at == ThavaType::DOUBLE || at == ThavaType::FLOAT)) {
-                        doubleBitsToInt();
-                    }
-                    enc.str_imm(arm64::X0, arm64::SP, (int32_t)(16 * (n - 1 - a)));
-                }
-                for (size_t a = 0; a < n; ++a) {
-                    arm64::Reg targetReg = static_cast<arm64::Reg>(a);
-                    const auto argOffset = static_cast<int32_t>(16 * (n - 1 - a));
-                    if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
-                        if (a < dlinfo.paramTypes.size() && isCollectionType(dlinfo.paramTypes[a])) {
-                            emitArgAddress(targetReg, call->args[a].get(), argOffset);
-                            continue;
-                        }
-                    }
-                    enc.ldr_imm(targetReg, arm64::SP, argOffset);
-                }
+                const auto frame = emitThavaCallArguments(call->args, [&](size_t index) {
+                    return index < dlinfo.paramTypes.size() ? dlinfo.paramTypes[index] : ThavaType::UNKNOWN;
+                });
                 if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
                     enc.bl(peLibraryThunks.at({dlinfo.libBasename, call->name}));
                 } else {
@@ -1201,25 +1196,17 @@ public:
                     enc.mov_ri64(arm64::X16, libBase + dlinfo.libTextRva + dlinfo.funcOffset);
                     enc.blr(arm64::X16);
                 }
-                if (reserve > 0) enc.add_rri(arm64::SP, arm64::SP, reserve);
+                if (frame) enc.add_rri(arm64::SP, arm64::SP, frame);
                 return dlinfo.retType;
             }
 
             // Check indirect function pointer call
             VarInfo* v = lookupVar(call->name);
             if (v && v->type == ThavaType::FUNC) {
-                for (size_t a = 0; a < call->args.size(); ++a) {
-                    compileExpression(call->args[a].get());
-                    enc.str_imm(arm64::X0, arm64::SP, -16);
-                    enc.sub_rri(arm64::SP, arm64::SP, 16);
-                }
-                for (int a = static_cast<int>(call->args.size()) - 1; a >= 0; --a) {
-                    arm64::Reg targetReg = static_cast<arm64::Reg>(a);
-                    enc.ldr_imm(targetReg, arm64::SP, 0);
-                    enc.add_rri(arm64::SP, arm64::SP, 16);
-                }
+                const auto frame = emitThavaCallArguments(call->args, [](size_t) { return ThavaType::UNKNOWN; });
                 enc.ldr_imm(arm64::X16, arm64::FP, v->offset);
                 enc.blr(arm64::X16);
+                if (frame) enc.add_rri(arm64::SP, arm64::SP, frame);
                 return ThavaType::INT;
             }
         }
@@ -3034,7 +3021,7 @@ public:
             size_t resumeLbl = enc.createLabel();
             size_t afterLbl = enc.createLabel();
 
-            // Build the handler record: [msg][type][prev][resume][saved FP]
+            // Build the handler record: [msg][type][prev][resume][saved FP][saved SP]
             enc.mov_rr(arm64::X9, arm64::X28);                 // previous handler
             enc.sub_rri(arm64::X28, arm64::FP, -rec);          // &record
             enc.str_imm(arm64::X9, arm64::X28, 16);
@@ -3045,6 +3032,8 @@ public:
             enc.str_imm(arm64::X9, arm64::X28, 24);
             enc.mov_rr(arm64::X9, arm64::FP);
             enc.str_imm(arm64::X9, arm64::X28, 32);
+            enc.mov_rr(arm64::X9, arm64::SP);
+            enc.str_imm(arm64::X9, arm64::X28, 40);
 
             enterScope();
             for (const auto& s : tn->tryBody) compileStatement(s.get());
@@ -3854,10 +3843,10 @@ public:
         enc.bindLabel(fi.labelId);
 
         // Standard AAPCS64 Prologue:
-        // Save FP and LR, establish frame pointer, allocate 512 bytes for locals
+        // Save FP and LR, establish frame pointer, allocate the local stack frame
         enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
         enc.mov_rr(arm64::FP, arm64::SP);
-        enc.sub_rri(arm64::SP, arm64::SP, 512);
+        const auto localFrame = reserveLocalFrame();
 
         enterFunctionScope();
         currentFrameOffset = 0;
@@ -3938,6 +3927,7 @@ public:
             enc.str_imm(arm64::X9, arm64::X10, 0);
         }
 
+        finalizeLocalFrame(localFrame);
         exitFunctionScope();
         functionDefers = prevDefers;
 
@@ -4233,7 +4223,7 @@ public:
         enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -savedFrame);
         enc.mov_rr(arm64::FP, arm64::SP);
         if (peLibrary) enc.str_imm(arm64::X28, arm64::FP, 16);
-        enc.sub_rri(arm64::SP, arm64::SP, 512);
+        const auto localFrame = reserveLocalFrame();
 
         // Globals already reserved the first slots of this frame (step 1.2);
         // locals continue after them.
@@ -4291,14 +4281,11 @@ public:
             compileStatement(topLevelDefers[d]->stmt.get());
         }
 
+        finalizeLocalFrame(localFrame);
         exitFunctionScope();
 
         if (g_isLibraryMode) {
             if (peLibrary) {
-                if (currentFrameOffset < -512) {
-                    std::cerr << "[ARM64 Codegen Error]: Module initializer exceeds its stack frame.\n";
-                    exit(1);
-                }
                 // Top-level code and any functions called there used the live
                 // initializer frame. Move its globals into persistent image data.
                 uint32_t bytes = static_cast<uint32_t>(-programFrameBase);
@@ -4312,7 +4299,7 @@ public:
                 enc.str_imm(arm64::X9, arm64::X10, 0);
                 enc.ldr_imm(arm64::X28, arm64::FP, 16);
             }
-            enc.add_rri(arm64::SP, arm64::SP, 512);
+            enc.mov_rr(arm64::SP, arm64::FP);
             enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, savedFrame);
             enc.ret();
         } else {

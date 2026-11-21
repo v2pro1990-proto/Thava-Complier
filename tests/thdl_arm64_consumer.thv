@@ -6,3 +6,7 @@
 <dbl> amount = twice(2.75)
 <str> text = label()
 cons.out("@{initialized} @{first} @{second} @{amount} @{text}")
+<int> sum = sum_nine(1, 2, 3, 4, 5, 6, 7, 8, 9)
+<lst> values = [7]
+<dbl> changed = update_nine(1, 2, 3, 4, 5, 6, 7, 8, values, 2.25)
+cons.out("@{sum} @{changed} @{values.len()} @{values[1]}")

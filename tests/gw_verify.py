@@ -65,15 +65,24 @@ metadata = library._thava_get_metadata
 metadata.restype = ctypes.c_char_p
 assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
 """], cwd=tmp, check=True)
-        expected["thdl_arm64_consumer"] = "42 43 44 5.5 thdl"
+        expected["thdl_arm64_consumer"] = "42 43 44 5.5 thdl\n45 4.5 2 9"
     for target in targets:
         cases = dict(expected)
         if target in ("arm64", "pe-arm64", "cpp"):
             cases["weighted_arm64"] = "pick 7 fallback"
+        if target in ("arm64", "pe-arm64"):
+            # Cross the previous 512-byte frame and restore SP after a throw.
+            source = Path(tmp) / "stack_arm64.thv"
+            variables = "".join(f"<int> frame_{i} = {i}\n" for i in range(72))
+            source.write_text(variables + (fixtures / source.name).read_text() +
+                              '\ntry { throw "stack" } except Exception as msg {\n'
+                              '    cons.out("@{msg} @{frame_71}")\n}\n', encoding="utf-8")
+            cases["stack_arm64"] = "19 29 38\nstack 71"
         for case, line in cases.items():
             output = Path(tmp) / (case + (".exe" if windows else ""))
             for opt in (["-O0", "-O3"] if case == "gw" and target != "cpp" else ["-O0"]):
-                subprocess.run([str(compiler), str(fixtures / (case + ".thv")), "--backend",
+                source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
+                subprocess.run([str(compiler), str(source), "--backend",
                                 target, opt, "-o", output.name], cwd=tmp, check=True)
                 if target == "pe-arm64":
                     data = output.read_bytes()
