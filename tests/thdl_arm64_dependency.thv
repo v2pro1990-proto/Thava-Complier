@@ -1,0 +1,6 @@
+@dlattach <core_arm64.thdl>
+<int> initial = bump()
+
+<int> func from_dependency() {
+    return initial
+}

@@ -1,0 +1,8 @@
+@dlattach <dependent_arm64.thdl>
+@dlattach <core_arm64.thdl>
+<int> initialized = from_dependency()
+<int> first = bump()
+<int> second = bump()
+<dbl> amount = twice(2.75)
+<str> text = label()
+cons.out("@{initialized} @{first} @{second} @{amount} @{text}")

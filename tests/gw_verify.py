@@ -27,6 +27,26 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["cl.exe", "/nologo", "/LD", str(fixtures / "ffi_arm64.c"),
                         "/Fe:arm64-ci-fixture.dll"], cwd=tmp, check=True)
         expected["ffi_arm64"] = "true false 8.75 45 arm64 -12 2.5 9 5000000000 54321"
+    if run_windows_arm64:
+        import ctypes
+
+        for fixture, output in [
+            ("thdl_arm64_library", "core_arm64.thdl"),
+            ("thdl_arm64_dependency", "dependent_arm64.thdl"),
+        ]:
+            subprocess.run([str(compiler), str(fixtures / (fixture + ".thv")),
+                            "--target", "win-arm64", "--lib", "-o", output], cwd=tmp, check=True)
+            data = (Path(tmp) / output).read_bytes()
+            header = struct.unpack_from("<I", data, 0x3C)[0]
+            assert data[header:header + 6] == b"PE\0\0\x64\xaa"
+            assert struct.unpack_from("<H", data, header + 22)[0] & 0x2000
+            assert struct.unpack_from("<I", data, header + 24 + 112)[0]
+
+        library = ctypes.WinDLL(str(Path(tmp) / "core_arm64.thdl"))
+        metadata_export = getattr(library, "_thava_get_metadata")
+        metadata_export.restype = ctypes.c_char_p
+        assert b"machine:arm64-pe\npe-dll:1\n" in metadata_export()
+        expected["thdl_arm64_consumer"] = "42 43 44 5.5 thdl"
     for target in targets:
         cases = dict(expected)
         if target in ("arm64", "pe-arm64", "cpp"):

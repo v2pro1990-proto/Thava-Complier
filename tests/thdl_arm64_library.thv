@@ -1,0 +1,20 @@
+<int> running = 40
+func seed() {
+    global <int> running
+    running += 1
+}
+seed()
+
+<int> func bump() {
+    global <int> running
+    running += 1
+    return running
+}
+
+<dbl> func twice(<dbl> value) {
+    return value * 2.0
+}
+
+<str> func label() {
+    return "thdl"
+}

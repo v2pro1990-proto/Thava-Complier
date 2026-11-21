@@ -256,6 +256,7 @@ struct DLLibraryInfo {
     uint32_t dataRva = 0;
     uint32_t initOffset = 0;
     bool hasInit = false;
+    bool hasPEInitializer = false;
     bool hasOffsets = false;
     std::vector<uint32_t> relocs;   // image offsets of 8-byte absolute words
 };
@@ -361,6 +362,7 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
         if (libInfo.basename.empty()) libInfo.basename = libBasename;
         if (lineStr.rfind("image:", 0) == 0) { libInfo.imageBase = std::strtoull(lineStr.c_str() + 6, nullptr, 0); continue; }
         if (lineStr.rfind("text:", 0) == 0)  { libInfo.textRva = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); libInfo.hasOffsets = true; continue; }
+        if (lineStr == "pe-dll:1") { libInfo.hasPEInitializer = true; continue; }
         if (lineStr.rfind("machine:", 0) == 0) { libInfo.machine = lineStr.substr(8); continue; }
         if (lineStr.rfind("data:", 0) == 0)  { libInfo.dataRva = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); continue; }
         if (lineStr.rfind("init:", 0) == 0)  { libInfo.initOffset = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); libInfo.hasInit = true; continue; }
@@ -6741,14 +6743,6 @@ int main(int argc, char* argv[]) {
     }
 
     // 4. Code Generation
-    if (!useCppBackend && g_hasDLAttach && isWinArm64Mode) {
-        // Only the Windows ARM64 PE target lacks a module loader: the x86-64 PE
-        // backend uses IAT thunks and the two Linux ELF backends map the library
-        // themselves at run time.
-        std::cerr << "[Thava Compiler] Error: '@dlattach' is not supported by the native "
-                  << "Windows ARM64 backend (it has no module loader); compile with --backend cpp instead.\n";
-        return 1;
-    }
     if (!useCppBackend) {
         if (isArm64Mode) {
             if (isWinArm64Mode) {

@@ -69,6 +69,11 @@ public:
     uint32_t globalBaseCell = 0;
     std::map<std::string, int32_t> globalVarSlots;
     bool emittingProgramBody = false;
+    static constexpr const char* peInitializerName = "_thava_init";
+    static constexpr const char* peMetadataName = "_thava_get_metadata";
+    std::map<std::pair<std::string, std::string>, size_t> peLibraryThunks;
+    std::vector<size_t> peLibraryInitializers;
+
 
     void loadCollectionPtr(const std::string& name, VarInfo* local, arm64::Reg dst) {
         if (local) enc.ldr_imm(dst, arm64::FP, local->offset);
@@ -285,6 +290,8 @@ public:
         if (auto call = dynamic_cast<CallNode*>(n)) {
             auto f = functions.find(call->name);
             if (f != functions.end()) return f->second.returnType;
+            auto imported = g_dlFunctions.find(call->name);
+            if (imported != g_dlFunctions.end()) return imported->second.retType;
             VarInfo* vi = lookupVar(call->name);
             if (vi && vi->type == ThavaType::FUNC) return ThavaType::INT;
             return ThavaType::INT;
@@ -1151,11 +1158,6 @@ public:
             // Imported from a @dlattach library: call its slot in the mapped module.
             auto dlit = g_dlFunctions.find(call->name);
             if (dlit != g_dlFunctions.end()) {
-                if constexpr (!std::is_same_v<TEmitter, ElfArm64Emitter>) {
-                    std::cerr << "[ARM64 Codegen Error]: '@dlattach' is not supported by the "
-                              << "native Windows ARM64 backend\n";
-                    exit(1);
-                }
                 const auto& dlinfo = dlit->second;
                 if (!dlinfo.hasOffset) {
                     std::cerr << "[Thava Compiler] Error: dynamic library '" << dlinfo.libPath
@@ -1168,7 +1170,6 @@ public:
                               << "' takes more than 8 arguments\n";
                     exit(1);
                 }
-                const uint64_t libBase = dlLoadBaseForPath(dlinfo.libPath);
                 const uint32_t reserve = (uint32_t)(16 * n);
                 if (n > 0) enc.sub_rri(arm64::SP, arm64::SP, reserve);
                 for (size_t a = 0; a < n; ++a) {
@@ -1184,11 +1185,22 @@ public:
                 }
                 for (size_t a = 0; a < n; ++a) {
                     arm64::Reg targetReg = static_cast<arm64::Reg>(a);
-                    enc.ldr_imm(targetReg, arm64::SP, (int32_t)(16 * (n - 1 - a)));
+                    const auto argOffset = static_cast<int32_t>(16 * (n - 1 - a));
+                    if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
+                        if (a < dlinfo.paramTypes.size() && isCollectionType(dlinfo.paramTypes[a])) {
+                            emitArgAddress(targetReg, call->args[a].get(), argOffset);
+                            continue;
+                        }
+                    }
+                    enc.ldr_imm(targetReg, arm64::SP, argOffset);
                 }
-                enc.mov_ri64(arm64::X16, (int64_t)libBase + (int64_t)dlinfo.libTextRva +
-                                          (int64_t)dlinfo.funcOffset);
-                enc.blr(arm64::X16);
+                if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
+                    enc.bl(peLibraryThunks.at({dlinfo.libBasename, call->name}));
+                } else {
+                    const auto libBase = dlLoadBaseForPath(dlinfo.libPath);
+                    enc.mov_ri64(arm64::X16, libBase + dlinfo.libTextRva + dlinfo.funcOffset);
+                    enc.blr(arm64::X16);
+                }
                 if (reserve > 0) enc.add_rri(arm64::SP, arm64::SP, reserve);
                 return dlinfo.retType;
             }
@@ -4067,8 +4079,58 @@ public:
         }
     }
 
+    size_t registerPELibraryThunk(const std::string& dll, const std::string& symbol) {
+        const auto key = std::make_pair(dll, symbol);
+        auto existing = peLibraryThunks.find(key);
+        if (existing != peLibraryThunks.end()) return existing->second;
+        emitter.addImport(dll, symbol);
+        return peLibraryThunks.emplace(key, enc.createLabel()).first->second;
+    }
+
+    void registerPELibraryImports() {
+        std::set<std::string> dllNames;
+        for (const auto& path : g_dlLibraries) {
+            const auto library = g_dlLibraryInfos.find(path);
+            if (library == g_dlLibraryInfos.end() || library->second.machine != "arm64-pe" ||
+                !library->second.hasPEInitializer) {
+                std::cerr << "[Thava Compiler] Error: '" << path
+                          << "' is not a Windows ARM64 Thava DLL; rebuild it with --target win-arm64 --lib.\n";
+                exit(1);
+            }
+            std::string key = library->second.basename;
+            for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (!dllNames.insert(key).second) {
+                std::cerr << "[Thava Compiler] Error: multiple attached libraries named '" << key << "'.\n";
+                exit(1);
+            }
+            peLibraryInitializers.push_back(registerPELibraryThunk(library->second.basename, peInitializerName));
+        }
+        for (const auto& [name, info] : g_dlFunctions)
+            registerPELibraryThunk(info.libBasename, name);
+    }
+
+    void emitPELibraryThunks() {
+        for (const auto& [key, label] : peLibraryThunks) {
+            enc.bindLabel(label);
+            enc.adr_data(arm64::X16, emitter.getFuncIatOffsetInRdata(key.first, key.second));
+            enc.ldr_imm(arm64::X16, arm64::X16, 0);
+            enc.br(arm64::X16);
+        }
+    }
+
     bool compileProgram(const std::vector<ASTPtr>& ast, const std::string& outputFile) {
         runtime.init();
+        constexpr bool peTarget = std::is_same_v<TEmitter, PeEmitter>;
+        const bool peLibrary = peTarget && g_isLibraryMode;
+        if constexpr (peTarget) {
+            registerPELibraryImports();
+            if (peLibrary) {
+                emitter.setDll(true);
+                emitter.setDllExportName(outputFile);
+                // Run Thava's module initializer explicitly outside the Windows loader lock.
+                emitter.setEntryPointRva(0);
+            }
+        }
         size_t libInitLabel = 0;
 
         // 1. Jump over functions to program entry point (_start)
@@ -4159,9 +4221,18 @@ public:
 
         // 4. Main Entry Point (_start)
         enc.bindLabel(entryLabel);
-        // Setup main frame
-        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
+        if (peLibrary) {
+            const auto init = enc.createLabel();
+            emitGlobalBase(arm64::X9);
+            enc.cbz(arm64::X9, init);
+            enc.ret();
+            enc.bindLabel(init);
+        }
+        // Setup main frame, preserving the caller's exception chain for a DLL initializer.
+        const int savedFrame = peLibrary ? 32 : 16;
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -savedFrame);
         enc.mov_rr(arm64::FP, arm64::SP);
+        if (peLibrary) enc.str_imm(arm64::X28, arm64::FP, 16);
         enc.sub_rri(arm64::SP, arm64::SP, 512);
 
         // Globals already reserved the first slots of this frame (step 1.2);
@@ -4186,6 +4257,10 @@ public:
 
         // No exception handler is installed at program start.
         enc.movz(arm64::X28, 0, 0);
+
+        if constexpr (peTarget) {
+            for (const auto label : peLibraryInitializers) enc.bl(label);
+        }
 
         topLevelDefers.clear();
 
@@ -4215,9 +4290,26 @@ public:
         exitFunctionScope();
 
         if (g_isLibraryMode) {
-            // Dynamic library: return from the module initializer instead of exiting.
+            if (peLibrary) {
+                if (currentFrameOffset < -512) {
+                    std::cerr << "[ARM64 Codegen Error]: Module initializer exceeds its stack frame.\n";
+                    exit(1);
+                }
+                // Top-level code and any functions called there used the live
+                // initializer frame. Move its globals into persistent image data.
+                uint32_t bytes = static_cast<uint32_t>(-programFrameBase);
+                uint32_t storage = emitter.addDataSlot(bytes + 8);
+                enc.adr_data(arm64::X9, storage + bytes);
+                for (const auto& slot : globalVarSlots) {
+                    enc.ldr_imm(arm64::X10, arm64::FP, slot.second);
+                    enc.str_imm(arm64::X10, arm64::X9, slot.second);
+                }
+                enc.adr_data(arm64::X10, globalBaseCell);
+                enc.str_imm(arm64::X9, arm64::X10, 0);
+                enc.ldr_imm(arm64::X28, arm64::FP, 16);
+            }
             enc.add_rri(arm64::SP, arm64::SP, 512);
-            enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 16);
+            enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, savedFrame);
             enc.ret();
         } else {
             // Same trailing banner as the x86-64 PE/ELF backends (Linux runtime only:
@@ -4232,17 +4324,30 @@ public:
             enc.bl(runtime.lblExit);
         }
 
-        // 5. Emit runtime helper routines
-        runtime.emitHelpers();
-
-        // 5.5. Dynamic library metadata (export table + relocation words)
+        // Dynamic library metadata and PE export registrations precede IAT layout.
         uint32_t metaSlot = 0;
         if (g_isLibraryMode) {
             metaSlot = emitter.addDataSlot(8);
+            if constexpr (peTarget) {
+                emitter.addExport(peInitializerName, static_cast<uint32_t>(enc.getLabelOffset(entryLabel)));
+                emitter.addExport(peMetadataName, static_cast<uint32_t>(enc.code.size()));
+                for (const auto& node : ast) {
+                    if (auto fn = dynamic_cast<FunctionDeclNode*>(node.get())) {
+                        if (fn->name == peInitializerName || fn->name == peMetadataName) {
+                            std::cerr << "[ARM64 Codegen Error]: Reserved DLL export '" << fn->name << "'.\n";
+                            exit(1);
+                        }
+                        emitter.addExport(fn->name, static_cast<uint32_t>(enc.getLabelOffset(functions.at(fn->name).labelId)));
+                    }
+                }
+            }
             enc.adr_data(arm64::X9, metaSlot);
             enc.ldr_imm(arm64::X0, arm64::X9, 0);
+            if (peLibrary) enc.add_rrr(arm64::X0, arm64::X9, arm64::X0);
             enc.ret();
         }
+        runtime.emitHelpers();
+        if constexpr (peTarget) emitPELibraryThunks();
 
         // 6. Resolve all branch and data offset fixups. The .data RVA depends on the
         // final .text size, so the code has to be handed over first; the metadata
@@ -4266,7 +4371,8 @@ public:
             metaStr += "machine:";
             metaStr += std::is_same_v<TEmitter, ElfArm64Emitter> ? "arm64-elf" : "arm64-pe";
             metaStr += "\n";
-            metaStr += "image:" + hexVal(0x400000) + "\n";
+            if (peLibrary) metaStr += "pe-dll:1\n";
+            metaStr += "image:" + hexVal(peLibrary ? PeEmitter::IMAGE_BASE : 0x400000) + "\n";
             metaStr += "text:" + hexVal(emitter.textRva) + "\n";
             metaStr += "data:" + hexVal(dataRva) + "\n";
             if (libInitLabel != 0) {
@@ -4300,7 +4406,8 @@ public:
             }
             metaStr += "__THAVA_METADATA_END__\n";
             uint32_t metaStrOffset = emitter.addStringLiteralOffset(metaStr);
-            emitter.setDataSlotValue(metaSlot, 0x400000 + dataRva + metaStrOffset);
+            emitter.setDataSlotValue(metaSlot, peLibrary ? metaStrOffset - metaSlot
+                                                        : 0x400000 + dataRva + metaStrOffset);
         }
         enc.applyFixups(emitter.textRva, dataRva);
 
