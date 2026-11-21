@@ -6841,13 +6841,13 @@ int main(int argc, char* argv[]) {
     if (isI686Mode) {
         cppOutput << "#if !(defined(__i386__) || defined(_M_IX86)) || "
                   << (isElfMode ? "!defined(__linux__)" : "!defined(_WIN32)")
-                  << "\\n#error The selected C++ compiler must target "
+                  << "\n#error The selected C++ compiler must target "
                   << (isElfMode ? "Linux" : "Windows")
-                  << " i686.\\n#endif\\n";
+                  << " i686.\n#endif\n";
     } else if (isWinArm64Mode) {
-        cppOutput << "#if !defined(_WIN32) || !(defined(__aarch64__) || defined(_M_ARM64))\\n"
-                  << "#error Select an ARM64 Windows C++ compiler or an ARM64 MSVC developer environment.\\n"
-                  << "#endif\\n";
+        cppOutput << "#if !defined(_WIN32) || !(defined(__aarch64__) || defined(_M_ARM64))\n"
+                  << "#error Select an ARM64 Windows C++ compiler or an ARM64 MSVC developer environment.\n"
+                  << "#endif\n";
     }
     cppOutput << "// === Thava Compiler Generated C++ Source ===\n"
               << "// Optimizations: Fast I/O, pass-by-const-ref, inline runtime helpers\n\n";
