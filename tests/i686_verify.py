@@ -73,7 +73,15 @@ with tempfile.TemporaryDirectory() as tmp:
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
         for filename, expected, input_data in [
             ("gw.thv", ["4 3 AB new 9"], None),
-            ("i686_class.thv", ["true 5000000021 boxed 3.75 5000000003", "Cannot access a member of none"], None),
+            ("i686_class.thv", [
+                "true 5000000021 boxed 3.75 5000000003", "Cannot access a member of none",
+                "5000000012", "int string",
+            ], None),
+            ("i686_mixed.thv", [
+                "1 8 bells 4.5 box true true",
+                "[8, bells, [4.5, false], {name: box}, none]",
+                "one 81 1 13", "[1, true, x]", "missing caught", "[rebound]",
+            ], None),
             ("i686_struct.thv", [
                 "ABD -25536 5000000017 7 true true true boxed",
                 "ABDD -1 5000000000 box",
@@ -133,8 +141,34 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert output.stdout.splitlines() == expected, output.stdout
             print(target, filename, "OK")
 
+        module_build = Path(tmp) / "module-build"
+        module_run = Path(tmp) / "module-run"
+        module_build.mkdir()
+        module_run.mkdir()
+        modules = [("thdl_arm64_library", "core_arm64.thdl", "bump"),
+                   ("thdl_arm64_dependency", "dependent_arm64.thdl", "from_dependency")]
+        for fixture, name, exported in modules:
+            library = module_build / name
+            subprocess.run([str(compiler), str(source.with_name(fixture + ".thv")),
+                            "--target", target, "--native", "--lib", "-O2", "-o", str(library)],
+                           cwd=module_build, env=env, check=True, timeout=30)
+            info = subprocess.run([str(compiler), "--info", str(library)], cwd=module_build,
+                                  env=env, check=True, stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+            assert (b"machine:i686-pe\n" if windows else b"machine:i686-elf\n") in library.read_bytes()
+            assert exported in info.stdout, info.stdout
+        consumer = module_run / ("consumer.exe" if windows else "consumer")
+        subprocess.run([str(compiler), str(source.with_name("thdl_arm64_consumer.thv")),
+                        "--target", target, "--native", "-O2", "-o", str(consumer)],
+                       cwd=module_build, env=env, check=True, timeout=30)
+        for _, name, _ in modules:
+            (module_build / name).replace(module_run / name)
+        result = subprocess.run([str(consumer)], cwd=module_run, check=True,
+                                stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+        assert result.stdout.splitlines() == ["42 43 44 5.5 thdl", "45 4.5 2 9"], result.stdout
+        print(target, "native libraries, dependencies and moved modules OK")
+
         source = Path(tmp) / "unsupported.thv"
-        source.write_text('<lst> collection = [1, "mixed"]\n', encoding="utf-8")
+        source.write_text('class Item {}\n<lst> collection = [Item()]\n', encoding="utf-8")
         rejected = Path(tmp) / ("unsupported.exe" if windows else "unsupported")
         result = subprocess.run([str(compiler), str(source), "--target", target, "--native",
                                  "-o", str(rejected)], cwd=tmp, env=env, stdout=subprocess.PIPE,

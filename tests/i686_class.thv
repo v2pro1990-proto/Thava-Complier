@@ -61,3 +61,23 @@ try {
 } except RuntimeError as message {
     cons.out(message)
 }
+
+<int64> func throughBase(<Box> box) {
+    return box.total()
+}
+
+<Box> base = makeBox(2)
+<int64> virtualTotal = throughBase(base)
+cons.out(virtualTotal)
+
+class Overloaded {
+    <str> kind
+    func Overloaded(<int> value) { locvar.kind = "int" }
+    func Overloaded(<str> value) { locvar.kind = "string" }
+}
+
+<Overloaded> numeric = Overloaded(4)
+<Overloaded> textual = Overloaded("text")
+<str> a = numeric.kind
+<str> b = textual.kind
+cons.out("@{a} @{b}")

@@ -56,6 +56,7 @@ public:
         return true;
     }
     void jump(size_t label) { bytes({0xe9}); branchTo(label); }
+    void jumpReg(Reg target) { bytes({0xff}); modrm(3, 4, target); }
     void jump(Cond cond, size_t label) { bytes({0x0f, uint8_t(0x80 + cond)}); branchTo(label); }
     void call(size_t label) { bytes({0xe8}); branchTo(label); }
     void callReg(Reg target) { bytes({0xff}); modrm(3, 2, target); }

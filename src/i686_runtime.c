@@ -387,7 +387,10 @@ char *rt_str_index(const char *s, i64 index, Allocate allocate, u32 image) {
     return rt_substring(s, index + 1, index + 1, allocate, image);
 }
 
-typedef struct { u64 key, value; } Entry;
+#include "i686_value_kinds.h"
+
+typedef struct { u64 bits; u32 kind; } Value;
+typedef struct { Value key, value; } Entry;
 typedef struct { u32 length, capacity; Entry *entries; } Collection;
 
 Collection *rt_collection_new(Allocate allocate, u32 image) {
@@ -416,41 +419,69 @@ static i64 position(Collection *list, i64 index) {
 u32 rt_collection_len(Collection *list) { return list ? list->length : 0; }
 void rt_collection_clear(Collection *list) { if (list) list->length = 0; }
 
-u64 rt_list_get(Collection *list, i64 index, u64 fallback) {
-    if (!list) return fallback;
-    index = position(list, index);
-    return index >= 0 && index < list->length ? list->entries[(u32)index].value : fallback;
+static const Value empty_value = {0, VALUE_NONE};
+
+Value *rt_value_new(Value value, Allocate allocate, u32 image) {
+    Value *copy = (Value *)allocate(sizeof(Value), image);
+    if (copy) *copy = value;
+    return copy;
 }
 
-void rt_list_set(Collection *list, i64 index, u64 value) {
+static const Value *list_item(Collection *list, i64 index) {
+    if (!list) return 0;
+    index = position(list, index);
+    return index >= 0 && index < list->length ? &list->entries[(u32)index].value : 0;
+}
+
+void rt_list_set(Collection *list, i64 index, Value value) {
     if (!list) return;
     index = position(list, index);
     if (index >= 0 && index < list->length) list->entries[(u32)index].value = value;
 }
 
-void rt_list_insert(Collection *list, i64 index, u64 value, Allocate allocate, u32 image) {
+void rt_list_insert(Collection *list, i64 index, Value value, Allocate allocate, u32 image) {
     if (!reserve(list, allocate, image)) return;
     index = position(list, index);
     if (index < 0) index = 0;
     if (index > list->length) index = list->length;
     for (u32 i = list->length; i > (u32)index; --i) list->entries[i] = list->entries[i - 1];
-    list->entries[(u32)index].key = 0;
+    list->entries[(u32)index].key = empty_value;
     list->entries[(u32)index].value = value;
     ++list->length;
 }
 
-static int scalar_equal(u64 a, u64 b, u32 kind) {
-    if (kind == 1) {
-        const char *x = (const char *)(u32)a, *y = (const char *)(u32)b;
+static int sequence_kind(u32 kind) { return kind == VALUE_LIST || kind == VALUE_TUPLE; }
+
+static int value_equal_at(Value a, Value b, u32 depth) {
+    if (a.kind != b.kind && !(sequence_kind(a.kind) && sequence_kind(b.kind))) return 0;
+    if (a.kind == VALUE_STRING) {
+        const char *x = (const char *)(u32)a.bits, *y = (const char *)(u32)b.bits;
         while (*x && *x == *y) ++x, ++y;
         return *x == *y;
     }
-    if (kind == 2) {
-        Float x = {.bits = a}, y = {.bits = b};
+    if (a.kind == VALUE_REAL) {
+        Float x = {.bits = a.bits}, y = {.bits = b.bits};
         return x.number == y.number;
     }
-    return a == b;
+    if (sequence_kind(a.kind) || a.kind == VALUE_DICT) {
+        if (a.bits == b.bits) return 1;
+        const Collection *x = (const Collection *)(u32)a.bits, *y = (const Collection *)(u32)b.bits;
+        u32 size = x ? x->length : 0;
+        if (size != (y ? y->length : 0) || depth >= 32) return 0;
+        for (u32 i = 0; i < size; ++i) {
+            u32 j = i;
+            if (a.kind == VALUE_DICT) {
+                for (j = 0; j < size; ++j)
+                    if (value_equal_at(x->entries[i].key, y->entries[j].key, depth + 1)) break;
+            }
+            if (j == size || !value_equal_at(x->entries[i].value, y->entries[j].value, depth + 1)) return 0;
+        }
+        return 1;
+    }
+    return a.bits == b.bits;
 }
+
+static int value_equal(Value a, Value b) { return value_equal_at(a, b, 0); }
 
 static void erase(Collection *list, u32 index) {
     for (u32 i = index + 1; i < list->length; ++i) list->entries[i - 1] = list->entries[i];
@@ -463,39 +494,34 @@ void rt_list_remove_at(Collection *list, i64 index) {
     if (index >= 0 && index < list->length) erase(list, (u32)index);
 }
 
-int rt_list_find(Collection *list, u64 value, u32 kind) {
+int rt_list_find(Collection *list, Value value) {
     for (u32 i = 0; list && i < list->length; ++i)
-        if (scalar_equal(list->entries[i].value, value, kind)) return i;
+        if (value_equal(list->entries[i].value, value)) return i;
     return -1;
 }
 
-void rt_list_remove_value(Collection *list, u64 value, u32 kind) {
-    int index = rt_list_find(list, value, kind);
+void rt_list_remove_value(Collection *list, Value value) {
+    int index = rt_list_find(list, value);
     if (index >= 0) erase(list, (u32)index);
 }
 
-static int dict_find(Collection *dict, u64 key, u32 kind) {
+static int dict_find(Collection *dict, Value key) {
     for (u32 i = 0; dict && i < dict->length; ++i)
-        if (scalar_equal(dict->entries[i].key, key, kind)) return i;
+        if (value_equal(dict->entries[i].key, key)) return i;
     return -1;
 }
 
-u32 rt_dict_has(Collection *dict, u64 key, u32 kind) {
-    return dict_find(dict, key, kind) >= 0;
+u32 rt_dict_has(Collection *dict, Value key) {
+    return dict_find(dict, key) >= 0;
 }
 
-u64 rt_dict_get(Collection *dict, u64 key, u32 kind, u64 fallback) {
-    int index = dict_find(dict, key, kind);
-    return index < 0 ? fallback : dict->entries[index].value;
-}
-
-void rt_dict_remove(Collection *dict, u64 key, u32 kind) {
-    int index = dict_find(dict, key, kind);
+void rt_dict_remove(Collection *dict, Value key) {
+    int index = dict_find(dict, key);
     if (index >= 0) erase(dict, (u32)index);
 }
 
-void rt_dict_set(Collection *dict, u64 key, u64 value, u32 kind, Allocate allocate, u32 image) {
-    int index = dict_find(dict, key, kind);
+void rt_dict_set(Collection *dict, Value key, Value value, Allocate allocate, u32 image) {
+    int index = dict_find(dict, key);
     if (index < 0) {
         if (!reserve(dict, allocate, image)) return;
         index = dict->length++;
@@ -517,7 +543,7 @@ Collection *rt_split(const char *s, const char *delimiter, Allocate allocate, u3
     if (!n) {
         while (*s) {
             const char *end = next_utf8(s);
-            rt_list_insert(list, i++, (u32)slice(s, end - s, allocate, image), allocate, image);
+            rt_list_insert(list, i++, (Value){(u32)slice(s, end - s, allocate, image), VALUE_STRING}, allocate, image);
             s = end;
         }
         return list;
@@ -525,7 +551,7 @@ Collection *rt_split(const char *s, const char *delimiter, Allocate allocate, u3
     const char *part = s;
     for (;;) {
         if (!*s || matches(s, delimiter)) {
-            rt_list_insert(list, i++, (u32)slice(part, s - part, allocate, image), allocate, image);
+            rt_list_insert(list, i++, (Value){(u32)slice(part, s - part, allocate, image), VALUE_STRING}, allocate, image);
             if (!*s) break;
             s += n;
             part = s;
@@ -537,7 +563,9 @@ Collection *rt_split(const char *s, const char *delimiter, Allocate allocate, u3
 char *rt_join(const char *delimiter, Collection *list, Allocate allocate, u32 image) {
     u32 size = 0, n = bytes(delimiter), length = rt_collection_len(list);
     for (u32 i = 0; i < length; ++i) {
-        u32 item = bytes((const char *)(u32)list->entries[i].value);
+        Value value = list->entries[i].value;
+        if (value.kind != VALUE_STRING) return "";
+        u32 item = bytes((const char *)(u32)value.bits);
         if (item >= ~0u - size) return "";
         size += item;
         if (i) {
@@ -550,28 +578,90 @@ char *rt_join(const char *delimiter, Collection *list, Allocate allocate, u32 im
     char *out = result;
     for (u32 i = 0; i < length; ++i) {
         if (i) out = copy(out, delimiter, n);
-        const char *item = (const char *)(u32)list->entries[i].value;
+        const char *item = (const char *)(u32)list->entries[i].value.bits;
         out = copy(out, item, bytes(item));
     }
     *out = 0;
     return result;
 }
 
-const char *rt_collection_format(Collection *collection, u32 format, Allocate allocate, u32 image) {
+static i64 value_int(Value value) {
+    return value.kind == VALUE_REAL ? (i64)(Float){.bits = value.bits}.number :
+        value.kind == VALUE_INT || value.kind == VALUE_BOOL ? (i64)value.bits : 0;
+}
+
+u64 rt_value_as(const Value *value, u32 kind) {
+    Value v = value ? *value : empty_value;
+    if (kind == v.kind || (sequence_kind(kind) && sequence_kind(v.kind))) return v.bits;
+    if (kind == VALUE_STRING) return (u32)"";
+    if (kind == VALUE_INT) return (u64)value_int(v);
+    if (kind == VALUE_BOOL) return v.kind == VALUE_REAL ? (Float){.bits = v.bits}.number != 0 : value_int(v) != 0;
+    if (kind == VALUE_REAL) return (Float){.number = (double)value_int(v)}.bits;
+    return 0;
+}
+
+Value *rt_value_index(Value base, Value key, Value fallback, u32 missing_ok, Allocate allocate, u32 image) {
+    Collection *collection = (Collection *)(u32)base.bits;
+    const Value *item = 0;
+    if (sequence_kind(base.kind)) {
+        if (key.kind != VALUE_INT) return 0;
+        item = list_item(collection, (i64)key.bits);
+    } else if (base.kind == VALUE_DICT) {
+        int index = dict_find(collection, key);
+        if (index >= 0) item = &collection->entries[index].value;
+    } else if (base.kind == VALUE_STRING && key.kind == VALUE_INT) {
+        const char *s = (const char *)(u32)base.bits;
+        i64 index = (i64)key.bits;
+        if (index < 0) index += bytes(s);
+        return rt_value_new((Value){(u32)rt_str_index(s, index, allocate, image), VALUE_STRING}, allocate, image);
+    } else return 0;
+    return item || missing_ok ? rt_value_new(item ? *item : fallback, allocate, image) : 0;
+}
+
+Value *rt_collection_current(Collection *collection, Value key, u32 dict, Allocate allocate, u32 image) {
+    return rt_value_index((Value){(u32)collection, dict ? VALUE_DICT : VALUE_LIST}, key,
+                          empty_value, 0, allocate, image);
+}
+
+void rt_collection_write(Collection *collection, Value key, Value value, u32 mode, Allocate allocate, u32 image) {
+    if (mode == COLLECTION_DICT_SET) rt_dict_set(collection, key, value, allocate, image);
+    else if (key.kind == VALUE_INT) {
+        if (mode == COLLECTION_SET) rt_list_set(collection, (i64)key.bits, value);
+        else rt_list_insert(collection, (i64)key.bits, value, allocate, image);
+    }
+}
+
+u32 rt_value_contains(Value needle, Value container) {
+    if (container.kind == VALUE_STRING && needle.kind == VALUE_STRING)
+        return rt_contains((const char *)(u32)container.bits, (const char *)(u32)needle.bits);
+    if (container.kind == VALUE_DICT) return rt_dict_has((Collection *)(u32)container.bits, needle);
+    if (sequence_kind(container.kind)) return rt_list_find((Collection *)(u32)container.bits, needle) >= 0;
+    return 0;
+}
+
+u32 rt_value_len(const Value *value) {
+    if (!value) return 0;
+    if (value->kind == VALUE_STRING) return bytes((const char *)(u32)value->bits);
+    if (sequence_kind(value->kind) || value->kind == VALUE_DICT)
+        return rt_collection_len((Collection *)(u32)value->bits);
+    return 0;
+}
+
+typedef struct FormatPath { Collection *collection; const struct FormatPath *parent; } FormatPath;
+static const char *format_value(Value value, const FormatPath *path, u32 depth, Allocate allocate, u32 image);
+
+static const char *format_collection(Collection *collection, int dict, const FormatPath *parent,
+                                     u32 depth, Allocate allocate, u32 image) {
+    for (const FormatPath *p = parent; p; p = p->parent) if (p->collection == collection) return "...";
+    const FormatPath path = {collection, parent};
     u32 length = rt_collection_len(collection), size = 3;
     if (length > (~0u / 2) / sizeof(const char *)) return "";
     const char **pieces = length ? (const char **)allocate(length * 2 * sizeof(*pieces), image) : 0;
     if (!pieces && length) return "";
-    int dict = format & 0x100;
-    unsigned kinds[] = {format & 15, (format >> 4) & 15};
     for (u32 i = 0; i < length; ++i) {
-        u64 values[] = {collection->entries[i].key, collection->entries[i].value};
+        Value values[] = {collection->entries[i].key, collection->entries[i].value};
         for (int k = !dict; k < 2; ++k) {
-            const char *piece;
-            if (kinds[k] == 1) piece = (const char *)(u32)values[k];
-            else if (kinds[k] == 2) piece = rt_format_float(values[k], allocate, image);
-            else if (kinds[k] == 3) piece = values[k] ? "true" : "false";
-            else piece = rt_format_int(values[k], allocate, image);
+            const char *piece = format_value(values[k], &path, depth + 1, allocate, image);
             pieces[i * 2 + k] = piece;
             u32 n = bytes(piece);
             if (size > ~0u - 4 || n > ~0u - size - 4) return "";
@@ -593,6 +683,94 @@ const char *rt_collection_format(Collection *collection, u32 format, Allocate al
     *out++ = dict ? '}' : ']';
     *out = 0;
     return result;
+}
+
+static const char *format_value(Value value, const FormatPath *path, u32 depth, Allocate allocate, u32 image) {
+    switch (value.kind) {
+        case VALUE_STRING: return (const char *)(u32)value.bits;
+        case VALUE_REAL: return rt_format_float(value.bits, allocate, image);
+        case VALUE_BOOL: return value.bits ? "true" : "false";
+        case VALUE_INT: return rt_format_int(value.bits, allocate, image);
+        case VALUE_LIST: case VALUE_TUPLE: case VALUE_DICT:
+            return depth < 32 ? format_collection((Collection *)(u32)value.bits, value.kind == VALUE_DICT,
+                                                  path, depth, allocate, image) : "...";
+        default: return "none";
+    }
+}
+
+const char *rt_collection_format(Collection *collection, u32 dict, Allocate allocate, u32 image) {
+    return format_collection(collection, dict, 0, 0, allocate, image);
+}
+
+const char *rt_value_format(const Value *value, Allocate allocate, u32 image) {
+    return format_value(value ? *value : empty_value, 0, 0, allocate, image);
+}
+
+static u64 integer_divide(u64 a, u64 b, int modulo) {
+    int neg_a = (i64)a < 0, neg_b = (i64)b < 0;
+    if (neg_a) a = 0 - a;
+    if (neg_b) b = 0 - b;
+    u64 remainder = 0;
+    for (int i = 0; i < 64; ++i) {
+        remainder = (remainder << 1) | (a >> 63);
+        a <<= 1;
+        if (remainder >= b) remainder -= b, a |= 1;
+    }
+    return modulo ? (neg_a ? 0 - remainder : remainder) : (neg_a != neg_b ? 0 - a : a);
+}
+
+static int numeric_kind(u32 kind) { return kind == VALUE_INT || kind == VALUE_REAL; }
+
+Value *rt_value_binary(Value a, Value b, u32 op, Allocate allocate, u32 image) {
+    Value out = {0, VALUE_INT};
+    u64 x = a.bits, y = b.bits;
+    if (op == VALUE_ADD && a.kind == VALUE_STRING && b.kind == VALUE_STRING) {
+        out = (Value){(u32)rt_concat((const char *)(u32)x, (const char *)(u32)y, allocate, image), VALUE_STRING};
+    } else if (op == VALUE_MUL && ((a.kind == VALUE_STRING && b.kind == VALUE_INT) ||
+                                  (a.kind == VALUE_INT && b.kind == VALUE_STRING))) {
+        out = (Value){(u32)rt_repeat((const char *)(u32)(a.kind == VALUE_STRING ? x : y),
+                                    (i64)(a.kind == VALUE_INT ? x : y), allocate, image), VALUE_STRING};
+    } else if (numeric_kind(a.kind) && numeric_kind(b.kind) && (a.kind == VALUE_REAL || b.kind == VALUE_REAL)) {
+        u32 flags = (a.kind == VALUE_INT ? 1 : 0) | (b.kind == VALUE_INT ? 2 : 0);
+        if (op <= VALUE_IDIV) {
+            out.bits = rt_float_binary(x, y, flags, op == VALUE_IDIV ? VALUE_DIV : op);
+            out.kind = op == VALUE_IDIV ? VALUE_INT : VALUE_REAL;
+            if (op == VALUE_IDIV) out.bits = (i64)(Float){.bits = out.bits}.number;
+        } else if (op >= VALUE_EQ && op <= VALUE_GE) {
+            out = (Value){rt_float_binary(x, y, flags, op - VALUE_EQ + 4), VALUE_BOOL};
+        } else return 0;
+    } else if (op == VALUE_EQ || op == VALUE_NE) {
+        out = (Value){value_equal(a, b) ^ (op == VALUE_NE), VALUE_BOOL};
+    } else if (op >= VALUE_LT && op <= VALUE_GE) {
+        int order;
+        if ((a.kind == VALUE_INT && b.kind == VALUE_INT) || (a.kind == VALUE_BOOL && b.kind == VALUE_BOOL))
+            order = ((i64)x > (i64)y) - ((i64)x < (i64)y);
+        else if (a.kind == VALUE_STRING && b.kind == VALUE_STRING) {
+            const unsigned char *s = (const unsigned char *)(u32)x, *t = (const unsigned char *)(u32)y;
+            while (*s && *s == *t) ++s, ++t;
+            order = (int)*s - (int)*t;
+        } else return 0;
+        out = (Value){op == VALUE_LT ? order < 0 : op == VALUE_LE ? order <= 0 :
+                      op == VALUE_GT ? order > 0 : order >= 0, VALUE_BOOL};
+    } else if (a.kind == VALUE_INT && b.kind == VALUE_INT) {
+        switch (op) {
+            case VALUE_ADD: out.bits = x + y; break;
+            case VALUE_SUB: out.bits = x - y; break;
+            case VALUE_MUL: out.bits = x * y; break;
+            case VALUE_DIV: case VALUE_IDIV: case VALUE_MOD:
+                if (!y) return 0;
+                out.bits = integer_divide(x, y, op == VALUE_MOD);
+                break;
+            case VALUE_POW: out.bits = rt_int_pow(x, y); break;
+            case VALUE_AND: out.bits = x & y; break;
+            case VALUE_OR: out.bits = x | y; break;
+            case VALUE_XOR: out.bits = x ^ y; break;
+            case VALUE_SHL: out.bits = x << (y & 63); break;
+            case VALUE_SHR: out.bits = (i64)x >> (y & 63); break;
+            default: return 0;
+        }
+    } else return 0;
+    return rt_value_new(out, allocate, image);
 }
 
 typedef int (*ReadFileByte)(u32 handle, u32 image);
@@ -644,7 +822,7 @@ Collection *rt_file_lines(u32 handle, ReadFileByte read_byte, Allocate allocate,
     if (!lines) return 0;
     const char *line;
     while ((line = read_file(handle, 1, read_byte, allocate, image)) != 0)
-        rt_list_insert(lines, lines->length, (u32)line, allocate, image);
+        rt_list_insert(lines, lines->length, (Value){(u32)line, VALUE_STRING}, allocate, image);
     return lines;
 }
 
@@ -708,37 +886,38 @@ u64 rt_randfloat(u64 a, u64 b, u32 *state) {
     return result.bits;
 }
 
-static double list_weight(Collection *weights, u32 index, u32 floating_values) {
+static double list_weight(Collection *weights, u32 index) {
     if (!weights || index >= weights->length) return 0.0;
-    Float n = {.bits = weights->entries[index].value};
-    double value = floating_values ? n.number : (double)(i64)n.bits;
+    Value n = weights->entries[index].value;
+    double value = n.kind == VALUE_REAL ? (Float){.bits = n.bits}.number :
+        n.kind == VALUE_INT ? (double)(i64)n.bits : 0.0;
     return value > 0.0 && value <= 0x1.fffffffffffffp1023 ? value : 0.0;
 }
 
-u64 rt_randres(Collection *items, Collection *weights, u32 floating_values, u64 fallback, u32 *state) {
+Value *rt_randres(Collection *items, Collection *weights, Value fallback, u32 *state, Allocate allocate, u32 image) {
     const u32 n = rt_collection_len(items);
-    if (!n) return fallback;
+    if (!n) return rt_value_new(fallback, allocate, image);
     if (weights) {
         double maximum = 0.0;
         for (u32 i = 0; i < n; ++i) {
-            double w = list_weight(weights, i, floating_values);
+            double w = list_weight(weights, i);
             if (w > maximum) maximum = w;
         }
         if (maximum > 0.0) {
             long double sum = 0.0;
             u32 last = 0;
             for (u32 i = 0; i < n; ++i) {
-                double w = list_weight(weights, i, floating_values);
+                double w = list_weight(weights, i);
                 if (w > 0.0) sum += (long double)w / maximum, last = i;
             }
             long double choice = sum * random_unit(state);
             for (u32 i = 0; i < n; ++i) {
-                choice -= (long double)list_weight(weights, i, floating_values) / maximum;
-                if (choice < 0.0) return items->entries[i].value;
+                choice -= (long double)list_weight(weights, i) / maximum;
+                if (choice < 0.0) return rt_value_new(items->entries[i].value, allocate, image);
             }
-            return items->entries[last].value;
+            return rt_value_new(items->entries[last].value, allocate, image);
         }
     }
-    return items->entries[(u32)random_less_than(n, state)].value;
+    return rt_value_new(items->entries[(u32)random_less_than(n, state)].value, allocate, image);
 }
 #include "i686_os_runtime.h"

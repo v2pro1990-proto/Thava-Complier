@@ -96,7 +96,7 @@ inline std::string typeToString(ThavaType type) {
 }
 
 inline ThavaType stringToType(const std::string& s) {
-    if (s == "int") return ThavaType::INT;
+    if (s == "int" || s == "int16" || s == "int64") return ThavaType::INT;
     if (s == "fl" || s == "float") return ThavaType::FLOAT;
     if (s == "dbl" || s == "double") return ThavaType::DOUBLE;
     if (s == "bl" || s == "bool") return ThavaType::BOOL;
@@ -227,6 +227,8 @@ struct DLFunctionInfo {
     ThavaType retType = ThavaType::VOID;
     std::vector<ThavaType> paramTypes;
     std::vector<std::string> paramNames;
+    std::string returnWidth;
+    std::vector<std::string> paramWidths;
     std::string libPath;
     std::string libBasename;
     uint32_t libTextRva = 0;   // image offset of the library's .text
@@ -383,6 +385,8 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
         ThavaType retType = ThavaType::VOID;
         std::vector<ThavaType> paramTypes;
         std::vector<std::string> paramNames;
+        std::string returnWidth;
+        std::vector<std::string> paramWidths;
         uint32_t funcOffset = 0;
         bool hasOffset = false;
 
@@ -392,7 +396,9 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
             if (part.rfind("func:", 0) == 0) {
                 fname = part.substr(5);
             } else if (part.rfind("ret:", 0) == 0) {
-                retType = stringToType(part.substr(4));
+                const auto name = part.substr(4);
+                retType = stringToType(name);
+                if (name == "int16" || name == "int64") returnWidth = name;
             } else if (part.rfind("off:", 0) == 0) {
                 funcOffset = (uint32_t)std::strtoul(part.c_str() + 4, nullptr, 0);
                 hasOffset = true;
@@ -411,6 +417,7 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
                         std::string pName = (spacePos != std::string::npos) ? pClean.substr(spacePos + 1) : "";
                         paramTypes.push_back(stringToType(pTypeName));
                         paramNames.push_back(pName);
+                        paramWidths.push_back(pTypeName == "int16" || pTypeName == "int64" ? pTypeName : "");
                     }
                 }
             }
@@ -422,6 +429,8 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
             info.retType = retType;
             info.paramTypes = paramTypes;
             info.paramNames = paramNames;
+            info.returnWidth = returnWidth;
+            info.paramWidths = std::move(paramWidths);
             info.libPath = libPath;
             info.libBasename = libBasename;
             info.libTextRva = g_dlLibraryInfos[libPath].textRva;

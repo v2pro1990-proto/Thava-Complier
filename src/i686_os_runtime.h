@@ -13,6 +13,53 @@ __attribute__((naked, noipa)) static int linux_call(u32 n, u32 a, u32 b, u32 c, 
 }
 #define LINUX(n,a,b,c) linux_call((n),(u32)(a),(u32)(b),(u32)(c),0,0)
 
+__attribute__((naked, noipa)) static u32 linux_map_module(int fd, u32 size) {
+    __asm__ volatile(
+        "push %ebx\n\tpush %esi\n\tpush %edi\n\tpush %ebp\n\t"
+        "xor %ebx,%ebx\n\tmov 24(%esp),%ecx\n\tmov $3,%edx\n\tmov $2,%esi\n\t"
+        "mov 20(%esp),%edi\n\txor %ebp,%ebp\n\tmov $192,%eax\n\tint $0x80\n\t"
+        "pop %ebp\n\tpop %edi\n\tpop %esi\n\tpop %ebx\n\tret");
+}
+
+typedef struct LoadedModule {
+    const char *path;
+    void *base;
+    struct LoadedModule *next;
+} LoadedModule;
+
+void *rt_linux_dl_open(const char *path, const char *basename, u32 data_rva,
+                       LoadedModule **registry, Allocate allocate, u32 image) {
+    for (LoadedModule *node = *registry; node; node = node->next) {
+        if (value_equal((Value){(u32)path, VALUE_STRING}, (Value){(u32)node->path, VALUE_STRING})) return node->base;
+    }
+    int fd = LINUX(5, path, 0, 0);
+    if (fd < 0) fd = LINUX(5, basename, 0, 0);
+    if (fd < 0) return 0;
+    int size = LINUX(19, fd, 0, 2);
+    u32 address = 0;
+    if (size > 0 && data_rva >= 8192 && !(data_rva & 4095) && data_rva < (u32)size)
+        address = linux_map_module(fd, (u32)size);
+    LINUX(6, fd, 0, 0);
+    if (!address || address >= (u32)-4095) return 0;
+
+    const u32 *header = (const u32 *)address;
+    if (header[0] != 0x464c457f || (header[1] & 0xffffff) != 0x010101 ||
+        header[4] != 0x00030003 || header[6] != 0 || header[7] != 52 ||
+        header[13] != 1 || header[17] != data_rva || header[19] != 5 ||
+        header[21] != 1 || header[22] != data_rva || header[25] > (u32)size - data_rva || header[27] != 6 ||
+        LINUX(125, address, data_rva, 5) < 0) {
+        LINUX(91, address, size, 0);
+        return 0;
+    }
+    LoadedModule *node = (LoadedModule *)allocate(sizeof(LoadedModule), image);
+    if (!node) { LINUX(91, address, size, 0); return 0; }
+    node->path = path;
+    node->base = (void *)address;
+    node->next = *registry;
+    *registry = node;
+    return node->base;
+}
+
 static int valid_env_key(const char *key) {
     if (!*key) return 0;
     while (*key) if (*key++ == '=') return 0;
@@ -80,7 +127,7 @@ static Collection *linux_list(const char *path, Allocate allocate, u32 image) {
             u32 len = 0;
             while (len < record - 19 && name[len]) ++len;
             if (len < record - 19 && !dot_entry(name))
-                rt_list_insert(result, result->length, (u32)slice(name, len, allocate, image), allocate, image);
+                rt_list_insert(result, result->length, (Value){(u32)slice(name, len, allocate, image), VALUE_STRING}, allocate, image);
             i += record;
         }
     }
@@ -111,7 +158,7 @@ static Collection *windows_list(const char *path, WinFindFirst first, WinFindNex
     do {
         const char *name = data.raw + 44;
         if (!dot_entry(name))
-            rt_list_insert(result, result->length, (u32)slice(name, bytes(name), allocate, image), allocate, image);
+            rt_list_insert(result, result->length, (Value){(u32)slice(name, bytes(name), allocate, image), VALUE_STRING}, allocate, image);
     } while (next(handle, data.raw));
     close(handle);
     return result;

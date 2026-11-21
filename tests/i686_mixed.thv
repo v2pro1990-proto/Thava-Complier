@@ -1,0 +1,51 @@
+<int> calls = 0
+<int> func index() {
+    global <int> calls
+    calls += 1
+    return 0
+}
+
+<lst> func make() {
+    return [3, "bell", [4.5, false], {"name": "box"}, none]
+}
+
+class Holder {
+    <lst> items = make()
+
+    <lst> func itemsList() {
+        return locvar.items
+    }
+}
+
+<Holder> holder = Holder()
+<lst> items = holder.itemsList()
+items[index()] += 5
+items[1] += "s"
+<dbl> weight = items[2][0]
+<str> name = items[3]["name"]
+<bool> contains = "bells" in items
+<bool> tagged = false in items[2]
+cons.out("@{calls} @{items[0]} @{items[1]} @{weight} @{name} @{contains} @{tagged}")
+cons.out(items)
+
+<dict> dict = {1: "one", "1": 9, false: [7]}
+dict["1"] **= 2
+<int> length = len(dict[false])
+<int> fallback = dict.get("missing", 13)
+<str> intKey = dict[1]
+<int> stringKey = dict["1"]
+cons.out("@{intKey} @{stringKey} @{length} @{fallback}")
+<multype> values = [1, true, "x"]
+cons.out(values)
+try {
+    cons.out(items[99])
+} except RuntimeError {
+    cons.out("missing caught")
+}
+
+func replaceItems(<lst> target) {
+    target = ["rebound"]
+}
+
+replaceItems(holder.items)
+cons.out(holder.itemsList())

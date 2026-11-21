@@ -19,7 +19,7 @@ public:
     }
 
     static bool write(const std::string& path, const std::vector<uint8_t>& code,
-                      const std::vector<uint8_t>& data) {
+                      const std::vector<uint8_t>& data, bool module = false) {
         const uint32_t dataOffset = dataRva(code.size());
         std::vector<uint8_t> image(dataOffset + data.size(), 0);
         auto put = [&](size_t offset, uint32_t value, size_t size = 4) {
@@ -27,10 +27,10 @@ public:
         };
         image[0] = 0x7f; image[1] = 'E'; image[2] = 'L'; image[3] = 'F';
         image[4] = 1; image[5] = 1; image[6] = 1; // ELF32, little-endian, current version
-        put(16, 2, 2); // ET_EXEC
+        put(16, module ? 3 : 2, 2); // ET_DYN or ET_EXEC
         put(18, 3, 2); // EM_386
         put(20, 1);
-        put(24, imageBase + textRva);
+        put(24, module ? 0 : imageBase + textRva);
         put(28, 52); // Program headers immediately follow the ELF header.
         put(40, 52, 2);
         put(42, 32, 2);
@@ -39,8 +39,8 @@ public:
         auto loadSegment = [&](size_t ph, uint32_t off, uint32_t size, uint32_t flags) {
             put(ph, 1); // PT_LOAD
             put(ph + 4, off);
-            put(ph + 8, imageBase + off);
-            put(ph + 12, imageBase + off);
+            put(ph + 8, module ? off : imageBase + off);
+            put(ph + 12, module ? off : imageBase + off);
             put(ph + 16, size);
             put(ph + 20, size);
             put(ph + 24, flags);
@@ -59,12 +59,14 @@ public:
         out.close();
         if (!out) return false;
 #ifndef _WIN32
-        std::error_code error;
-        std::filesystem::permissions(path, std::filesystem::perms::owner_exec |
-                                          std::filesystem::perms::group_exec |
-                                          std::filesystem::perms::others_exec,
-                                     std::filesystem::perm_options::add, error);
-        if (error) return false;
+        if (!module) {
+            std::error_code error;
+            std::filesystem::permissions(path, std::filesystem::perms::owner_exec |
+                                              std::filesystem::perms::group_exec |
+                                              std::filesystem::perms::others_exec,
+                                         std::filesystem::perm_options::add, error);
+            if (error) return false;
+        }
 #endif
         return true;
     }
