@@ -9,4 +9,6 @@ if platform == "windows" {
 }
 <bl> clear = os.setenv(name, "")
 <str> absent = os.getenv(name)
-cons.out("@{set} @{status} @{clear} [@{absent}]")
+<str> clock = time.now("YYYY/MM/DD HH:MM:SS %M")
+<bl> minuteMatches = clock.getsubstring(15, 16) == clock.getsubstring(21, 22)
+cons.out("@{set} @{status} @{clear} [@{absent}] @{minuteMatches}")

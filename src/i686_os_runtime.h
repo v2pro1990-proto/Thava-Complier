@@ -170,21 +170,24 @@ static const char *format_calendar(Calendar cal, const char *pattern, Allocate a
     char *buffer = allocate(n * 2 + 1, image);
     if (!buffer) return "";
     char *out = buffer;
-    int clock = 0;
+    const char *start = pattern;
     while (*pattern) {
         if (matches(pattern, "yyyy") || matches(pattern, "YYYY"))
             out = write_digits(out, cal.year, 4), pattern += 4;
         else if (matches(pattern, "%Y")) out = write_digits(out, cal.year, 4), pattern += 2;
         else if (matches(pattern, "%y") || matches(pattern, "yy") || matches(pattern, "YY"))
             out = write_digits(out, cal.year, 2), pattern += 2;
-        else if (matches(pattern, "%m") || matches(pattern, "MM"))
+        else if (matches(pattern, "%m"))
             out = write_digits(out, cal.month, 2), pattern += 2;
-        else if (matches(pattern, "mm"))
-            out = write_digits(out, clock ? cal.minute : cal.month, 2), pattern += 2;
+        else if (matches(pattern, "mm") || matches(pattern, "MM")) {
+            int minute = pattern[2] == ':' || (pattern > start && pattern[-1] == ':');
+            out = write_digits(out, minute ? cal.minute : cal.month, 2);
+            pattern += 2;
+        }
         else if (matches(pattern, "%d") || matches(pattern, "dd") || matches(pattern, "DD"))
             out = write_digits(out, cal.day, 2), pattern += 2;
         else if (matches(pattern, "%H") || matches(pattern, "hh") || matches(pattern, "HH"))
-            out = write_digits(out, cal.hour, 2), pattern += 2, clock = 1;
+            out = write_digits(out, cal.hour, 2), pattern += 2;
         else if (matches(pattern, "%M")) out = write_digits(out, cal.minute, 2), pattern += 2;
         else if (matches(pattern, "%S") || matches(pattern, "ss") || matches(pattern, "SS"))
             out = write_digits(out, cal.second, 2), pattern += 2;
@@ -341,7 +344,8 @@ u64 rt_windows_os(u32 operation, u32 a, u32 b, u32 c, u32 d, u32 f1, u32 f2, u32
         if (equals_ascii_folded(first, "warning")) flags |= 0x30;
         else if (equals_ascii_folded(first, "error")) flags |= 0x10;
         else if (equals_ascii_folded(first, "question")) flags |= 0x20;
-        else if (equals_ascii_folded(first, "info") || equals_ascii_folded(first, "information")) flags |= 0x40;
+        else if (equals_ascii_folded(first, "info") || equals_ascii_folded(first, "information") ||
+                 equals_ascii_folded(first, "infomation")) flags |= 0x40;
         const char *buttons = (const char *)d;
         if (equals_ascii_folded(buttons, "okcancel")) flags |= 1;
         else if (equals_ascii_folded(buttons, "yesnocancel")) flags |= 3;

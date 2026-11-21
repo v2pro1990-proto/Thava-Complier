@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory() as tmp:
             ("os_time_extended_arm64.thv", [
                 "true true example true [] false 2 true true 0 true",
             ], None),
-            ("i686_os_spawn.thv", ["true 0 true []"], None),
+            ("i686_os_spawn.thv", ["true 0 true [] true"], None),
             ("file_arm64.thv", ["[alpha][17]", "18", "4 [2.5][true]"], None),
             ("i686_file_scope.thv", ["42 return|continue|break"], None),
             ("membership_rand.thv", ["true false true false true false true -4 true only"], None),
