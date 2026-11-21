@@ -23,7 +23,7 @@ unicode_output = (
     "hôm nay trời đẹp quá",
     "HÔM NAY TRỜI ĐẸP QUÁ",
     "Hôm Nay Trời Đẹp Quá",
-    "SSTRASSE\u00a0ÉLAN\tΩΜΈΓΑ 😀 𐐀",
+    "SSTRAẞE\u00a0ÉLAN\tΩΜΈΓΑ 😀 𐐀",
     "ßtraße\u00a0élan\tωμέγα 😀 𐐨",
     "Sstraße\u00a0Élan\tΩμέγα 😀 𐐀",
     "A\u0302\u0301",
