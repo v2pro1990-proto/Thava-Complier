@@ -79,10 +79,16 @@ class Codegen {
         return type == ThavaType::STRING ? 1u : floating(type) ? 2u : 0u;
     }
 
+    static ThavaType elementKind(ThavaType type) {
+        // Real scalars share the IEEE-754 double representation in a collection.
+        return floating(type) ? ThavaType::DOUBLE : type;
+    }
+
     static void updateShape(ThavaType& slot, ThavaType value) {
         if (value == ThavaType::UNKNOWN) return;
         if (!scalar(value)) unsupported("A non-scalar collection element");
-        if (slot != ThavaType::UNKNOWN && slot != value)
+        value = elementKind(value);
+        if (slot != ThavaType::UNKNOWN && elementKind(slot) != value)
             unsupported("A collection with mixed element types");
         slot = value;
     }
@@ -580,7 +586,7 @@ class Codegen {
         enc.store(ESP, 0, EAX);
         const auto keyType = expression(key);
         if (!dict && keyType != ThavaType::INT) unsupported("A non-integer list index");
-        if (dict && shape.key != ThavaType::UNKNOWN && keyType != shape.key)
+        if (dict && shape.key != ThavaType::UNKNOWN && elementKind(keyType) != shape.key)
             unsupported("A dictionary lookup with a different key type");
         storeArgument(4);
         if (dict) {
@@ -603,7 +609,7 @@ class Codegen {
         enc.store(ESP, 0, EAX);
         const auto actual = expression(key);
         if (type != ThavaType::DICT && actual != ThavaType::INT) unsupported("A non-integer list index");
-        if (type == ThavaType::DICT && shape.key != ThavaType::UNKNOWN && actual != shape.key)
+        if (type == ThavaType::DICT && shape.key != ThavaType::UNKNOWN && elementKind(actual) != shape.key)
             unsupported("A dictionary operation with a different key type");
         storeArgument(4);
         if (type == ThavaType::DICT) {
@@ -672,7 +678,7 @@ class Codegen {
                 loadValue(slot);
                 enc.store(ESP, 0, EAX);
                 const auto value = expression(node->args[0].get());
-                if (slot.shape.element != ThavaType::UNKNOWN && slot.shape.element != value)
+                if (slot.shape.element != ThavaType::UNKNOWN && slot.shape.element != elementKind(value))
                     unsupported("Removing a value of a different list element type");
                 storeArgument(4);
                 callRuntime(runtime::rt_list_remove_value, 16);
@@ -723,7 +729,7 @@ class Codegen {
             callRuntime(runtime::rt_contains, 8);
         } else if (collection(container)) {
             const auto type = container == ThavaType::DICT ? lastShape.key : lastShape.element;
-            if (type != ThavaType::UNKNOWN && needle != type) {
+            if (type != ThavaType::UNKNOWN && elementKind(needle) != elementKind(type)) {
                 integer(0);
                 return ThavaType::BOOL;
             }
