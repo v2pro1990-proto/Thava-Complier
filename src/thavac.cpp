@@ -2030,9 +2030,7 @@ public:
         : returnType(rt), customReturnType(std::move(crt)), name(std::move(n)), params(std::move(p)), paramCustomTypes(std::move(pct)) {}
 
     std::string generateCode() override {
-        std::string retTypeStr = (returnType == ThavaType::CUSTOM && !customReturnType.empty())
-            ? cppTypeNameFor(returnType, customReturnType)
-            : cppTypeNameFor(returnType);
+        std::string retTypeStr = cppTypeNameFor(returnType, customReturnType);
         std::string code = retTypeStr + " thava_func_" + name + "(";
         for (size_t i = 0; i < params.size(); ++i) {
             std::string ctype = (i < paramCustomTypes.size()) ? paramCustomTypes[i] : "";
@@ -3016,9 +3014,7 @@ public:
         : returnType(rt), customReturnType(std::move(crt)), name(std::move(n)), params(std::move(p)), paramCustomTypes(std::move(pct)), body(std::move(b)), isInline(inl) {}
 
     std::string generateCode() override {
-        std::string retTypeStr = (returnType == ThavaType::CUSTOM && !customReturnType.empty())
-            ? cppTypeNameFor(returnType, customReturnType)
-            : cppTypeNameFor(returnType);
+        std::string retTypeStr = cppTypeNameFor(returnType, customReturnType);
         std::string code = (isInline ? "inline " : "") + retTypeStr + " thava_func_" + name + "(";
         for (size_t i = 0; i < params.size(); ++i) {
             std::string ctype = (i < paramCustomTypes.size()) ? paramCustomTypes[i] : "";
@@ -3548,7 +3544,7 @@ public:
                 if (m.access != mod) continue;
                 std::string retTypeStr;
                 if (m.returnType == ThavaType::CUSTOM) retTypeStr = "thava_class_" + m.customReturnType;
-                else retTypeStr = cppTypeNameFor(m.returnType);
+                else retTypeStr = cppTypeNameFor(m.returnType, m.customReturnType);
                 secCode += "    virtual " + retTypeStr + " thava_method_" + m.name + "(";
                 for (size_t i = 0; i < m.params.size(); ++i) {
                     std::string pTypeStr;
@@ -8365,7 +8361,7 @@ inline std::string _thava_read_console_line() {
             return 1;
         }
 
-        std::cout << "[Thava Compiler] Using detected C++ compiler: " << comp.displayName << " (" << optFlag << ")...\\n";
+        std::cout << "[Thava Compiler] Using detected C++ compiler: " << comp.displayName << " (" << optFlag << ")...\n";
 
         if (comp.type == HostCXXType::MSVC) {
             std::string msvcOpt = (g_optLevel == 0) ? "/Od" : "/O2";
