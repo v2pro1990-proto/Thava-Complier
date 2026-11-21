@@ -91,6 +91,22 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 lines = [s for s in result.stdout.splitlines() if s and not s.startswith("[Thava Native]")]
                 assert lines == line.splitlines(), (target, case, opt, lines)
                 print(target, case, opt, line, flush=True)
+                if windows and case == "unicode_case":
+                    window = subprocess.STARTUPINFO()
+                    window.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    window.wShowWindow = subprocess.SW_HIDE
+                    console = subprocess.run(
+                        [sys.executable, str(fixtures / "windows_console.py"), str(output)],
+                        cwd=tmp, input=unicode_input, encoding="utf-8", stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NEW_CONSOLE,
+                        startupinfo=window, timeout=30,
+                    )
+                    print(console.stdout, end="", flush=True)
+                    console.check_returncode()
+                    console_lines = [s for s in console.stdout.splitlines()
+                                     if s and not s.startswith("[Thava Native]")]
+                    assert console_lines == line.splitlines(), (target, "console", console_lines)
+                    print(target, "Unicode console input OK", flush=True)
 
     for source in [
         "<int> x = 0\nfunc f() { x = 1 }",

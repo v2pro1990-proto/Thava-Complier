@@ -2191,8 +2191,7 @@ public:
 // Never leaves std::cin in a failed state (so one bad/blank/EOF read cannot
 // poison every later key.input call), and strips the trailing CR of CRLF input.
 inline std::string thavaCppReadLineStmt() {
-    return "std::string _l; if (!std::getline(std::cin, _l)) { std::cin.clear(); _l.clear(); } "
-           "if (!_l.empty() && _l.back() == '\\r') _l.pop_back(); ";
+    return "std::string _l = _thava_read_console_line(); ";
 }
 
 class InputNode : public ASTNode {
@@ -7637,6 +7636,40 @@ int main(int argc, char* argv[]) {
               << "    }\n"
               << "    return cp;\n"
               << "}\n\n";
+    cppOutput << R"(
+inline std::string _thava_read_console_line() {
+#if defined(_WIN32)
+    HANDLE console = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (GetConsoleMode(console, &mode)) {
+        wchar_t buffer[1024];
+        std::wstring line;
+        DWORD length = 0;
+        while (ReadConsoleW(console, buffer, 1024, &length, nullptr) && length != 0) {
+            line.append(buffer, length);
+            if (line.back() == L'\n' || (mode & ENABLE_LINE_INPUT) == 0) break;
+        }
+        while (!line.empty() && (line.back() == L'\r' || line.back() == L'\n')) line.pop_back();
+        if (line.empty()) return {};
+        int size = WideCharToMultiByte(CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
+                                       nullptr, 0, nullptr, nullptr);
+        if (size <= 0) return {};
+        std::string utf8(size, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
+                            utf8.data(), size, nullptr, nullptr);
+        return utf8;
+    }
+#endif
+    std::string line;
+    if (!std::getline(std::cin, line)) {
+        std::cin.clear();
+        return {};
+    }
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return line;
+}
+
+)";
     thava_unicode::emitCppCaseConversion(cppOutput);
     cppOutput
               << "inline std::string _thava_str_strip(std::string s) {\n"

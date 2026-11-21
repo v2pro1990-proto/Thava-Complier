@@ -136,6 +136,10 @@ public:
         // Register default Win32 console functions from kernel32.dll
         addImport("kernel32.dll", "ExitProcess");
         addImport("kernel32.dll", "SetConsoleCP");
+        addImport("kernel32.dll", "GetStdHandle");
+        addImport("kernel32.dll", "GetConsoleMode");
+        addImport("kernel32.dll", "ReadConsoleW");
+        addImport("kernel32.dll", "WideCharToMultiByte");
         addImport("kernel32.dll", "SetConsoleOutputCP");
         addImport("kernel32.dll", "Sleep");
         addImport("kernel32.dll", "GetCurrentProcessId");

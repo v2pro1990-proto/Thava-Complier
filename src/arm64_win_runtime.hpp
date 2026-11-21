@@ -193,6 +193,8 @@ public:
             pe.addImport("kernel32.dll", name);
             windowsImportLabels.emplace(name, enc.createLabel());
         }
+        for (const char* name : {"GetStdHandle", "GetConsoleMode", "ReadConsoleW", "WideCharToMultiByte"})
+            pe.addImport("kernel32.dll", name);
         for (const char* name : {"system", "_chdir", "_mkdir", "_rmdir", "remove",
                                  "rename", "getenv", "_getcwd", "time", "free", "_strdup"}) {
             windowsImportLabels.emplace(name, enc.createLabel());
@@ -798,6 +800,7 @@ public:
             enc.bindLabel(lblInputLine);
             enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -64);
             enc.mov_rr(arm64::FP, arm64::SP);
+            enc.sub_rri(arm64::SP, arm64::SP, 2048); // UTF-16 line buffer
             enc.str_imm(arm64::X0, arm64::FP, 16); // prompt
             enc.str_imm(arm64::X1, arm64::FP, 24); // mode: 0 none, 1 lower, 2 upper
 
@@ -816,11 +819,63 @@ public:
             enc.blr(arm64::X16);
 
             enc.bindLabel(inNoPrompt);
-            enc.mov_ri64(arm64::X0, 1024);
+            enc.mov_ri64(arm64::X0, 3073);
             enc.bl(lblMalloc);
             enc.str_imm(arm64::X0, arm64::FP, 32); // buf
             enc.cbz(arm64::X0, inEmpty);
             enc.strb_imm(arm64::XZR, arm64::X0, 0);
+
+            const auto redirectedInput = enc.createLabel();
+            const auto lineRead = enc.createLabel();
+            const auto trimEnd = enc.createLabel();
+            const auto removeByte = enc.createLabel();
+            const auto terminateLine = enc.createLabel();
+
+            enc.mov_ri64(arm64::X0, -10); // STD_INPUT_HANDLE
+            callCrt("GetStdHandle");
+            enc.str_imm(arm64::X0, arm64::FP, 48);
+            enc.add_rri(arm64::X1, arm64::FP, 56);
+            callCrt("GetConsoleMode");
+            enc.cbz(arm64::X0, redirectedInput);
+
+            enc.ldr_imm(arm64::X0, arm64::FP, 48);
+            enc.mov_rr(arm64::X1, arm64::SP);
+            enc.movz(arm64::X2, 1024, 0);
+            enc.add_rri(arm64::X3, arm64::FP, 56);
+            enc.movz(arm64::X4, 0, 0);
+            enc.str_imm(arm64::X4, arm64::FP, 56);
+            callCrt("ReadConsoleW");
+            enc.cbz(arm64::X0, lineRead);
+
+            enc.movz(arm64::X0, 65001, 0); // CP_UTF8
+            enc.movz(arm64::X1, 0, 0);
+            enc.mov_rr(arm64::X2, arm64::SP);
+            enc.ldr_imm(arm64::X3, arm64::FP, 56);
+            enc.ldr_imm(arm64::X4, arm64::FP, 32);
+            enc.movz(arm64::X5, 3072, 0);
+            enc.movz(arm64::X6, 0, 0);
+            enc.movz(arm64::X7, 0, 0);
+            callCrt("WideCharToMultiByte");
+
+            // Trim the console's CR/LF after converting to UTF-8.
+            enc.ldr_imm(arm64::X4, arm64::FP, 32);
+            enc.bindLabel(trimEnd);
+            enc.cbz(arm64::X0, terminateLine);
+            enc.add_rrr(arm64::X5, arm64::X4, arm64::X0);
+            enc.sub_rri(arm64::X5, arm64::X5, 1);
+            enc.ldrb_imm(arm64::X6, arm64::X5, 0);
+            enc.cmp_ri(arm64::X6, '\r');
+            enc.b_cond(arm64::EQ, removeByte);
+            enc.cmp_ri(arm64::X6, '\n');
+            enc.b_cond(arm64::NE, terminateLine);
+            enc.bindLabel(removeByte);
+            enc.sub_rri(arm64::X0, arm64::X0, 1);
+            enc.b(trimEnd);
+            enc.bindLabel(terminateLine);
+            enc.add_rrr(arm64::X4, arm64::X4, arm64::X0);
+            enc.strb_imm(arm64::XZR, arm64::X4, 0);
+            enc.b(lineRead);
+            enc.bindLabel(redirectedInput);
 
             // Read one line: the leading space makes scanf skip the newline
             // left by the previous read.
@@ -830,6 +885,7 @@ public:
             enc.ldr_imm(arm64::X16, arm64::X16, 0);
             enc.blr(arm64::X16);
 
+            enc.bindLabel(lineRead);
             enc.ldr_imm(arm64::X1, arm64::FP, 24);
             enc.ldr_imm(arm64::X0, arm64::FP, 32);
             enc.cbz(arm64::X1, inCaseDone);

@@ -1517,7 +1517,9 @@ public:
         enc.bindLabel(lblInputLine);
         enc.push(x86::RBP);
         enc.mov_rr(x86::RBP, x86::RSP);
-        enc.sub_rsp(128);
+        constexpr bool windowsInput = std::is_same_v<TEmitter, PeEmitter>;
+        constexpr uint32_t inputFrame = windowsInput ? 2208 : 128;
+        enc.sub_rsp(inputFrame);
 
         enc.mov_mr_rbp(-8, x86::RCX);  // prompt
         enc.mov_mr_rbp(-16, x86::RDX); // mode
@@ -1533,7 +1535,7 @@ public:
 
         enc.bindLabel(skipPrompt);
         // malloc(1024)
-        enc.mov_ri64(x86::RCX, 1024);
+        enc.mov_ri64(x86::RCX, windowsInput ? 3073 : 1024);
         enc.call_iat_func("malloc");
         enc.mov_mr_rbp(-24, x86::RAX); // buf
 
@@ -1546,10 +1548,77 @@ public:
         enc.xor_r32(x86::RDX, x86::RDX);
         enc.mov_mr8(x86::RAX, 0, x86::RDX);
 
+        const auto lineRead = enc.createLabel();
+        if constexpr (windowsInput) {
+            using namespace x86;
+            const auto redirectedInput = enc.createLabel();
+            const auto trimEnd = enc.createLabel();
+            const auto terminateLine = enc.createLabel();
+            constexpr int32_t wideInput = -2112; // 1024 UTF-16 code units
+            constexpr int32_t countSlot = -40;
+            constexpr int32_t handleSlot = -48;
+
+            enc.mov_ri64(RCX, -10); // STD_INPUT_HANDLE
+            enc.call_iat_func("GetStdHandle");
+            enc.mov_mr_rbp(handleSlot, RAX);
+            enc.mov_rr(RCX, RAX);
+            enc.lea_rm_rbp(RDX, countSlot);
+            enc.call_iat_func("GetConsoleMode");
+            enc.test_rr(RAX, RAX);
+            enc.je(redirectedInput);
+
+            enc.mov_rm_rbp(RCX, handleSlot);
+            enc.lea_rm_rbp(RDX, wideInput);
+            enc.mov_ri64(R8, 1024);
+            enc.lea_rm_rbp(R9, countSlot);
+            enc.xor_r32(RAX, RAX);
+            enc.mov_mr_rbp(countSlot, RAX);
+            enc.mov_mr_rsp(32, RAX);
+            enc.call_iat_func("ReadConsoleW");
+            enc.test_rr(RAX, RAX);
+            enc.je(lineRead);
+
+            enc.mov_ri64(RCX, 65001); // CP_UTF8
+            enc.xor_r32(RDX, RDX);
+            enc.lea_rm_rbp(R8, wideInput);
+            enc.mov_rm_rbp(R9, countSlot);
+            enc.mov_rm_rbp(R10, -24);
+            enc.mov_mr_rsp(32, R10);
+            enc.mov_ri64(R10, 3072);
+            enc.mov_mr_rsp(40, R10);
+            enc.mov_mr_rsp(48, RDX);
+            enc.mov_mr_rsp(56, RDX);
+            enc.call_iat_func("WideCharToMultiByte");
+
+            // Trim the console's CR/LF after converting to UTF-8.
+            enc.mov_rm_rbp(R10, -24);
+            enc.bindLabel(trimEnd);
+            enc.test_rr(RAX, RAX);
+            enc.je(terminateLine);
+            enc.mov_rr(R11, R10);
+            enc.add_rr(R11, RAX);
+            enc.movzx_rm8(RDX, R11, -1);
+            enc.cmp_ri(RDX, '\r');
+            const auto removeByte = enc.createLabel();
+            enc.je(removeByte);
+            enc.cmp_ri(RDX, '\n');
+            enc.jne(terminateLine);
+            enc.bindLabel(removeByte);
+            enc.dec_r(RAX);
+            enc.jmp(trimEnd);
+            enc.bindLabel(terminateLine);
+            enc.add_rr(R10, RAX);
+            enc.xor_r32(RDX, RDX);
+            enc.mov_mr8(R10, 0, RDX);
+            enc.jmp(lineRead);
+            enc.bindLabel(redirectedInput);
+        }
+
         // Read a line into the initialized buffer.
         enc.lea_rip_rdata(x86::RCX, offFmtScanLine);
         enc.mov_rm_rbp(x86::RDX, -24);
         enc.call_iat_func("scanf");
+        enc.bindLabel(lineRead);
 
         enc.mov_rm_rbp(x86::RDX, -16);
         enc.mov_rm_rbp(x86::RAX, -24);
@@ -1571,7 +1640,7 @@ public:
         enc.bindLabel(inputEmpty);
         enc.lea_rip_rdata(x86::RAX, offEmptyStr);
         enc.bindLabel(inputDone);
-        enc.add_rsp(128);
+        enc.add_rsp(inputFrame);
         enc.pop(x86::RBP);
         enc.ret();
 
