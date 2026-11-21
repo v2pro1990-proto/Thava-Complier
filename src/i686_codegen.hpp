@@ -235,6 +235,12 @@ class Codegen {
             return slot.type;
         }
         if (auto unary = dynamic_cast<UnaryMinusNode*>(node)) {
+            if (auto magnitude = dynamic_cast<LiteralNode*>(unary->expr.get());
+                magnitude && magnitude->getLitType() == ThavaType::INT &&
+                magnitude->getVal() == "9223372036854775808") {
+                integer(uint64_t(1) << 63);
+                return ThavaType::INT;
+            }
             if (expression(unary->expr.get()) != ThavaType::INT) unsupported("Non-integer negation");
             negate(EAX, EDX);
             return ThavaType::INT;

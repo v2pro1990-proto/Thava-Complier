@@ -14,7 +14,7 @@ func bump() {
 
 bump()
 <int64> total = sum_down(3)
-<int64> lowest = -9223372036854775807 - 1
+<int64> lowest = -9223372036854775808
 <int64> numerator = -5000000003
 <int64> denominator = 5000000000
 <int64> product = denominator * -3

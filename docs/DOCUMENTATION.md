@@ -903,7 +903,7 @@ The experimental native backend writes i686 machine code and executable headers 
 - `thavac program.thv --target linux-i686 --native -o program`: standalone Linux ELF32 using Linux system calls. `--backend elf-i686` selects the same backend.
 - `--backend native-i686` selects native i686 for the current OS. Use `--os windows` or `--os linux` to override that OS.
 
-The native backend supports integer widths including `<int64>`, integer arithmetic and comparisons, bitwise operations, booleans, UTF-8 string literals and comparisons, scalar functions and recursion, globals, `if`, `while`, C-style `for` and interpolated `cons.out`. Floating-point operations, string methods, collections, library linking and C interop use the C++ path in this release. Unsupported native constructs report a compilation error.
+The native backend supports integer widths including `<int64>`, integer `+`, `-`, `*`, `/`, `//` and `%`, comparisons, bitwise operations, booleans, UTF-8 string literals and comparisons, scalar functions and recursion, globals, `if`, `while`, C-style `for` and interpolated `cons.out`. Floating-point operations, string methods, collections, library linking and C interop use the C++ path in this release. Unsupported native constructs report a compilation error.
 
 The existing C++ path remains the default for `--target win-i686` and `--target linux-i686`. Select it explicitly with `--cpp` or use `--backend cpp-i686` for the current OS. Windows builds use `i686-w64-mingw32-g++` or an x86 MSVC developer environment. Linux builds use `i686-linux-gnu-g++` or GCC with 32-bit C++ libraries (`g++-multilib` on Ubuntu).
 
