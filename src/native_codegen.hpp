@@ -1,5 +1,7 @@
 #pragma once
 
+#include "unicode_case.hpp"
+
 #include "pe_emitter.hpp"
 #include "elf_emitter.hpp"
 #include "linux_runtime.hpp"
@@ -265,6 +267,152 @@ public:
         enc.call_iat_func("printf");
     }
 
+    void emitUnicodeCaseHelpers() {
+        using namespace x86;
+        const auto table = thava_unicode::addCaseMappings(pe);
+        const auto convert = enc.createLabel();
+        lblStrLower = enc.createLabel();
+        lblStrUpper = enc.createLabel();
+        lblStrTitle = enc.createLabel();
+        enc.bindLabel(lblStrLower);
+        enc.mov_ri64(RDX, 0);
+        enc.jmp(convert);
+        enc.bindLabel(lblStrUpper);
+        enc.mov_ri64(RDX, 1);
+        enc.jmp(convert);
+        enc.bindLabel(lblStrTitle);
+        enc.mov_ri64(RDX, 2);
+
+        auto empty = enc.createLabel(), done = enc.createLabel(), next = enc.createLabel();
+        auto sizeReady = enc.createLabel(), sizeTwo = enc.createLabel(), sizeThree = enc.createLabel();
+        auto continuation = enc.createLabel(), lookup = enc.createLabel(), search = enc.createLabel();
+        auto raiseLow = enc.createLabel(), lowerHigh = enc.createLabel(), unmatched = enc.createLabel();
+        auto upper = enc.createLabel(), lower = enc.createLabel(), space = enc.createLabel();
+        auto writeByte = enc.createLabel(), finish = enc.createLabel();
+
+        enc.bindLabel(convert);
+        // Seven saved registers align the stack before calling the runtime.
+        for (auto reg : {RBP, R12, RSI, RDI, RBX, R13, R14}) enc.push(reg);
+        enc.sub_rsp(32);  // Windows call shadow space
+        enc.mov_rr(RBX, RCX); // input cursor
+        enc.mov_rr(R12, RDX); // operation
+        enc.test_rr(RCX, RCX);
+        enc.je(empty);
+        enc.call_iat_func("strlen");
+        enc.shl_ri(RAX, 2); // worst-case unconditional expansion: 4 bytes per input byte
+        enc.inc_r(RAX);
+        enc.mov_rr(RCX, RAX);
+        enc.call_iat_func("malloc");
+        enc.test_rr(RAX, RAX);
+        enc.je(empty);
+        enc.mov_rr(RDI, RAX); // buffer base
+        enc.mov_rr(R13, RAX); // output cursor
+        enc.lea_rip_rdata(R14, table);
+        enc.mov_ri64(RSI, 1); // next character starts a title word
+
+        enc.bindLabel(next);
+        enc.movzx_rm8(RAX, RBX);
+        enc.test_rr(RAX, RAX);
+        enc.je(finish);
+        enc.inc_r(RBX);
+        enc.mov_rr(RDX, RAX); // packed input character
+        enc.cmp_ri(RAX, 0xc2);
+        enc.jl(lookup);
+        enc.cmp_ri(RAX, 0xf4);
+        enc.jg(lookup);
+        enc.cmp_ri(RAX, 0xe0);
+        enc.jl(sizeTwo);
+        enc.cmp_ri(RAX, 0xf0);
+        enc.jl(sizeThree);
+        enc.mov_ri64(R11, 32);
+        enc.jmp(sizeReady);
+        enc.bindLabel(sizeThree);
+        enc.mov_ri64(R11, 24);
+        enc.jmp(sizeReady);
+        enc.bindLabel(sizeTwo);
+        enc.mov_ri64(R11, 16);
+        enc.bindLabel(sizeReady);
+        enc.mov_ri64(RCX, 8);
+        enc.bindLabel(continuation);
+        enc.movzx_rm8(RAX, RBX);
+        enc.cmp_ri(RAX, 0x80);
+        enc.jl(lookup);
+        enc.cmp_ri(RAX, 0xbf);
+        enc.jg(lookup);
+        enc.shl_cl(RAX);
+        enc.or_rr(RDX, RAX);
+        enc.inc_r(RBX);
+        enc.add_ri(RCX, 8);
+        enc.cmp_rr(RCX, R11);
+        enc.jl(continuation);
+
+        enc.bindLabel(lookup);
+        enc.xor_r32(R8, R8); // lower bound
+        enc.mov_ri64(R9, thava_unicode::caseMappingCount); // exclusive upper bound
+        enc.bindLabel(search);
+        enc.cmp_rr(R8, R9);
+        enc.jge(unmatched);
+        enc.mov_rr(R10, R8);
+        enc.add_rr(R10, R9);
+        enc.shr_ri(R10, 1);
+        enc.mov_rr(R11, R10);
+        enc.shl_ri(R11, 5);
+        enc.add_rr(R11, R14);
+        enc.mov_rm(RAX, R11, 0);
+        enc.cmp_rr(RAX, RDX);
+        enc.jl(raiseLow);
+        enc.jg(lowerHigh);
+        enc.cmp_ri(R12, 0);
+        enc.je(lower);
+        enc.cmp_ri(R12, 1);
+        enc.je(upper);
+        enc.mov_rm(RAX, R11, 24);
+        enc.test_rr(RAX, RAX);
+        enc.je(space);
+        enc.test_rr(RSI, RSI);
+        enc.je(lower);
+        enc.xor_r32(RSI, RSI);
+        enc.jmp(writeByte);
+
+        enc.bindLabel(lower);
+        enc.mov_rm(RAX, R11, 8);
+        enc.xor_r32(RSI, RSI);
+        enc.jmp(writeByte);
+        enc.bindLabel(upper);
+        enc.mov_rm(RAX, R11, 16);
+        enc.jmp(writeByte);
+        enc.bindLabel(raiseLow);
+        enc.mov_rr(R8, R10);
+        enc.inc_r(R8);
+        enc.jmp(search);
+        enc.bindLabel(lowerHigh);
+        enc.mov_rr(R9, R10);
+        enc.jmp(search);
+        enc.bindLabel(space);
+        enc.mov_ri64(RSI, 1);
+        enc.mov_rr(RAX, RDX);
+        enc.jmp(writeByte);
+        enc.bindLabel(unmatched);
+        enc.xor_r32(RSI, RSI);
+        enc.mov_rr(RAX, RDX);
+        enc.bindLabel(writeByte);
+        enc.mov_mr8(R13, 0, RAX);
+        enc.inc_r(R13);
+        enc.shr_ri(RAX, 8);
+        enc.jne(writeByte);
+        enc.jmp(next);
+        enc.bindLabel(finish);
+        enc.mov_mr8(R13, 0, RAX); // terminating zero
+        enc.mov_rr(RAX, RDI);
+        enc.jmp(done);
+        enc.bindLabel(empty);
+        enc.lea_rip_rdata(RAX, offEmptyStr);
+        enc.bindLabel(done);
+        enc.add_rsp(32);
+        for (auto reg : {R14, R13, RBX, RDI, RSI, R12, RBP}) enc.pop(reg);
+        enc.ret();
+    }
+
     void emitRuntimeHelpers() {
         // --- 1. _thava_str_concat(s1 in RCX, s2 in RDX) -> RAX ---
         lblStrConcat = enc.createLabel();
@@ -525,193 +673,7 @@ public:
         enc.pop(x86::RBP);
         enc.ret();
 
-        // --- 5. _thava_str_lower(s in RCX) -> RAX (new copy in lowercase) ---
-        lblStrLower = enc.createLabel();
-        enc.bindLabel(lblStrLower);
-        enc.push(x86::RBP);
-        enc.mov_rr(x86::RBP, x86::RSP);
-        enc.sub_rsp(64);
-
-        enc.mov_mr_rbp(-8, x86::RCX);
-        enc.call_iat_func("strlen");
-        enc.mov_ri64(x86::R10, 1);
-        enc.add_rr(x86::RAX, x86::R10);
-        enc.mov_rr(x86::RCX, x86::RAX);
-        enc.call_iat_func("malloc");
-        enc.mov_mr_rbp(-16, x86::RAX); // newStr
-
-        enc.mov_rr(x86::RCX, x86::RAX);
-        enc.mov_rm_rbp(x86::RDX, -8);
-        enc.call_iat_func("strcpy");
-
-        // Lowercase loop on newStr
-        enc.mov_rm_rbp(x86::RAX, -16); // ptr
-        size_t loopLow = enc.createLabel();
-        size_t doneLow = enc.createLabel();
-
-        enc.bindLabel(loopLow);
-        enc.movzx_rm8(x86::RDX, x86::RAX, 0); // single byte read
-        enc.test_rr(x86::RDX, x86::RDX);
-        enc.je(doneLow);
-
-        // if 'A' <= c <= 'Z': c += 32
-        enc.mov_ri64(x86::R10, 'A');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        size_t nextCharLow = enc.createLabel();
-        enc.jl(nextCharLow);
-        enc.mov_ri64(x86::R10, 'Z');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        enc.jg(nextCharLow);
-
-        // write back c + 32
-        enc.mov_ri64(x86::R10, 32);
-        enc.add_rr(x86::RDX, x86::R10);
-        enc.mov_mr8(x86::RAX, 0, x86::RDX); // single byte write
-
-        enc.bindLabel(nextCharLow);
-        enc.mov_ri64(x86::R10, 1);
-        enc.add_rr(x86::RAX, x86::R10);
-        enc.jmp(loopLow);
-
-        enc.bindLabel(doneLow);
-        enc.mov_rm_rbp(x86::RAX, -16);
-        enc.add_rsp(64);
-        enc.pop(x86::RBP);
-        enc.ret();
-
-        // --- 6. _thava_str_title(s in RCX) -> RAX (Title Case) ---
-        lblStrTitle = enc.createLabel();
-        enc.bindLabel(lblStrTitle);
-        enc.push(x86::RBP);
-        enc.mov_rr(x86::RBP, x86::RSP);
-        enc.sub_rsp(64);
-
-        enc.mov_mr_rbp(-8, x86::RCX);
-        enc.call_iat_func("strlen");
-        enc.mov_ri64(x86::R10, 1);
-        enc.add_rr(x86::RAX, x86::R10);
-        enc.mov_rr(x86::RCX, x86::RAX);
-        enc.call_iat_func("malloc");
-        enc.mov_mr_rbp(-16, x86::RAX); // newStr
-
-        enc.mov_rr(x86::RCX, x86::RAX);
-        enc.mov_rm_rbp(x86::RDX, -8);
-        enc.call_iat_func("strcpy");
-
-        enc.mov_rm_rbp(x86::RAX, -16);
-        enc.mov_ri64(x86::R8, 1); // newWord = 1
-        size_t loopTitle = enc.createLabel();
-        size_t doneTitle = enc.createLabel();
-        size_t advTitle = enc.createLabel();
-
-        enc.bindLabel(loopTitle);
-        enc.movzx_rm8(x86::RDX, x86::RAX, 0); // single byte read
-        enc.test_rr(x86::RDX, x86::RDX);
-        enc.je(doneTitle);
-
-        // if space: newWord = 1
-        enc.mov_ri64(x86::R10, ' ');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        size_t notSpace = enc.createLabel();
-        enc.jne(notSpace);
-        enc.mov_ri64(x86::R8, 1);
-        enc.jmp(advTitle);
-
-        enc.bindLabel(notSpace);
-        // if newWord and 'a' <= c <= 'z': c -= 32
-        enc.test_rr(x86::R8, x86::R8);
-        size_t notCap = enc.createLabel();
-        enc.je(notCap);
-        enc.mov_ri64(x86::R10, 'a');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        enc.jl(notCap);
-        enc.mov_ri64(x86::R10, 'z');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        enc.jg(notCap);
-
-        enc.mov_ri64(x86::R10, 32);
-        enc.sub_rr(x86::RDX, x86::R10);
-        enc.mov_mr8(x86::RAX, 0, x86::RDX); // single byte write
-        enc.xor_r32(x86::R8, x86::R8);
-        enc.jmp(advTitle);
-
-        enc.bindLabel(notCap);
-        enc.xor_r32(x86::R8, x86::R8);
-
-        enc.bindLabel(advTitle);
-        enc.mov_ri64(x86::R10, 1);
-        enc.add_rr(x86::RAX, x86::R10);
-        enc.jmp(loopTitle);
-
-        enc.bindLabel(doneTitle);
-        enc.mov_rm_rbp(x86::RAX, -16);
-        enc.add_rsp(64);
-        enc.pop(x86::RBP);
-        enc.ret();
-
-        // --- _thava_str_upper(s in RCX) -> RAX (new copy in uppercase) ---
-        lblStrUpper = enc.createLabel();
-        enc.bindLabel(lblStrUpper);
-        enc.push(x86::RBP);
-        enc.mov_rr(x86::RBP, x86::RSP);
-        enc.sub_rsp(64);
-
-        enc.mov_mr_rbp(-8, x86::RCX);
-        enc.test_rr(x86::RCX, x86::RCX);
-        size_t nullUpper = enc.createLabel();
-        enc.je(nullUpper);
-
-        enc.call_iat_func("strlen");
-        enc.mov_ri64(x86::R10, 1);
-        enc.add_rr(x86::RAX, x86::R10);
-        enc.mov_rr(x86::RCX, x86::RAX);
-        enc.call_iat_func("malloc");
-        enc.mov_mr_rbp(-16, x86::RAX); // newStr
-
-        enc.mov_rr(x86::RCX, x86::RAX);
-        enc.mov_rm_rbp(x86::RDX, -8);
-        enc.call_iat_func("strcpy");
-
-        // Uppercase loop on newStr
-        enc.mov_rm_rbp(x86::RAX, -16); // ptr
-        size_t loopUp = enc.createLabel();
-        size_t doneUp = enc.createLabel();
-
-        enc.bindLabel(loopUp);
-        enc.movzx_rm8(x86::RDX, x86::RAX, 0);
-        enc.test_rr(x86::RDX, x86::RDX);
-        enc.je(doneUp);
-
-        // if 'a' <= c <= 'z': c -= 32
-        enc.mov_ri64(x86::R10, 'a');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        size_t nextCharUp = enc.createLabel();
-        enc.jl(nextCharUp);
-        enc.mov_ri64(x86::R10, 'z');
-        enc.cmp_rr(x86::RDX, x86::R10);
-        enc.jg(nextCharUp);
-
-        enc.mov_ri64(x86::R10, 32);
-        enc.sub_rr(x86::RDX, x86::R10);
-        enc.mov_mr8(x86::RAX, 0, x86::RDX);
-
-        enc.bindLabel(nextCharUp);
-        enc.mov_ri64(x86::R10, 1);
-        enc.add_rr(x86::RAX, x86::R10);
-        enc.jmp(loopUp);
-
-        enc.bindLabel(doneUp);
-        enc.mov_rm_rbp(x86::RAX, -16);
-        size_t exitUp = enc.createLabel();
-        enc.jmp(exitUp);
-
-        enc.bindLabel(nullUpper);
-        enc.lea_rip_rdata(x86::RAX, offEmptyStr);
-
-        enc.bindLabel(exitUp);
-        enc.add_rsp(64);
-        enc.pop(x86::RBP);
-        enc.ret();
+        emitUnicodeCaseHelpers();
 
         // --- _thava_str_strip(s in RCX) -> RAX (heap string stripped of whitespace) ---
         lblStrStrip = enc.createLabel();
@@ -1575,24 +1537,40 @@ public:
         enc.call_iat_func("malloc");
         enc.mov_mr_rbp(-24, x86::RAX); // buf
 
-        // Read line: scanf(" %1023[^\n]", buf)
+        const auto inputEmpty = enc.createLabel();
+        const auto inputUpper = enc.createLabel();
+        const auto inputConverted = enc.createLabel();
+        const auto inputDone = enc.createLabel();
+        enc.test_rr(x86::RAX, x86::RAX);
+        enc.je(inputEmpty);
+        enc.xor_r32(x86::RDX, x86::RDX);
+        enc.mov_mr8(x86::RAX, 0, x86::RDX);
+
+        // Read a line into the initialized buffer.
         enc.lea_rip_rdata(x86::RCX, offFmtScanLine);
         enc.mov_rm_rbp(x86::RDX, -24);
         enc.call_iat_func("scanf");
 
-        // Mode handling: if mode == 1, lower
         enc.mov_rm_rbp(x86::RDX, -16);
-        enc.mov_ri64(x86::R10, 1);
-        enc.cmp_rr(x86::RDX, x86::R10);
-        size_t skipLower = enc.createLabel();
-        enc.jne(skipLower);
-
-        enc.mov_rm_rbp(x86::RCX, -24);
-        enc.call_label(lblStrLower);
-        enc.mov_mr_rbp(-24, x86::RAX);
-
-        enc.bindLabel(skipLower);
         enc.mov_rm_rbp(x86::RAX, -24);
+        enc.test_rr(x86::RDX, x86::RDX);
+        enc.je(inputDone);
+        enc.mov_rr(x86::RCX, x86::RAX);
+        enc.cmp_ri(x86::RDX, 2);
+        enc.je(inputUpper);
+        enc.call_label(lblStrLower);
+        enc.jmp(inputConverted);
+        enc.bindLabel(inputUpper);
+        enc.call_label(lblStrUpper);
+        enc.bindLabel(inputConverted);
+        enc.mov_mr_rbp(-32, x86::RAX);
+        enc.mov_rm_rbp(x86::RCX, -24);
+        enc.call_iat_func("free");
+        enc.mov_rm_rbp(x86::RAX, -32);
+        enc.jmp(inputDone);
+        enc.bindLabel(inputEmpty);
+        enc.lea_rip_rdata(x86::RAX, offEmptyStr);
+        enc.bindLabel(inputDone);
         enc.add_rsp(128);
         enc.pop(x86::RBP);
         enc.ret();

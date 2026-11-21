@@ -1,4 +1,4 @@
-"""Run the global-write fixtures using the compiler built for the current host."""
+"""Run compiler regression fixtures across the supported backends."""
 import os
 from pathlib import Path
 import struct
@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 
+sys.stdout.reconfigure(encoding="utf-8")
 fixtures = Path(__file__).resolve().parent
 windows = os.name == "nt"
 compiler = Path(sys.argv[1]).resolve()
@@ -17,6 +18,21 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
             "strings_search": "1 -1 3 0 [cXY-XY-XY][cab-ab-ab][c--][Alpha Beta][one||three|]",
             "membership_rand": "true false true false true false true -4 true only",
             "file_arm64": "[alpha][17]\n18\n4 [2.5][true]"}
+
+unicode_output = (
+    "hôm nay trời đẹp quá",
+    "HÔM NAY TRỜI ĐẸP QUÁ",
+    "Hôm Nay Trời Đẹp Quá",
+    "SSTRASSE\u00a0ÉLAN\tΩΜΈΓΑ 😀 𐐀",
+    "ßtraße\u00a0élan\tωμέγα 😀 𐐨",
+    "Sstraße\u00a0Élan\tΩμέγα 😀 𐐀",
+    "A\u0302\u0301",
+    "ab",
+    "hôm nay trời đẹp quá",
+    "HÔM NAY TRỜI ĐẸP QUÁ",
+)
+expected["unicode_case"] = "\n".join(unicode_output)
+unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
 
 if run_windows_arm64:
     expected["os_time_arm64"] = "windows true [] true true true true true true 3 -1 true true true true 0"
@@ -68,7 +84,8 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                         continue
                 runner = ["qemu-aarch64"] if target == "arm64" else []
                 result = subprocess.run(runner + [str(output)], cwd=tmp,
-                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8",
+                                        input=unicode_input if case == "unicode_case" else None)
                 print(result.stdout, end="", flush=True)
                 result.check_returncode()
                 lines = [s for s in result.stdout.splitlines() if s and not s.startswith("[Thava Native]")]

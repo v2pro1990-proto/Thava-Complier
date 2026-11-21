@@ -92,6 +92,7 @@ public:
     uint32_t offFileReadErr = 0;
     uint32_t offStrQuoteNL = 0;
 
+    uint32_t offCaseMappings = 0;
     uint32_t offEmptyStr = 0;
     uint32_t offStrSh = 0;
     uint32_t offStrDashC = 0;
@@ -185,6 +186,7 @@ public:
         initialized = true;
 
         for (const char* name : {"GetCurrentProcessId", "Sleep", "GetLocalTime",
+                                 "SetConsoleCP", "SetConsoleOutputCP",
                                  "GetFileAttributesA", "GetFileAttributesExA",
                                  "GetActiveProcessorCount", "FindFirstFileA",
                                  "FindNextFileA", "FindClose", "LoadLibraryA", "GetProcAddress", "FreeLibrary"}) {
@@ -251,6 +253,7 @@ public:
         offStrListComma = pe.addStringLiteralOffset(", ");
         offWeightMismatch = pe.addStringLiteralOffset("Runtime Error: randres() weight count must match list size!\n");
         offDoubleMaxRand = pe.addDoubleLiteralOffset(32767.0);
+        offCaseMappings = thava_unicode::addCaseMappings(pe);
         offEmptyStr = pe.addStringLiteralOffset("");
         offFmtIntString = pe.addStringLiteralOffset("%lld");
         offFileReadErr = pe.addStringLiteralOffset("[Runtime Error (RuntimeError)]: Cannot open file '");
@@ -788,10 +791,9 @@ public:
 
             size_t inNoPrompt = enc.createLabel();
             size_t inCaseDone = enc.createLabel();
-            size_t inLowerLoop = enc.createLabel();
-            size_t inLowerNext = enc.createLabel();
-            size_t inUpperLoop = enc.createLabel();
-            size_t inUpperNext = enc.createLabel();
+            size_t inEmpty = enc.createLabel();
+            size_t inUpper = enc.createLabel();
+            size_t inConverted = enc.createLabel();
 
             enc.bindLabel(lblInputLine);
             enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -64);
@@ -817,6 +819,8 @@ public:
             enc.mov_ri64(arm64::X0, 1024);
             enc.bl(lblMalloc);
             enc.str_imm(arm64::X0, arm64::FP, 32); // buf
+            enc.cbz(arm64::X0, inEmpty);
+            enc.strb_imm(arm64::XZR, arm64::X0, 0);
 
             // Read one line: the leading space makes scanf skip the newline
             // left by the previous read.
@@ -826,52 +830,24 @@ public:
             enc.ldr_imm(arm64::X16, arm64::X16, 0);
             enc.blr(arm64::X16);
 
-            // Optional ASCII case conversion (key.input.lower / .upper).
-            enc.movz(arm64::X5, 0, 0);
-            enc.str_imm(arm64::X5, arm64::FP, 40); // i
             enc.ldr_imm(arm64::X1, arm64::FP, 24);
-            enc.cmp_ri(arm64::X1, 1);
-            enc.b_cond(arm64::EQ, inLowerLoop);
-            enc.cmp_ri(arm64::X1, 2);
-            enc.b_cond(arm64::EQ, inUpperLoop);
-            enc.b(inCaseDone);
-
-            enc.bindLabel(inLowerLoop);
-            enc.ldr_imm(arm64::X5, arm64::FP, 40);
-            enc.ldr_imm(arm64::X3, arm64::FP, 32);
-            enc.add_rrr(arm64::X3, arm64::X3, arm64::X5);
-            enc.ldrb_imm(arm64::X4, arm64::X3, 0);
-            enc.cbz(arm64::X4, inCaseDone);
-            enc.cmp_ri(arm64::X4, 'A');
-            enc.b_cond(arm64::LT, inLowerNext);
-            enc.cmp_ri(arm64::X4, 'Z');
-            enc.b_cond(arm64::GT, inLowerNext);
-            enc.add_rri(arm64::X4, arm64::X4, 32);
-            enc.strb_imm(arm64::X4, arm64::X3, 0);
-            enc.bindLabel(inLowerNext);
-            enc.add_rri(arm64::X5, arm64::X5, 1);
-            enc.str_imm(arm64::X5, arm64::FP, 40);
-            enc.b(inLowerLoop);
-
-            enc.bindLabel(inUpperLoop);
-            enc.ldr_imm(arm64::X5, arm64::FP, 40);
-            enc.ldr_imm(arm64::X3, arm64::FP, 32);
-            enc.add_rrr(arm64::X3, arm64::X3, arm64::X5);
-            enc.ldrb_imm(arm64::X4, arm64::X3, 0);
-            enc.cbz(arm64::X4, inCaseDone);
-            enc.cmp_ri(arm64::X4, 'a');
-            enc.b_cond(arm64::LT, inUpperNext);
-            enc.cmp_ri(arm64::X4, 'z');
-            enc.b_cond(arm64::GT, inUpperNext);
-            enc.sub_rri(arm64::X4, arm64::X4, 32);
-            enc.strb_imm(arm64::X4, arm64::X3, 0);
-            enc.bindLabel(inUpperNext);
-            enc.add_rri(arm64::X5, arm64::X5, 1);
-            enc.str_imm(arm64::X5, arm64::FP, 40);
-            enc.b(inUpperLoop);
-
-            enc.bindLabel(inCaseDone);
             enc.ldr_imm(arm64::X0, arm64::FP, 32);
+            enc.cbz(arm64::X1, inCaseDone);
+            enc.cmp_ri(arm64::X1, 2);
+            enc.b_cond(arm64::EQ, inUpper);
+            enc.bl(lblStrLower);
+            enc.b(inConverted);
+            enc.bindLabel(inUpper);
+            enc.bl(lblStrUpper);
+            enc.bindLabel(inConverted);
+            enc.str_imm(arm64::X0, arm64::FP, 40);
+            enc.ldr_imm(arm64::X0, arm64::FP, 32);
+            enc.bl(windowsImportLabels.at("free"));
+            enc.ldr_imm(arm64::X0, arm64::FP, 40);
+            enc.b(inCaseDone);
+            enc.bindLabel(inEmpty);
+            enc.adr_data(arm64::X0, offEmptyStr);
+            enc.bindLabel(inCaseDone);
             enc.mov_rr(arm64::SP, arm64::FP);
             enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 64);
             enc.ret();
@@ -881,10 +857,9 @@ public:
         enc.ldr_imm(arm64::X16, arm64::X16, 0);
         enc.br(arm64::X16);
 
-        arm64::emitCaseConvert(enc, lblStrLower, false, lblStrLen, lblMalloc, offEmptyStr);
-        arm64::emitCaseConvert(enc, lblStrUpper, true, lblStrLen, lblMalloc, offEmptyStr);
+        arm64::emitCaseConversion(enc, lblStrLower, lblStrUpper, lblStrTitle,
+                                  lblStrLen, lblMalloc, offEmptyStr, offCaseMappings);
         arm64::emitStrStrip(enc, lblStrStrip, lblStrLen, lblMalloc, lblMemCpy, offEmptyStr);
-        arm64::emitStrTitle(enc, lblStrTitle, lblStrLower, offEmptyStr);
         arm64::emitStrFind(enc, lblStrFind, lblStrLen);
         arm64::emitStrStartsWith(enc, lblStrStartsWith, lblStrLen);
         arm64::emitStrEndsWith(enc, lblStrEndsWith, lblStrLen);

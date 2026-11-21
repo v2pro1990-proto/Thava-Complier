@@ -92,6 +92,7 @@ public:
     size_t lblFileReadAll = 0;
     size_t lblFileReadLines = 0;
 
+    uint32_t offCaseMappings = 0;
     uint32_t offEmptyStr = 0;
     uint32_t offStrSh = 0;
     uint32_t offStrDashC = 0;
@@ -173,6 +174,7 @@ public:
         offStrListOpen  = elf.addStringLiteralOffset("[");
         offStrListComma = elf.addStringLiteralOffset(", ");
         offStrListClose = elf.addStringLiteralOffset("]\n");
+        offCaseMappings = thava_unicode::addCaseMappings(elf);
         offEmptyStr        = elf.addStringLiteralOffset("");
         offStrSh           = elf.addStringLiteralOffset("/bin/sh");
         offStrDashC        = elf.addStringLiteralOffset("-c");
@@ -226,9 +228,8 @@ public:
         emitStrConcat();
         emitStrMul();
         emitMemCpy();
-        emitCaseConvert(lblStrLower, false);
-        emitCaseConvert(lblStrUpper, true);
-        emitStrTitle();
+        arm64::emitCaseConversion(enc, lblStrLower, lblStrUpper, lblStrTitle,
+                                  lblStrLen, lblMalloc, offEmptyStr, offCaseMappings);
         emitStrStrip();
         emitStrFind();
         emitStrStartsWith();
@@ -1175,16 +1176,12 @@ private:
     // ==========================================
     // upper/lower(s in X0) -> X0 (new string)
     // ==========================================
-    void emitCaseConvert(size_t lbl, bool toUpper) {
-        arm64::emitCaseConvert(enc, lbl, toUpper, lblStrLen, lblMalloc, offEmptyStr);
-    }
+
 
     // ==========================================
     // title(s in X0): lowercase, then capitalize word starts
     // ==========================================
-    void emitStrTitle() {
-        arm64::emitStrTitle(enc, lblStrTitle, lblStrLower, offEmptyStr);
-    }
+
 
     // ==========================================
     // strip(s in X0): trim spaces/tabs/newlines on both ends

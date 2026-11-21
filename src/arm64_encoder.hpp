@@ -154,6 +154,11 @@ public:
     }
 
     // ORR Xd, Xn, Xm
+    // LSLV Xd, Xn, Xm
+    void lsl_rrr(Reg rd, Reg rn, Reg rm) {
+        emit32(0x9AC02000 | ((rm & 31) << 16) | ((rn & 31) << 5) | (rd & 31));
+    }
+
     // lsr rd, rn, #shift  (64-bit)
     void lsr_ri(Reg rd, Reg rn, uint32_t shift) {
         emit32(0xD340FC00u | ((shift & 0x3F) << 16) | (rn << 5) | rd);

@@ -1,0 +1,17 @@
+<str> vietnamese = "HÔM NAY TRỜI ĐẸP QUÁ"
+<str> phrase = "hôm nay trời đẹp quá"
+<str> mixed = "ßTRAẞE éLAN\tωΜΈΓΑ 😀 𐐨"
+<str> decomposed = "ấ"
+<str> empty = ""
+cons.out(vietnamese.lower())
+cons.out(phrase.upper())
+cons.out(vietnamese.title())
+cons.out(mixed.upper())
+cons.out(mixed.lower())
+cons.out(mixed.title())
+cons.out(decomposed.upper())
+cons.out("a@{empty.title()}b")
+<str> typedLower = key.input.lower(<str>"")
+<str> typedUpper = key.input.upper(<str>"")
+cons.out(typedLower)
+cons.out(typedUpper)

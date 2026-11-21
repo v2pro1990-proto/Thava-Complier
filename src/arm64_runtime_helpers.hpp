@@ -1,57 +1,140 @@
 #pragma once
 
 #include "arm64_encoder.hpp"
+#include "unicode_case.hpp"
 
 namespace arm64 {
 
-inline void emitCaseConvert(Encoder& enc, size_t lbl, bool toUpper, size_t lblStrLen, size_t lblMalloc, uint32_t offEmptyStr) {
-    enc.bindLabel(lbl);
-    enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -64);
-    enc.mov_rr(arm64::FP, arm64::SP);
-    enc.str_imm(arm64::X0, arm64::FP, 16);
-    size_t haveStr = enc.createLabel();
-    enc.cbnz(arm64::X0, haveStr);
-    enc.adr_data(arm64::X0, offEmptyStr);
-    enc.str_imm(arm64::X0, arm64::FP, 16);
-    enc.bindLabel(haveStr);
-    enc.bl(lblStrLen);
-    enc.str_imm(arm64::X0, arm64::FP, 24); // n
-    enc.add_rri(arm64::X0, arm64::X0, 1);
-    enc.bl(lblMalloc);
-    enc.str_imm(arm64::X0, arm64::FP, 32); // out
+inline void emitCaseConversion(Encoder& enc, size_t lowerEntry, size_t upperEntry,
+                               size_t titleEntry, size_t length, size_t allocate,
+                               uint32_t emptyString, uint32_t table) {
+    const auto convert = enc.createLabel();
+    enc.bindLabel(lowerEntry);
+    enc.movz(X1, 0, 0);
+    enc.b(convert);
+    enc.bindLabel(upperEntry);
+    enc.movz(X1, 1, 0);
+    enc.b(convert);
+    enc.bindLabel(titleEntry);
+    enc.movz(X1, 2, 0);
 
-    enc.ldr_imm(arm64::X6, arm64::FP, 16);
-    enc.ldr_imm(arm64::X5, arm64::FP, 24);
-    enc.ldr_imm(arm64::X7, arm64::FP, 32);
-    enc.movz(arm64::X4, 0, 0);
+    auto empty = enc.createLabel(), done = enc.createLabel(), next = enc.createLabel();
+    auto sizeReady = enc.createLabel(), sizeTwo = enc.createLabel(), sizeThree = enc.createLabel();
+    auto continuation = enc.createLabel(), lookup = enc.createLabel(), search = enc.createLabel();
+    auto raiseLow = enc.createLabel(), lowerHigh = enc.createLabel(), unmatched = enc.createLabel();
+    auto upper = enc.createLabel(), lower = enc.createLabel(), space = enc.createLabel();
+    auto writeByte = enc.createLabel(), finish = enc.createLabel();
 
-    size_t loop = enc.createLabel();
-    size_t store = enc.createLabel();
-    size_t done = enc.createLabel();
-    enc.bindLabel(loop);
-    enc.cmp_rr(arm64::X4, arm64::X5);
-    enc.b_cond(arm64::GE, done);
-    enc.add_rrr(arm64::X9, arm64::X6, arm64::X4);
-    enc.ldrb_imm(arm64::X10, arm64::X9, 0);
-    enc.movz(arm64::X11, toUpper ? 'a' : 'A', 0);
-    enc.cmp_rr(arm64::X10, arm64::X11);
-    enc.b_cond(arm64::LT, store);
-    enc.movz(arm64::X11, toUpper ? 'z' : 'Z', 0);
-    enc.cmp_rr(arm64::X10, arm64::X11);
-    enc.b_cond(arm64::GT, store);
-    if (toUpper) enc.sub_rri(arm64::X10, arm64::X10, 32);
-    else         enc.add_rri(arm64::X10, arm64::X10, 32);
-    enc.bindLabel(store);
-    enc.add_rrr(arm64::X12, arm64::X7, arm64::X4);
-    enc.strb_imm(arm64::X10, arm64::X12, 0);
-    enc.add_rri(arm64::X4, arm64::X4, 1);
-    enc.b(loop);
+    enc.bindLabel(convert);
+    enc.stp_pre(FP, LR, SP, -32);
+    enc.mov_rr(FP, SP);
+    enc.str_imm(X0, FP, 16);
+    enc.str_imm(X1, FP, 24);
+    enc.cbz(X0, empty);
+    enc.bl(length);
+    enc.lsl_ri(X0, X0, 2);
+    enc.add_rri(X0, X0, 1);
+    enc.bl(allocate);
+    enc.cbz(X0, empty);
+    enc.ldr_imm(X4, FP, 16); // input cursor
+    enc.mov_rr(X5, X0);      // output base
+    enc.mov_rr(X6, X0);      // output cursor
+    enc.adr_data(X7, table);
+    enc.ldr_imm(X8, FP, 24); // operation
+    enc.movz(X9, 1, 0);      // next character starts a title word
+
+    enc.bindLabel(next);
+    enc.ldrb_imm(X10, X4, 0); // packed input
+    enc.cbz(X10, finish);
+    enc.add_rri(X4, X4, 1);
+    enc.cmp_ri(X10, 0xc2);
+    enc.b_cond(LT, lookup);
+    enc.cmp_ri(X10, 0xf4);
+    enc.b_cond(GT, lookup);
+    enc.cmp_ri(X10, 0xe0);
+    enc.b_cond(LT, sizeTwo);
+    enc.cmp_ri(X10, 0xf0);
+    enc.b_cond(LT, sizeThree);
+    enc.movz(X13, 32, 0);
+    enc.b(sizeReady);
+    enc.bindLabel(sizeThree);
+    enc.movz(X13, 24, 0);
+    enc.b(sizeReady);
+    enc.bindLabel(sizeTwo);
+    enc.movz(X13, 16, 0);
+    enc.bindLabel(sizeReady);
+    enc.movz(X11, 8, 0);
+    enc.bindLabel(continuation);
+    enc.ldrb_imm(X12, X4, 0);
+    enc.cmp_ri(X12, 0x80);
+    enc.b_cond(LT, lookup);
+    enc.cmp_ri(X12, 0xbf);
+    enc.b_cond(GT, lookup);
+    enc.lsl_rrr(X12, X12, X11);
+    enc.orr_rrr(X10, X10, X12);
+    enc.add_rri(X4, X4, 1);
+    enc.add_rri(X11, X11, 8);
+    enc.cmp_rr(X11, X13);
+    enc.b_cond(LT, continuation);
+
+    enc.bindLabel(lookup);
+    enc.movz(X13, 0, 0); // lower bound
+    enc.mov_ri64(X14, thava_unicode::caseMappingCount); // exclusive upper bound
+    enc.bindLabel(search);
+    enc.cmp_rr(X13, X14);
+    enc.b_cond(GE, unmatched);
+    enc.add_rrr(X15, X13, X14);
+    enc.lsr_ri(X15, X15, 1);
+    enc.lsl_ri(X16, X15, 5);
+    enc.add_rrr(X16, X7, X16);
+    enc.ldr_imm(X0, X16, 0);
+    enc.cmp_rr(X0, X10);
+    enc.b_cond(LT, raiseLow);
+    enc.b_cond(GT, lowerHigh);
+    enc.cbz(X8, lower);
+    enc.cmp_ri(X8, 1);
+    enc.b_cond(EQ, upper);
+    enc.ldr_imm(X0, X16, 24);
+    enc.cbz(X0, space);
+    enc.cbz(X9, lower);
+    enc.movz(X9, 0, 0);
+    enc.b(writeByte);
+
+    enc.bindLabel(lower);
+    enc.ldr_imm(X0, X16, 8);
+    enc.movz(X9, 0, 0);
+    enc.b(writeByte);
+    enc.bindLabel(upper);
+    enc.ldr_imm(X0, X16, 16);
+    enc.b(writeByte);
+    enc.bindLabel(raiseLow);
+    enc.add_rri(X13, X15, 1);
+    enc.b(search);
+    enc.bindLabel(lowerHigh);
+    enc.mov_rr(X14, X15);
+    enc.b(search);
+    enc.bindLabel(space);
+    enc.movz(X9, 1, 0);
+    enc.mov_rr(X0, X10);
+    enc.b(writeByte);
+    enc.bindLabel(unmatched);
+    enc.movz(X9, 0, 0);
+    enc.mov_rr(X0, X10);
+
+    enc.bindLabel(writeByte);
+    enc.strb_imm(X0, X6, 0);
+    enc.add_rri(X6, X6, 1);
+    enc.lsr_ri(X0, X0, 8);
+    enc.cbnz(X0, writeByte);
+    enc.b(next);
+    enc.bindLabel(finish);
+    enc.strb_imm(X10, X6, 0);
+    enc.mov_rr(X0, X5);
+    enc.b(done);
+    enc.bindLabel(empty);
+    enc.adr_data(X0, emptyString);
     enc.bindLabel(done);
-    enc.add_rrr(arm64::X12, arm64::X7, arm64::X5);
-    enc.movz(arm64::X13, 0, 0);
-    enc.strb_imm(arm64::X13, arm64::X12, 0);
-    enc.mov_rr(arm64::X0, arm64::X7);
-    enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 64);
+    enc.ldp_post(FP, LR, SP, 32);
     enc.ret();
 }
 
@@ -140,53 +223,6 @@ inline void emitStrStrip(Encoder& enc, size_t lblStrStrip, size_t lblStrLen, siz
     enc.bindLabel(emptyLbl);
     enc.adr_data(arm64::X0, offEmptyStr);
     enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 96);
-    enc.ret();
-}
-
-inline void emitStrTitle(Encoder& enc, size_t lblStrTitle, size_t lblStrLower, uint32_t offEmptyStr) {
-    enc.bindLabel(lblStrTitle);
-    enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -64);
-    enc.mov_rr(arm64::FP, arm64::SP);
-    size_t emptyLbl = enc.createLabel();
-    size_t doneLbl  = enc.createLabel();
-    size_t nextLbl  = enc.createLabel();
-    size_t loopLbl  = enc.createLabel();
-
-    enc.cbz(arm64::X0, emptyLbl);
-    enc.bl(lblStrLower);
-    enc.str_imm(arm64::X0, arm64::FP, 16); // p
-    enc.movz(arm64::X4, 0, 0);   // i
-    enc.movz(arm64::X14, 1, 0);  // prevIsSpace
-
-    enc.bindLabel(loopLbl);
-    enc.ldr_imm(arm64::X6, arm64::FP, 16);
-    enc.add_rrr(arm64::X9, arm64::X6, arm64::X4);
-    enc.ldrb_imm(arm64::X10, arm64::X9, 0);
-    enc.cbz(arm64::X10, doneLbl);
-    enc.cbz(arm64::X14, nextLbl);
-    enc.movz(arm64::X11, 'a', 0);
-    enc.cmp_rr(arm64::X10, arm64::X11);
-    enc.b_cond(arm64::LT, nextLbl);
-    enc.movz(arm64::X11, 'z', 0);
-    enc.cmp_rr(arm64::X10, arm64::X11);
-    enc.b_cond(arm64::GT, nextLbl);
-    enc.sub_rri(arm64::X10, arm64::X10, 32);
-    enc.strb_imm(arm64::X10, arm64::X9, 0);
-
-    enc.bindLabel(nextLbl);
-    enc.cmp_ri(arm64::X10, ' ');
-    enc.cset(arm64::X14, arm64::EQ);
-    enc.add_rri(arm64::X4, arm64::X4, 1);
-    enc.b(loopLbl);
-
-    enc.bindLabel(doneLbl);
-    enc.ldr_imm(arm64::X0, arm64::FP, 16);
-    enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 64);
-    enc.ret();
-
-    enc.bindLabel(emptyLbl);
-    enc.adr_data(arm64::X0, offEmptyStr);
-    enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 64);
     enc.ret();
 }
 

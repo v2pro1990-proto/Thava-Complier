@@ -4252,6 +4252,10 @@ public:
         }
 
         if constexpr (std::is_same_v<TRuntime, Arm64WinRuntime>) {
+            enc.movz(arm64::X0, 65001, 0);
+            emitWindowsImport("SetConsoleCP");
+            enc.movz(arm64::X0, 65001, 0);
+            emitWindowsImport("SetConsoleOutputCP");
             enc.bl(runtime.lblSeedRand);
         }
 

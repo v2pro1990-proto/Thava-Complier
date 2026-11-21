@@ -732,7 +732,9 @@ Thava variables of string and collection types feature built-in methods with sea
 * `s.upper() -> <str>`: Returns an uppercase copy.
 * `s.lower() -> <str>`: Returns a lowercase copy.
 * `s.strip() -> <str>`: Trims leading and trailing whitespace.
-* `s.title() -> <str>`: Capitalizes the first letter of each word.
+* `s.title() -> <str>`: Applies titlecase to the first character of each whitespace-delimited word and lowercase to the rest.
+
+The three methods and `key.input.upper` / `key.input.lower` use the same Unicode 17.0 UTF-8 case mappings on every backend. Mappings can expand a character, such as `ß` to `SS` in uppercase. Thava applies unconditional case mappings without Unicode normalization or locale-specific rules.
 * `s.find(<str> substr) -> <int>`: Returns the 0-based index of the first occurrence of `substr` (-1 if not found).
 * `s.count(<str> substr) -> <int>`: Counts non-overlapping occurrences of `substr`.
 * `s.replace(<str> old_str, <str> new_str) -> <str>`: Replaces all occurrences of `old_str` with `new_str`.
