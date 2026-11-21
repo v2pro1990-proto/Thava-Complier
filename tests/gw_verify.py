@@ -28,8 +28,6 @@ with tempfile.TemporaryDirectory() as tmp:
                         "/Fe:arm64-ci-fixture.dll"], cwd=tmp, check=True)
         expected["ffi_arm64"] = "true false 8.75 45 arm64 -12 2.5 9 5000000000 54321"
     if run_windows_arm64:
-        import ctypes
-
         for fixture, output in [
             ("thdl_arm64_library", "core_arm64.thdl"),
             ("thdl_arm64_dependency", "dependent_arm64.thdl"),
@@ -42,10 +40,15 @@ with tempfile.TemporaryDirectory() as tmp:
             assert struct.unpack_from("<H", data, header + 22)[0] & 0x2000
             assert struct.unpack_from("<I", data, header + 24 + 112)[0]
 
-        library = ctypes.WinDLL(str(Path(tmp) / "core_arm64.thdl"))
-        metadata_export = getattr(library, "_thava_get_metadata")
-        metadata_export.restype = ctypes.c_char_p
-        assert b"machine:arm64-pe\npe-dll:1\n" in metadata_export()
+        # A separate process releases the DLL before the temporary directory is removed.
+        subprocess.run([sys.executable, "-c", """
+import ctypes
+from pathlib import Path
+library = ctypes.WinDLL(str(Path('core_arm64.thdl').resolve()))
+metadata = library._thava_get_metadata
+metadata.restype = ctypes.c_char_p
+assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
+"""], cwd=tmp, check=True)
         expected["thdl_arm64_consumer"] = "42 43 44 5.5 thdl"
     for target in targets:
         cases = dict(expected)

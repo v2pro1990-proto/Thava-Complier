@@ -484,7 +484,11 @@ inline std::string resolveAndLoadDL(const std::string& rawPath, const std::strin
     }
 
     std::error_code ec;
-    std::string normPath = std::filesystem::weakly_canonical(foundPath, ec).string();
+    auto absolutePath = std::filesystem::absolute(foundPath, ec);
+    if (ec) absolutePath = foundPath;
+    auto canonicalPath = std::filesystem::weakly_canonical(absolutePath, ec);
+    const auto normPath = (ec || canonicalPath.empty() ? absolutePath.lexically_normal()
+                                                       : canonicalPath).string();
     if (g_dlLibrariesSet.count(normPath)) {
         return normPath;
     }
