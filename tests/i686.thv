@@ -1,0 +1,11 @@
+<int64> func sum(<int> n) {
+    if n == 0 {
+        return 5000000000
+    }
+    return n + sum(n - 1)
+}
+
+<int64> total = sum(3)
+<dbl> half = 5.0 / 2.0
+<str> text = "trời đẹp".upper()
+cons.out("@{total} @{half} @{text}")

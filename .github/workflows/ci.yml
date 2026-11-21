@@ -36,6 +36,14 @@ jobs:
       - name: Verify global writes
         run: python tests/gw_verify.py ./thavac.exe
 
+      - name: Set up MSVC for i686
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build and run a Windows i686 executable
+        run: python tests/i686_verify.py ./thavac.exe
+
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +68,9 @@ jobs:
 
       - name: Execute global-write fixture on Windows ARM64
         run: python tests/gw_verify.py ./thavac-windows-arm64.exe --run-windows-arm64
+
+      - name: Verify the Windows ARM64 C++ toolchain target
+        run: python tests/i686_verify.py ./thavac-windows-arm64.exe --windows-arm64
 
       - name: Upload Windows ARM64 artifact
         uses: actions/upload-artifact@v4
@@ -115,9 +126,25 @@ jobs:
           name: thavac-linux-arm64
           path: thavac-linux-arm64
 
+  test-linux-i686:
+    name: Run Linux i686
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the 32-bit GCC C++ runtime and headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++-multilib
+
+      - name: Build the compiler and test ELF32 output
+        run: |
+          g++ -O0 -std=c++17 src/thavac.cpp -o thavac-linux-x64
+          python3 tests/i686_verify.py ./thavac-linux-x64
+
   release:
     name: Publish Release
-    needs: [build-windows-x64, build-windows-arm64, build-linux]
+    needs: [build-windows-x64, build-windows-arm64, build-linux, test-linux-i686]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

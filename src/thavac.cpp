@@ -6511,6 +6511,7 @@ int main(int argc, char* argv[]) {
 #endif
     bool isArm64Mode = false;
     bool isWinArm64Mode = false;
+    bool isI686Mode = false;
     bool explicitNative = false;
     bool explicitCpp = false;
     bool isLibFlag = false;
@@ -6526,6 +6527,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--backend" && i + 1 < argc) {
             std::string b = argv[++i];
             if (b == "cpp") { useCppBackend = true; explicitCpp = true; }
+            else if (b == "cpp-i686") { isI686Mode = true; isArm64Mode = false; }
             else if (b == "native") { useCppBackend = false; explicitNative = true; }
             else if (b == "elf") { useCppBackend = false; explicitNative = true; isElfMode = true; }
             else if (b == "pe")  { useCppBackend = false; explicitNative = true; isElfMode = false; isArm64Mode = false; }
@@ -6541,17 +6543,22 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--pe") {
             useCppBackend = false; explicitNative = true; isElfMode = false; isArm64Mode = false;
         } else if (arg == "--arm64" || arg == "--aarch64") {
-            isArm64Mode = true;
+            isArm64Mode = true; isI686Mode = false;
         } else if (arg == "--target" && i + 1 < argc) {
             std::string t = argv[++i];
-            if (t == "win-arm64" || t == "windows-arm64" || t == "arm64-windows" || t == "pe-arm64") {
-                isArm64Mode = true; isWinArm64Mode = true; isElfMode = false;
+            if (t == "win-i686" || t == "linux-i686") {
+                isI686Mode = true;
+                isArm64Mode = false;
+                isWinArm64Mode = false;
+                isElfMode = t == "linux-i686";
+            } else if (t == "win-arm64" || t == "windows-arm64" || t == "arm64-windows" || t == "pe-arm64") {
+                isArm64Mode = true; isI686Mode = false; isWinArm64Mode = true; isElfMode = false;
             } else if (t == "linux-arm64" || t == "arm64-linux" || t == "elf-arm64") {
-                isArm64Mode = true; isWinArm64Mode = false; isElfMode = true;
+                isArm64Mode = true; isI686Mode = false; isWinArm64Mode = false; isElfMode = true;
             } else if (t == "win-x64" || t == "windows-x64") {
-                isArm64Mode = false; isElfMode = false;
+                isArm64Mode = false; isI686Mode = false; isWinArm64Mode = false; isElfMode = false;
             } else if (t == "linux-x64") {
-                isArm64Mode = false; isElfMode = true;
+                isArm64Mode = false; isI686Mode = false; isWinArm64Mode = false; isElfMode = true;
             }
         } else if (arg == "--os" && i + 1 < argc) {
             std::string o = argv[++i];
@@ -6564,8 +6571,12 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--arch" && i + 1 < argc) {
             std::string a = argv[++i];
-            if (a == "arm64" || a == "aarch64") { isArm64Mode = true; }
-            else if (a == "x86_64" || a == "x64" || a == "amd64") { isArm64Mode = false; }
+            if (a == "arm64" || a == "aarch64") { isArm64Mode = true; isI686Mode = false; }
+            else if (a == "i686" || a == "x86") {
+                isI686Mode = true; isArm64Mode = false; isWinArm64Mode = false;
+            } else if (a == "x86_64" || a == "x64" || a == "amd64") {
+                isArm64Mode = false; isWinArm64Mode = false; isI686Mode = false;
+            }
         } else if (arg == "--lib" || arg == "--shared" || arg == "--dll") {
             isLibFlag = true;
         } else if (arg == "-O0" || arg == "--O0") {
@@ -6582,9 +6593,20 @@ int main(int argc, char* argv[]) {
     }
 
     if (inputFile.empty()) {
-        std::cout << "Usage: thavac <source.thv> [-o <output_binary>] [--backend native|elf|pe|arm64|cpp] [--arch x86_64|arm64] [--lib] [-O0|-O1|-O2|-O3]\n"
+        std::cout << "Usage: thavac <source.thv> [-o <output_binary>] [--backend native|elf|pe|arm64|cpp|cpp-i686] [--arch x86_64|arm64|i686] [--lib] [-O0|-O1|-O2|-O3]\n"
+                  << "       thavac <source.thv> --target win-i686|linux-i686 [-o <output_binary>]\n"
                   << "       thavac --info <file.thdl|.so> (view metadata of dynamic library)\n";
         return 1;
+    }
+
+    if (isI686Mode) {
+        if (explicitNative) {
+            std::cerr << "[Thava Compiler Error]: i686 currently requires the C++ toolchain backend. "
+                         "Use --target win-i686 or --target linux-i686 without --native.\n";
+            return 1;
+        }
+        useCppBackend = true;
+        explicitCpp = true;
     }
 
     // Automatically detect dynamic library mode
@@ -6602,11 +6624,7 @@ int main(int argc, char* argv[]) {
     std::string stemName = std::filesystem::path(inputFile).stem().string();
     if (!explicitOutput) {
         if (g_isLibraryMode) {
-#ifdef _WIN32
-            outputFile = stemName + ".thdl";
-#else
-            outputFile = stemName + ".so";
-#endif
+            outputFile = stemName + (isElfMode ? ".so" : ".thdl");
         } else {
             if (isArm64Mode) {
                 if (isWinArm64Mode) outputFile = stemName + "_arm64.exe";
@@ -6617,15 +6635,10 @@ int main(int argc, char* argv[]) {
         }
     } else {
         if (g_isLibraryMode) {
-#ifdef _WIN32
-            if (outputFile.find('.') == std::string::npos) outputFile += ".thdl";
-#else
-            if (outputFile.find('.') == std::string::npos) outputFile += ".so";
-#endif
-        } else {
-            if ((!isElfMode && !isArm64Mode) || isWinArm64Mode) {
-                if (outputFile.find(".exe") == std::string::npos) outputFile += ".exe";
-            }
+            if (std::filesystem::path(outputFile).extension().empty())
+                outputFile += isElfMode ? ".so" : ".thdl";
+        } else if ((!isElfMode && !isArm64Mode) || isWinArm64Mode) {
+            if (std::filesystem::path(outputFile).extension() != ".exe") outputFile += ".exe";
         }
     }
 
@@ -6825,6 +6838,17 @@ int main(int argc, char* argv[]) {
 
     // --- C++ Transpiler Backend (Optimized C++ Output) ---
     std::stringstream cppOutput;
+    if (isI686Mode) {
+        cppOutput << "#if !(defined(__i386__) || defined(_M_IX86)) || "
+                  << (isElfMode ? "!defined(__linux__)" : "!defined(_WIN32)")
+                  << "\\n#error The selected C++ compiler must target "
+                  << (isElfMode ? "Linux" : "Windows")
+                  << " i686.\\n#endif\\n";
+    } else if (isWinArm64Mode) {
+        cppOutput << "#if !defined(_WIN32) || !(defined(__aarch64__) || defined(_M_ARM64))\\n"
+                  << "#error Select an ARM64 Windows C++ compiler or an ARM64 MSVC developer environment.\\n"
+                  << "#endif\\n";
+    }
     cppOutput << "// === Thava Compiler Generated C++ Source ===\n"
               << "// Optimizations: Fast I/O, pass-by-const-ref, inline runtime helpers\n\n";
 
@@ -8310,7 +8334,8 @@ inline std::string _thava_read_console_line() {
     std::string compileCmd;
     DetectedCompiler comp;
 
-    if (isArm64Mode) {
+    const bool targetedCpp = isI686Mode || isWinArm64Mode;
+    if (isArm64Mode && !isWinArm64Mode) {
         std::cout << "[Thava Compiler] Cross-compiling for Linux AArch64 (ARM64) via aarch64-linux-gnu-g++ (" << optFlag << ")...\n";
 #ifdef _WIN32
         compileCmd = "wsl.exe -e aarch64-linux-gnu-g++ " + optFlag + " -s \"" + tempCppFile + "\" -o \"" + outputFile + "\"";
@@ -8319,7 +8344,16 @@ inline std::string _thava_read_console_line() {
 #endif
         comp.displayName = "aarch64-linux-gnu-g++";
     } else {
-        comp = detectHostCXXCompiler(g_explicitCxx);
+        std::string compiler = g_explicitCxx;
+        if (targetedCpp && compiler.empty() && !std::getenv("CXX")) {
+            const char* cross = isWinArm64Mode ? "aarch64-w64-mingw32-clang++" :
+                                isElfMode ? "i686-linux-gnu-g++" : "i686-w64-mingw32-g++";
+            if (probeCompilerCommand(cross)) compiler = cross;
+#ifdef _WIN32
+            else if (!isElfMode && probeCompilerCommand("cl")) compiler = "cl";
+#endif
+        }
+        comp = detectHostCXXCompiler(compiler);
         if (comp.type == HostCXXType::NONE) {
             std::cerr << "[Thava Compiler Error]: No C++ compiler (g++, clang++, or cl) detected on your system!\n"
                       << "The transpiler backend (--cpp) requires a host C++17 compiler.\n\n"
@@ -8331,54 +8365,38 @@ inline std::string _thava_read_console_line() {
             return 1;
         }
 
-        std::cout << "[Thava Compiler] Using detected C++ compiler: " << comp.displayName << " (" << optFlag << ")...\n";
+        std::cout << "[Thava Compiler] Using detected C++ compiler: " << comp.displayName << " (" << optFlag << ")...\\n";
 
         if (comp.type == HostCXXType::MSVC) {
             std::string msvcOpt = (g_optLevel == 0) ? "/Od" : "/O2";
             compileCmd = comp.command + " /nologo /std:c++17 /EHsc /utf-8 " + msvcOpt;
-            if (g_isLibraryMode) {
-                compileCmd += " /LD";
-            }
+            if (g_isLibraryMode) compileCmd += " /LD";
+            if (isI686Mode && !isElfMode) compileCmd += " /arch:IA32";
             compileCmd += " \"" + tempCppFile + "\"";
-            for (const auto& libPath : g_dlLibraries) {
-                compileCmd += " \"" + libPath + "\"";
-            }
+            for (const auto& libPath : g_dlLibraries) compileCmd += " \"" + libPath + "\"";
             compileCmd += " gdi32.lib user32.lib kernel32.lib comctl32.lib comdlg32.lib";
             compileCmd += " /Fe:\"" + outputFile + "\"";
         } else {
-            std::string cxxFlags = comp.command + " -std=c++17 " + optFlag;
-            if (comp.type == HostCXXType::GCC) {
-                cxxFlags += " -finput-charset=UTF-8 -fexec-charset=UTF-8";
-            }
-            cxxFlags += " -march=native -s";
-
-            if (g_isLibraryMode) {
-                compileCmd = comp.command + " -shared -fPIC -std=c++17 " + optFlag;
-                if (comp.type == HostCXXType::GCC) {
-                    compileCmd += " -finput-charset=UTF-8 -fexec-charset=UTF-8";
-                }
-                compileCmd += " -march=native -s \"" + tempCppFile + "\"";
-                for (const auto& libPath : g_dlLibraries) {
-                    compileCmd += " \"" + libPath + "\"";
-                }
+            compileCmd = comp.command + " -std=c++17 " + optFlag;
+            if (comp.type == HostCXXType::GCC)
+                compileCmd += " -finput-charset=UTF-8 -fexec-charset=UTF-8";
+            if (isI686Mode) compileCmd += " -m32 -march=i686";
+            else if (!targetedCpp) compileCmd += " -march=native";
+            if (g_isLibraryMode) compileCmd += " -shared -fPIC";
+            compileCmd += " -s \"" + tempCppFile + "\"";
+            for (const auto& libPath : g_dlLibraries) compileCmd += " \"" + libPath + "\"";
 #ifdef _WIN32
-                compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
+            const bool linkWindows = !targetedCpp || !isElfMode;
 #else
-                compileCmd += " -Wl,-rpath,'$ORIGIN' -Wl,-rpath,. -ldl";
+            const bool linkWindows = targetedCpp && !isElfMode;
 #endif
-                compileCmd += " -o \"" + outputFile + "\"";
+            if (linkWindows) {
+                compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
+                if (isI686Mode && comp.type == HostCXXType::GCC && !g_isLibraryMode) compileCmd += " -static";
             } else {
-                compileCmd = cxxFlags + " \"" + tempCppFile + "\"";
-                for (const auto& libPath : g_dlLibraries) {
-                    compileCmd += " \"" + libPath + "\"";
-                }
-#ifdef _WIN32
-                compileCmd += " -lgdi32 -luser32 -lkernel32 -lcomctl32 -lcomdlg32";
-#else
                 compileCmd += " -Wl,-rpath,'$ORIGIN' -Wl,-rpath,. -ldl";
-#endif
-                compileCmd += " -o \"" + outputFile + "\"";
             }
+            compileCmd += " -o \"" + outputFile + "\"";
         }
     }
 

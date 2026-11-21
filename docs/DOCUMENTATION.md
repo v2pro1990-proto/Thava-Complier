@@ -840,6 +840,7 @@ Usage: thavac <source.thv> [-o <output_binary>] [--arch x86_64|arm64] [--backend
 | `--backend native` | Direct Native machine code generation for host OS (Default). |
 | `--backend arm64` / `--backend elf-arm64` | Direct Native Linux AArch64 (ARM64) ELF64 code generation. |
 | `--backend pe-arm64` / `--target win-arm64` | Direct Native Windows ARM64 (PE32+ `0xAA64`) code generation [Experimental]. |
+| `--target win-i686` / `--target linux-i686` | 32-bit x86 executables via a target C++17 toolchain (PE32 or ELF32). |
 | `--backend elf` | Direct Native Linux x86-64 ELF64 binary. |
 | `--backend pe` | Direct Native Windows x86-64 PE32+ binary. |
 | `--backend cpp` | Transpile to optimized C++17 and build via host C++ compiler. |
@@ -892,6 +893,14 @@ Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section c
    - `key.input`, `key.input.lower` and `key.input.upper` read Unicode from the Windows console. Redirected input is read as UTF-8. Numeric input is parsed with `_atoi64` / `atof`. String helpers for case conversion, trimming, search, replacement, split and join are shared with Linux ARM64. List and string membership (`in`), `rand()`, `randint()` and `randres()` with optional numeric weights are supported. Dictionaries use the same ARM64 runtime helpers on Linux and Windows. `file.open`, read and write methods use the Windows C runtime. Windows ARM64 provides `os.name`, `system`, `getpid`, `cpu_count`, `getcwd`, `chdir`, `mkdir`, `rmdir`, `remove`, `rename`, `exists`, `is_file`, `is_dir`, `getsize`, `getenv`, and `sleep`. It also supports `time.timestamp()`, `time.sleep()`, and local time components (`year`, `month`, `day`, `hour`, `minute`, `second`, and `millis`). It also supports `os.listdir()`, `os.setenv()`, `os.showmessagebox()`, and formatting dates and times with `time.now()` and `time.date()`. Native `clib` can load ARM64 DLLs and call fixed-signature scalar C functions, including mixed integer and floating-point arguments. Use `<int64>` for handles and pointers. Native `cfunc` / `c.` resolves C runtime symbols from `msvcrt.dll` or existing Windows imports. Header-driven calls (`@cattach`), C global variables, and C++ types use the C++ backend.
 5. **C++17 Transpiler Fallback (Active):**
    - Automatic fallback when complex native C++ template headers are attached via `@cattach`.
+
+### 32-bit x86 (i686)
+
+- `thavac program.thv --target win-i686 -o program.exe` emits Windows PE32. Use `i686-w64-mingw32-g++` or run the compiler from an x86 MSVC developer environment.
+- `thavac program.thv --target linux-i686 -o program` emits Linux ELF32. Run from Linux or WSL using `i686-linux-gnu-g++` or GCC with 32-bit C++ headers and libraries (`g++-multilib` on Ubuntu).
+- `--backend cpp-i686` selects 32-bit C++ output for the current OS. The i686 target requires a C++ toolchain. Thava's `<int64>` remains 64-bit.
+
+For Windows ARM64 code that uses C/C++ headers, use `--cpp --target win-arm64` with the ARM64 MSVC developer environment or an ARM64 MinGW-w64 toolchain. The transpiler verifies the C++ compiler's target architecture and OS before linking.
 
 ### AArch64 / ARM64 Backend Architecture
 The ARM64 backend operates completely without external toolchains:
