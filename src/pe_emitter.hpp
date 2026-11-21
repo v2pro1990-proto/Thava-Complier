@@ -29,6 +29,7 @@ public:
     };
     std::vector<ExportEntry> exportList;
 
+    const bool isI686;
     bool isArm64 = false;
     void setArm64(bool a) { isArm64 = a; }
 
@@ -86,7 +87,12 @@ private:
     }
 
 public:
-    PeEmitter() {
+    explicit PeEmitter(bool x86 = false) : isI686(x86) {
+        if (isI686) {
+            for (const char* name : {"ExitProcess", "GetStdHandle", "SetConsoleOutputCP", "WriteFile"})
+                addImport("kernel32.dll", name);
+            return;
+        }
         // Register default standard C runtime functions from msvcrt.dll
         addImport("msvcrt.dll", "printf");
         addImport("msvcrt.dll", "puts");
@@ -259,8 +265,9 @@ public:
     }
 
     void appendImportThunk(uint32_t rva) {
-        appendRdataRva(rva);
-        appendVal<uint32_t>(rdataBytes, 0);
+        if (rva) appendRdataRva(rva);
+        else appendVal<uint32_t>(rdataBytes, 0);
+        if (!isI686) appendVal<uint32_t>(rdataBytes, 0);
     }
 
     // Pre-calculate RVAs of strings and imports so code generator knows targets
@@ -310,7 +317,7 @@ public:
         for (const auto& pair : dllEntries) {
             iltRvas[pair.first] = rdataRva + static_cast<uint32_t>(rdataBytes.size());
             for (const auto& entry : pair.second) appendImportThunk(entry.hintNameRva);
-            appendVal<uint64_t>(rdataBytes, 0);
+            appendImportThunk(0);
         }
 
         const uint32_t iatOffset = static_cast<uint32_t>(rdataBytes.size());
@@ -327,7 +334,7 @@ public:
                 qualifiedIatRvas[{pair.first, entry.name}] = slot;
                 appendImportThunk(entry.hintNameRva);
             }
-            appendVal<uint64_t>(rdataBytes, 0);
+            appendImportThunk(0);
         }
         iatSizeCached = static_cast<uint32_t>(rdataBytes.size()) - iatOffset;
 
@@ -442,7 +449,7 @@ public:
 
         // ARM64 images use ASLR. The emitted code is position-independent, so an
         // ABSOLUTE-only relocation block suffices when no addresses need fixing.
-        const bool hasRelocations = isDll || isArm64;
+        const bool hasRelocations = isDll || isArm64 || isI686;
         std::vector<uint8_t> relocBytes;
         uint32_t relocRva = 0;
         uint32_t relocVirtualSize = 0;
@@ -493,17 +500,18 @@ public:
 
         // 3. COFF File Header
         size_t coffOffset = peOffset + 4;
-        writeVal<uint16_t>(peFile, coffOffset + 0,  isArm64 ? 0xAA64 : 0x8664);  // ARM64 (0xAA64) vs AMD64 (0x8664)
+        writeVal<uint16_t>(peFile, coffOffset + 0,  isI686 ? 0x014C : (isArm64 ? 0xAA64 : 0x8664));  // ARM64 (0xAA64) vs AMD64 (0x8664)
         writeVal<uint16_t>(peFile, coffOffset + 2,  hasRelocations ? 3 : 2); // .text, .rdata, optional .reloc
         writeVal<uint32_t>(peFile, coffOffset + 4,  0);       // TimeDateStamp
         writeVal<uint32_t>(peFile, coffOffset + 8,  0);       // PointerToSymbolTable
         writeVal<uint32_t>(peFile, coffOffset + 12, 0);       // NumberOfSymbols
-        writeVal<uint16_t>(peFile, coffOffset + 16, 240);     // SizeOfOptionalHeader = 0xF0
-        writeVal<uint16_t>(peFile, coffOffset + 18, isDll ? 0x2022 : 0x0022); // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE (| IMAGE_FILE_DLL)
+        const uint16_t optHeaderSize = isI686 ? 224 : 240;
+        writeVal<uint16_t>(peFile, coffOffset + 16, optHeaderSize);
+        writeVal<uint16_t>(peFile, coffOffset + 18, (isDll ? 0x2022 : 0x0022) | (isI686 ? 0x0100 : 0)); // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE (| IMAGE_FILE_DLL)
 
         // 4. Optional Header (PE32+ 64-bit)
         size_t optOffset = coffOffset + 20;
-        writeVal<uint16_t>(peFile, optOffset + 0,  0x020B);   // PE32+
+        writeVal<uint16_t>(peFile, optOffset + 0,  isI686 ? 0x010B : 0x020B);
         writeVal<uint8_t> (peFile, optOffset + 2,  14);       // MajorLinkerVersion
         writeVal<uint8_t> (peFile, optOffset + 3,  0);        // MinorLinkerVersion
         writeVal<uint32_t>(peFile, optOffset + 4,  textRawSize); // SizeOfCode
@@ -511,7 +519,12 @@ public:
         writeVal<uint32_t>(peFile, optOffset + 12, 0);        // SizeOfUninitializedData
         writeVal<uint32_t>(peFile, optOffset + 16, entryPointRva);  // AddressOfEntryPoint
         writeVal<uint32_t>(peFile, optOffset + 20, textRva);  // BaseOfCode
-        writeVal<uint64_t>(peFile, optOffset + 24, IMAGE_BASE);// ImageBase
+        if (isI686) {
+            writeVal<uint32_t>(peFile, optOffset + 24, rdataRva);   // BaseOfData
+            writeVal<uint32_t>(peFile, optOffset + 28, 0x400000);  // ImageBase
+        } else {
+            writeVal<uint64_t>(peFile, optOffset + 24, IMAGE_BASE);
+        }
         writeVal<uint32_t>(peFile, optOffset + 32, SEC_ALIGN);// SectionAlignment = 0x1000
         writeVal<uint32_t>(peFile, optOffset + 36, FILE_ALIGN);// FileAlignment = 0x200
         writeVal<uint16_t>(peFile, optOffset + 40, 6);        // MajorOperatingSystemVersion
@@ -526,34 +539,31 @@ public:
         writeVal<uint32_t>(peFile, optOffset + 64, 0);        // CheckSum
         writeVal<uint16_t>(peFile, optOffset + 68, 3);        // Subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI
         writeVal<uint16_t>(peFile, optOffset + 70, hasRelocations ? 0x8140 : 0x8100); // DYNAMIC_BASE | NX_COMPAT | TERMINAL_SERVER_AWARE
-        writeVal<uint64_t>(peFile, optOffset + 72, 0x100000); // StackReserve = 1MB
-        writeVal<uint64_t>(peFile, optOffset + 80, 0x1000);   // StackCommit = 4KB
-        writeVal<uint64_t>(peFile, optOffset + 88, 0x100000); // HeapReserve = 1MB
-        writeVal<uint64_t>(peFile, optOffset + 96, 0x1000);   // HeapCommit = 4KB
-        writeVal<uint32_t>(peFile, optOffset + 104, 0);       // LoaderFlags
-        writeVal<uint32_t>(peFile, optOffset + 108, 16);      // NumberOfRvaAndSizes = 16
-
-        // Data Directories
-        // Entry 0: Export Table
-        writeVal<uint32_t>(peFile, optOffset + 112, exportRvaCached);
-        writeVal<uint32_t>(peFile, optOffset + 116, exportSizeCached);
-
-        // Entry 1: Import Table
-        writeVal<uint32_t>(peFile, optOffset + 120, idtRvaCached);
-        writeVal<uint32_t>(peFile, optOffset + 124, idtSizeCached);
-
-        // Entry 5: Base Relocation Table
-        if (hasRelocations) {
-            writeVal<uint32_t>(peFile, optOffset + 152, relocRva);
-            writeVal<uint32_t>(peFile, optOffset + 156, relocVirtualSize);
+        if (isI686) {
+            writeVal<uint32_t>(peFile, optOffset + 72, 0x100000); // StackReserve
+            writeVal<uint32_t>(peFile, optOffset + 76, 0x1000);   // StackCommit
+            writeVal<uint32_t>(peFile, optOffset + 80, 0x100000); // HeapReserve
+            writeVal<uint32_t>(peFile, optOffset + 84, 0x1000);   // HeapCommit
+        } else {
+            writeVal<uint64_t>(peFile, optOffset + 72, 0x100000);
+            writeVal<uint64_t>(peFile, optOffset + 80, 0x1000);
+            writeVal<uint64_t>(peFile, optOffset + 88, 0x100000);
+            writeVal<uint64_t>(peFile, optOffset + 96, 0x1000);
         }
 
-        // Entry 12: Import Address Table
-        writeVal<uint32_t>(peFile, optOffset + 208, iatRvaCached);
-        writeVal<uint32_t>(peFile, optOffset + 212, iatSizeCached);
+        const size_t directories = optOffset + (isI686 ? 96 : 112);
+        writeVal<uint32_t>(peFile, directories - 4, 16);
+        auto writeDirectory = [&](size_t index, uint32_t rva, uint32_t size) {
+            writeVal<uint32_t>(peFile, directories + index * 8, rva);
+            writeVal<uint32_t>(peFile, directories + index * 8 + 4, size);
+        };
+        writeDirectory(0, exportRvaCached, exportSizeCached);
+        writeDirectory(1, idtRvaCached, idtSizeCached);
+        if (hasRelocations) writeDirectory(5, relocRva, relocVirtualSize);
+        writeDirectory(12, iatRvaCached, iatSizeCached);
 
         // 5. Section Headers (at optOffset + 240)
-        size_t secHdrOffset = optOffset + 240;
+        size_t secHdrOffset = optOffset + optHeaderSize;
 
         // Section 1: .text
         {
@@ -624,6 +634,6 @@ public:
         if (!out.is_open()) return false;
         out.write(reinterpret_cast<const char*>(peFile.data()), peFile.size());
         out.close();
-        return true;
+        return bool(out);
     }
 };

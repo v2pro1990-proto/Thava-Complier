@@ -34,7 +34,45 @@ with tempfile.TemporaryDirectory() as tmp:
     print(target, "executable format and runtime output OK")
 
     if not arm64:
+        fixture = source.with_name("i686_native.thv")
+        # Keep Windows PATH for thavac's own DLLs, but pass an invalid --cxx.
+        env = dict(os.environ)
+        if not windows:
+            env["PATH"] = ""
+        env.pop("CXX", None)
+        for switches, opt in [
+            (["--target", target, "--native"], "-O0"),
+            (["--backend", "pe-i686" if windows else "elf-i686"], "-O2"),
+        ]:
+            native = Path(tmp) / ("native" + opt + (".exe" if windows else ""))
+            build = subprocess.run([str(compiler), str(fixture), *switches, opt, "--cxx",
+                                    "missing-compiler", "-o", str(native)], cwd=tmp, env=env,
+                                   check=True, stdout=subprocess.PIPE, text=True, timeout=30)
+            assert "Success! Native i686" in build.stdout, build.stdout
+            data = native.read_bytes()
+            if windows:
+                pe = struct.unpack_from("<I", data, 0x3C)[0]
+                assert data[:2] == b"MZ" and data[pe:pe + 6] == b"PE\0\0\x4c\x01"
+                assert struct.unpack_from("<H", data, pe + 24)[0] == 0x10B
+                assert b"kernel32.dll\0" in data and b"msvcrt.dll\0" not in data
+            else:
+                assert data[:6] == b"\x7fELF\x01\x01"
+                assert struct.unpack_from("<H", data, 18)[0] == 3
+                phoff = struct.unpack_from("<I", data, 28)[0]
+                phsize, phcount = struct.unpack_from("<HH", data, 42)
+                assert all(struct.unpack_from("<I", data, phoff + phsize * i)[0] not in (2, 3)
+                           for i in range(phcount))  # No PT_DYNAMIC or PT_INTERP
+            result = subprocess.run([str(native)], cwd=tmp, check=True,
+                                    stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+            assert result.stdout.splitlines() == [
+                "5000000008 -9223372036854775808 -15000000000 -555555555 -8 2 2000000000",
+                "8 -1 1099511627776 -1 true false true trời đẹp",
+            ], result.stdout
+        print(target, "native code generation and runtime output OK")
+
+        rejected = Path(tmp) / ("unsupported.exe" if windows else "unsupported")
         result = subprocess.run([str(compiler), str(source), "--target", target, "--native",
-                                 "-o", str(output)], cwd=tmp, stdout=subprocess.PIPE,
+                                 "-o", str(rejected)], cwd=tmp, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
-        assert result.returncode != 0 and "i686 currently requires" in result.stdout, result.stdout
+        assert result.returncode != 0 and "native i686 backend yet" in result.stdout, result.stdout
+        assert not rejected.exists()

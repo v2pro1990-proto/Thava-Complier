@@ -6428,6 +6428,8 @@ static void thavaCollectVarDecls(ASTNode* node, std::vector<VarDeclNode*>& out) 
     }
 }
 
+#include "i686_codegen.hpp"
+
 // part 0 = globals of built-in types (declared before the class definitions, so
 //          class methods can already refer to them)
 // part 1 = globals holding class/struct values (declared after those definitions)
@@ -6523,7 +6525,15 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--backend" && i + 1 < argc) {
             std::string b = argv[++i];
             if (b == "cpp") { useCppBackend = true; explicitCpp = true; }
-            else if (b == "cpp-i686") { isI686Mode = true; isArm64Mode = false; }
+            else if (b == "cpp-i686" || b == "native-i686" || b == "elf-i686" || b == "pe-i686") {
+                isI686Mode = true;
+                isArm64Mode = false;
+                isWinArm64Mode = false;
+                explicitNative = b != "cpp-i686";
+                explicitCpp = !explicitNative;
+                useCppBackend = explicitCpp;
+                if (b == "elf-i686" || b == "pe-i686") isElfMode = b == "elf-i686";
+            }
             else if (b == "native") { useCppBackend = false; explicitNative = true; }
             else if (b == "elf") { useCppBackend = false; explicitNative = true; isElfMode = true; }
             else if (b == "pe")  { useCppBackend = false; explicitNative = true; isElfMode = false; isArm64Mode = false; }
@@ -6589,20 +6599,19 @@ int main(int argc, char* argv[]) {
     }
 
     if (inputFile.empty()) {
-        std::cout << "Usage: thavac <source.thv> [-o <output_binary>] [--backend native|elf|pe|arm64|cpp|cpp-i686] [--arch x86_64|arm64|i686] [--lib] [-O0|-O1|-O2|-O3]\n"
-                  << "       thavac <source.thv> --target win-i686|linux-i686 [-o <output_binary>]\n"
+        std::cout << "Usage: thavac <source.thv> [-o <output_binary>] [--backend native|elf|pe|arm64|cpp|cpp-i686|native-i686|elf-i686|pe-i686] [--arch x86_64|arm64|i686] [--lib] [-O0|-O1|-O2|-O3]\n"
+                  << "       thavac <source.thv> --target win-i686|linux-i686 [--native|--cpp] [-o <output_binary>]\n"
                   << "       thavac --info <file.thdl|.so> (view metadata of dynamic library)\n";
         return 1;
     }
 
     if (isI686Mode) {
-        if (explicitNative) {
-            std::cerr << "[Thava Compiler Error]: i686 currently requires the C++ toolchain backend. "
-                         "Use --target win-i686 or --target linux-i686 without --native.\n";
+        if (explicitCpp && explicitNative) {
+            std::cerr << "[Thava Compiler Error]: Choose either native i686 or the i686 C++ backend.\n";
             return 1;
         }
-        useCppBackend = true;
-        explicitCpp = true;
+        useCppBackend = !explicitNative;
+        explicitCpp = useCppBackend;
     }
 
     // Automatically detect dynamic library mode
@@ -6755,6 +6764,21 @@ int main(int argc, char* argv[]) {
     }
 
     // 4. Code Generation
+    if (isI686Mode && explicitNative) {
+        try {
+            i686::Codegen codegen(!isElfMode);
+            if (codegen.compile(ast, outputFile)) {
+                std::cout << "[Thava Compiler] Success! Native i686 "
+                          << (isElfMode ? "ELF32" : "PE32") << ": " << outputFile << "\n";
+                return 0;
+            }
+            std::cerr << "[Thava Compiler Error]: Could not write native i686 output '" << outputFile << "'.\n";
+        } catch (const std::exception& ex) {
+            std::cerr << "[i686 Codegen Error]: " << ex.what() << "\n";
+        }
+        return 1;
+    }
+
     if (!useCppBackend) {
         if (isArm64Mode) {
             if (isWinArm64Mode) {

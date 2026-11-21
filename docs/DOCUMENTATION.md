@@ -841,6 +841,7 @@ Usage: thavac <source.thv> [-o <output_binary>] [--arch x86_64|arm64] [--backend
 | `--backend arm64` / `--backend elf-arm64` | Direct Native Linux AArch64 (ARM64) ELF64 code generation. |
 | `--backend pe-arm64` / `--target win-arm64` | Direct Native Windows ARM64 (PE32+ `0xAA64`) code generation [Experimental]. |
 | `--target win-i686` / `--target linux-i686` | 32-bit x86 executables via a target C++17 toolchain (PE32 or ELF32). |
+| `--backend pe-i686` / `--backend elf-i686` | Direct Windows PE32 or Linux ELF32 code generation (experimental). |
 | `--backend elf` | Direct Native Linux x86-64 ELF64 binary. |
 | `--backend pe` | Direct Native Windows x86-64 PE32+ binary. |
 | `--backend cpp` | Transpile to optimized C++17 and build via host C++ compiler. |
@@ -896,9 +897,15 @@ Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section c
 
 ### 32-bit x86 (i686)
 
-- `thavac program.thv --target win-i686 -o program.exe` emits Windows PE32. Use `i686-w64-mingw32-g++` or run the compiler from an x86 MSVC developer environment.
-- `thavac program.thv --target linux-i686 -o program` emits Linux ELF32. Run from Linux or WSL using `i686-linux-gnu-g++` or GCC with 32-bit C++ headers and libraries (`g++-multilib` on Ubuntu).
-- `--backend cpp-i686` selects 32-bit C++ output for the current OS. The i686 target requires a C++ toolchain. Thava's `<int64>` remains 64-bit.
+The experimental native backend writes i686 machine code and executable headers directly, with no C++ compiler, assembler or linker.
+
+- `thavac program.thv --target win-i686 --native -o program.exe`: Windows PE32. The executable calls Kernel32 for console output and process exit. `--backend pe-i686` selects the same backend.
+- `thavac program.thv --target linux-i686 --native -o program`: standalone Linux ELF32 using Linux system calls. `--backend elf-i686` selects the same backend.
+- `--backend native-i686` selects native i686 for the current OS. Use `--os windows` or `--os linux` to override that OS.
+
+The native backend supports integer widths including `<int64>`, integer arithmetic and comparisons, bitwise operations, booleans, UTF-8 string literals and comparisons, scalar functions and recursion, globals, `if`, `while`, C-style `for` and interpolated `cons.out`. Floating-point operations, string methods, collections, library linking and C interop use the C++ path in this release. Unsupported native constructs report a compilation error.
+
+The existing C++ path remains the default for `--target win-i686` and `--target linux-i686`. Select it explicitly with `--cpp` or use `--backend cpp-i686` for the current OS. Windows builds use `i686-w64-mingw32-g++` or an x86 MSVC developer environment. Linux builds use `i686-linux-gnu-g++` or GCC with 32-bit C++ libraries (`g++-multilib` on Ubuntu).
 
 For Windows ARM64 code that uses C/C++ headers, use `--cpp --target win-arm64` with the ARM64 MSVC developer environment or an ARM64 MinGW-w64 toolchain. The transpiler verifies the C++ compiler's target architecture and OS before linking.
 

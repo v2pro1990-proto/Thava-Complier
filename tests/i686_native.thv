@@ -1,0 +1,41 @@
+<int64> tracked = 5000000000
+
+<int64> func sum_down(<int> n) {
+    if n == 0 {
+        return tracked
+    }
+    return n + sum_down(n - 1)
+}
+
+func bump() {
+    global <int64> tracked
+    tracked += 2
+}
+
+bump()
+<int64> total = sum_down(3)
+<int64> lowest = -9223372036854775807 - 1
+<int64> numerator = -5000000003
+<int64> denominator = 5000000000
+<int64> product = denominator * -3
+<int64> quotient = numerator / 9
+<int64> remainder = numerator % 9
+<int64> quotient_wide = 12000000000 / denominator
+<int64> remainder_wide = 12000000000 % denominator
+cons.out("@{total} @{lowest} @{product} @{quotient} @{remainder} @{quotient_wide} @{remainder_wide}")
+
+<int> accumulated = 0
+for <int> i = 0, i < 8, i += 1 {
+    if i == 2 { continue }
+    if i == 5 { break }
+    accumulated += i
+}
+<int16> small = 65535
+<int64> shifted = 1 bshl 40
+<int64> signed_shift = -shifted bshr 40
+<bl> order = shifted > denominator
+<int> zero = 0
+<bl> skipped = false and (1 / zero == 1)
+<str> message = "trời đẹp"
+<bl> same = message == "trời đẹp"
+cons.out("@{accumulated} @{small} @{shifted} @{signed_shift} @{order} @{skipped} @{same} @{message}")
