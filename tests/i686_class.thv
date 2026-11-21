@@ -1,0 +1,63 @@
+class Box {
+    <int64> value = 5000000000
+    <str> label = "box"
+
+    func Box(<int> offset) {
+        locvar.value += offset
+    }
+
+    <int64> func total() {
+        return locvar.value
+    }
+}
+
+class PricedBox : Box {
+    <dbl> price = 1.25
+
+    func PricedBox(<int> offset, <dbl> price) {
+        parvar.init(offset)
+        locvar.price += price
+    }
+
+    <int64> func total() {
+        return parvar.total() + 10
+    }
+
+    <str> func rename(<str> suffix) {
+        locvar.label += suffix
+        return locvar.label
+    }
+}
+
+class Holder {
+    <PricedBox> box = none
+}
+
+class PlainBox : Box {
+}
+
+<PricedBox> func makeBox(<int> offset) {
+    return PricedBox(offset, 2.5)
+}
+
+<int64> func readBox(<PricedBox> box) {
+    return box.total()
+}
+
+<Holder> holder = Holder()
+<bool> empty = holder.box == none
+holder.box = makeBox(7)
+holder.box.value += 4
+<str> label = holder.box.rename("ed")
+<int64> total = readBox(holder.box)
+<dbl> price = holder.box.price
+<PlainBox> plain = PlainBox(3)
+<int64> inherited = plain.total()
+cons.out("@{empty} @{total} @{label} @{price} @{inherited}")
+
+holder.box = none
+try {
+    holder.box.total()
+} except RuntimeError as message {
+    cons.out(message)
+}

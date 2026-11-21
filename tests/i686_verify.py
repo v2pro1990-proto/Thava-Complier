@@ -72,6 +72,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
         for filename, expected, input_data in [
+            ("gw.thv", ["4 3 AB new 9"], None),
+            ("i686_class.thv", ["true 5000000021 boxed 3.75 5000000003", "Cannot access a member of none"], None),
             ("i686_unwind.thv", [
                 "5000000042 BA012I outer Division by zero",
                 "file closed body|deferred", "replacement BA012IZ", "end", "program cleanup",

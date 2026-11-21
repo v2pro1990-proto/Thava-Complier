@@ -27,8 +27,21 @@ class Codegen {
     enum RecordField { Previous = 0, Frame = 4, Action = 8, Stack = 12, Defers = 16, RecordBytes = 24 };
     enum DeferField { NextDefer = 0, DeferAction = 4, DeferBytes = 8 };
     struct Function {
-        const FunctionDeclNode* decl;
+        std::string name, owner;
+        ThavaType returnType;
+        std::string customReturnType;
+        const std::vector<std::pair<ThavaType, std::string>>& params;
+        const std::vector<std::string>& paramCustomTypes;
+        const std::vector<ASTPtr>& body;
         size_t entry;
+    };
+    struct ClassLayout {
+        const ClassDeclNode* decl;
+        size_t initializer;
+        int32_t size = 0;
+        std::map<std::string, Slot> fields;
+        std::vector<Function> constructors;
+        std::map<std::string, Function> methods;
     };
     struct DataFixup { size_t at; uint32_t offset; };
 
@@ -41,7 +54,9 @@ class Codegen {
     std::vector<std::pair<size_t, std::string>> importFixups;
     std::map<std::string, Slot> globals, locals;
     std::map<std::string, Function> functions;
+    std::map<std::string, ClassLayout> classes;
     Shape lastShape;
+    std::string lastClass, initializerClass;
     std::map<ASTNode*, LoopSlots> loopSlots;
     std::vector<LoopTarget> loops;
     std::map<FileOpenBlockNode*, Slot> fileSlots;
@@ -58,7 +73,7 @@ class Codegen {
     std::vector<OpenFile> activeFiles;
     bool fileUsed = false;
     size_t fileReadLabel = enc.label(), fileWriteLabel = enc.label();
-    const FunctionDeclNode* currentFunction = nullptr;
+    const Function* currentFunction = nullptr;
     size_t returnLabel = 0;
     size_t writeLabel = enc.label(), printStringLabel = enc.label(), printIntLabel = enc.label();
     size_t compareStringsLabel = enc.label(), divideLabel = enc.label(), errorLabel = enc.label();
@@ -88,6 +103,10 @@ class Codegen {
 
     static bool collection(ThavaType type) {
         return type == ThavaType::LIST || type == ThavaType::TUPLE || type == ThavaType::DICT;
+    }
+
+    static bool slotType(ThavaType type) {
+        return scalar(type) || collection(type) || type == ThavaType::CUSTOM;
     }
 
     static uint32_t comparisonKind(ThavaType type) {
@@ -185,9 +204,16 @@ class Codegen {
         enc.load(EAX, ECX);
         enc.load(EDX, ECX, 4);
         lastShape = slot.shape;
+        lastClass = slot.type == ThavaType::CUSTOM ? slot.width : "";
     }
 
     void normalize(ThavaType expected, const std::string& width, ThavaType actual) {
+        if (expected == ThavaType::CUSTOM && actual == ThavaType::NONE) return;
+        if (expected == ThavaType::CUSTOM && actual == ThavaType::CUSTOM && !lastClass.empty()) {
+            std::string type = lastClass;
+            while (!type.empty() && type != width) type = classLayout(type).decl->baseClassName;
+            if (type.empty()) unsupported("Assignment between unrelated classes");
+        }
         if (floating(expected) && actual == ThavaType::INT) floatCast(0);
         else if (expected == ThavaType::INT && floating(actual)) floatCast(1);
         else if (expected != actual && !(floating(expected) && floating(actual)))
@@ -232,6 +258,7 @@ class Codegen {
 
     void defaultValue(ThavaType type) {
         lastShape = {};
+        lastClass.clear();
         if (type == ThavaType::STRING) stringValue("");
         else if (collection(type)) {
             pushAllocationContext();
@@ -265,6 +292,19 @@ class Codegen {
 
     ThavaType emitBinary(const std::string& op, ThavaType left, ThavaType right) {
         loadLeft();
+        if ((op == "==" || op == "!=") &&
+            (left == ThavaType::CUSTOM || left == ThavaType::NONE) &&
+            (right == ThavaType::CUSTOM || right == ThavaType::NONE)) {
+            const auto yes = enc.label(), done = enc.label();
+            enc.alu(Cmp, ECX, EAX);
+            enc.jump(condition(op, false), yes);
+            integer(0);
+            enc.jump(done);
+            enc.bind(yes);
+            integer(1);
+            enc.bind(done);
+            return ThavaType::BOOL;
+        }
         if (floating(left) || floating(right)) {
             if ((!floating(left) && left != ThavaType::INT) ||
                 (!floating(right) && right != ThavaType::INT)) unsupported("Floating-point operands");
@@ -992,6 +1032,130 @@ class Codegen {
         return ThavaType::INT;
     }
 
+    const ClassLayout& classLayout(const std::string& name) const {
+        const auto found = classes.find(name);
+        if (found == classes.end()) unsupported("Custom type '" + name + "'");
+        return found->second;
+    }
+
+    const Function* constructor(const ClassLayout& layout, size_t count) const {
+        const Function* result = nullptr;
+        for (const auto& candidate : layout.constructors) {
+            if (candidate.params.size() != count) continue;
+            if (result) unsupported("Same-arity constructors for '" + layout.decl->className + "'");
+            result = &candidate;
+        }
+        return result;
+    }
+
+    const Function& method(const std::string& name, size_t count) const {
+        for (std::string owner = lastClass; !owner.empty();) {
+            const auto& layout = classLayout(owner);
+            if (name == "init") {
+                if (const auto* init = constructor(layout, count)) return *init;
+            } else {
+                const auto found = layout.methods.find(name);
+                if (found != layout.methods.end()) return found->second;
+            }
+            owner = layout.decl->baseClassName;
+        }
+        unsupported("Method '" + lastClass + "::" + name + "'");
+    }
+
+    void requireObject() {
+        const auto valid = enc.label();
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(NotEqual, valid);
+        LiteralNode message("Cannot access a member of none", ThavaType::STRING);
+        raiseException(&message);
+        enc.bind(valid);
+    }
+
+    const Slot& field(ASTNode* target, const std::string& name) {
+        if (expression(target) != ThavaType::CUSTOM) unsupported("A non-class member target");
+        const auto& fields = classLayout(lastClass).fields;
+        const auto found = fields.find(name);
+        if (found == fields.end()) unsupported("Field '" + lastClass + "::" + name + "'");
+        requireObject();
+        return found->second;
+    }
+
+    ThavaType callFunction(const Function& callee, const std::vector<ASTPtr>& args) {
+        if (callee.params.size() != args.size()) unsupported("Arguments to '" + callee.name + "'");
+        const size_t receiver = callee.owner.empty() ? 0 : 8;
+        const bool references = std::any_of(callee.params.begin(), callee.params.end(),
+                                            [](const auto& param) { return collection(param.first); });
+        const auto bytes = receiver + (references ? 16 : 8) * args.size();
+        if (bytes > 4080) unsupported("A call frame larger than 4080 bytes");
+        if (bytes) enc.alu(Sub, ESP, uint32_t(bytes));
+        if (receiver) {
+            enc.store(ESP, 0, EAX);
+            enc.store(ESP, 4, EDX);
+        }
+        for (size_t i = 0; i < args.size(); ++i) {
+            const auto actual = expression(args[i].get());
+            const auto width = i < callee.paramCustomTypes.size() ? callee.paramCustomTypes[i] : "";
+            const auto formal = callee.params[i].first;
+            const auto offset = int32_t(receiver + 8 * i);
+            if (collection(formal)) {
+                if (formal != actual) unsupported("Collection argument type mismatch");
+                const auto parameter = g_funcListParamElem.find(callee.name);
+                if (parameter != g_funcListParamElem.end() && i < parameter->second.size() &&
+                    parameter->second[i] != ThavaType::UNKNOWN && lastShape.element != ThavaType::UNKNOWN &&
+                    parameter->second[i] != lastShape.element)
+                    unsupported("A collection argument with incompatible element types");
+                if (auto var = dynamic_cast<VarNode*>(args[i].get())) slotAddress(lookup(var->getName()), EAX);
+                else {
+                    const auto temporary = int32_t(receiver + 8 * (args.size() + i));
+                    storeValue({ESP, temporary, actual, ""}, actual);
+                    enc.lea(EAX, ESP, temporary);
+                }
+                enc.store(ESP, offset, EAX);
+            } else storeValue({ESP, offset, formal, width}, actual);
+        }
+        enc.call(callee.entry);
+        if (bytes) enc.alu(Add, ESP, uint32_t(bytes));
+        lastClass = callee.returnType == ThavaType::CUSTOM ? callee.customReturnType : "";
+        return callee.returnType;
+    }
+
+    ThavaType instantiate(const ClassInstantiateNode& instance) {
+        const auto& layout = classLayout(instance.className);
+        const auto* init = constructor(layout, instance.args.size());
+        if (layout.constructors.empty()) {
+            for (auto base = layout.decl->baseClassName; !init && !base.empty();) {
+                const auto& parent = classLayout(base);
+                init = constructor(parent, instance.args.size());
+                base = parent.decl->baseClassName;
+            }
+        }
+        if (!init && (!layout.constructors.empty() || !instance.args.empty()))
+            unsupported("Constructor arguments for '" + instance.className + "'");
+        allocatorUsed = true;
+        enc.push(EBX);
+        enc.pushImm(std::max(layout.size, int32_t(8)));
+        enc.call(allocateLabel);
+        enc.alu(Add, ESP, 8);
+        const auto allocated = enc.label();
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(NotEqual, allocated);
+        LiteralNode message("Cannot allocate object", ThavaType::STRING);
+        raiseException(&message);
+        enc.bind(allocated);
+        enc.alu(Xor, EDX, EDX);
+        saveValue();
+        enc.call(layout.initializer);
+        if (init) {
+            enc.load(EAX, ESP);
+            enc.load(EDX, ESP, 4);
+            callFunction(*init, instance.args);
+        }
+        enc.pop(EAX);
+        enc.pop(EDX);
+        lastClass = instance.className;
+        return ThavaType::CUSTOM;
+    }
+
     ThavaType expression(ASTNode* node) {
         if (auto lit = dynamic_cast<LiteralNode*>(node)) {
             const auto type = lit->getLitType();
@@ -999,6 +1163,7 @@ class Codegen {
             if (type == ThavaType::STRING) stringValue(value);
             else if (type == ThavaType::INT) integer(std::stoll(value));
             else if (type == ThavaType::BOOL) integer(value == "true");
+            else if (type == ThavaType::NONE) integer(0);
             else if (floating(type)) {
                 const double real = type == ThavaType::FLOAT ? static_cast<double>(std::strtof(value.c_str(), nullptr)) : std::strtod(value.c_str(), nullptr);
                 uint64_t bits;
@@ -1012,6 +1177,27 @@ class Codegen {
             const auto& slot = lookup(var->getName());
             loadValue(slot);
             return slot.type;
+        }
+        if (dynamic_cast<LocVarNode*>(node) || dynamic_cast<ParVarNode*>(node)) {
+            const auto* parent = dynamic_cast<ParVarNode*>(node);
+            const auto owner = parent ? parent->baseClassName :
+                (currentFunction ? currentFunction->owner : initializerClass);
+            classLayout(owner);
+            loadValue({EBP, 8, ThavaType::CUSTOM, owner});
+            return ThavaType::CUSTOM;
+        }
+        if (auto instance = dynamic_cast<ClassInstantiateNode*>(node)) return instantiate(*instance);
+        if (auto member = dynamic_cast<MemberAccessNode*>(node)) {
+            const auto& slot = field(member->target.get(), member->memberName);
+            enc.mov(ECX, EAX);
+            loadValue(slot);
+            return slot.type;
+        }
+        if (auto call = dynamic_cast<MethodCallNode*>(node)) {
+            if (expression(call->target.get()) != ThavaType::CUSTOM) unsupported("A non-class method target");
+            const auto& callee = method(call->methodName, call->args.size());
+            requireObject();
+            return callFunction(callee, call->args);
         }
         if (auto unary = dynamic_cast<UnaryMinusNode*>(node)) {
             if (auto magnitude = dynamic_cast<LiteralNode*>(unary->expr.get());
@@ -1102,37 +1288,7 @@ class Codegen {
         if (auto call = dynamic_cast<CallNode*>(node)) {
             const auto fn = functions.find(call->name);
             if (fn == functions.end()) unsupported("Call to '" + call->name + "'");
-            const auto& callee = *fn->second.decl;
-            if (callee.params.size() != call->args.size()) unsupported("Arguments to '" + call->name + "'");
-            const bool references = std::any_of(callee.params.begin(), callee.params.end(),
-                                                [](const auto& param) { return collection(param.first); });
-            if (call->args.size() > (references ? 255u : 510u))
-                unsupported("A call frame larger than 4080 bytes");
-            const auto bytes = static_cast<uint32_t>((references ? 16 : 8) * call->args.size());
-            if (bytes) enc.alu(Sub, ESP, bytes);
-            for (size_t i = 0; i < call->args.size(); ++i) {
-                const auto type = expression(call->args[i].get());
-                const auto width = i < callee.paramCustomTypes.size() ? callee.paramCustomTypes[i] : "";
-                const auto formal = callee.params[i].first;
-                if (collection(formal)) {
-                    if (formal != type) unsupported("Collection argument type mismatch");
-                    auto parameter = g_funcListParamElem.find(callee.name);
-                    if (parameter != g_funcListParamElem.end() && i < parameter->second.size() &&
-                        parameter->second[i] != ThavaType::UNKNOWN && lastShape.element != ThavaType::UNKNOWN &&
-                        parameter->second[i] != lastShape.element)
-                        unsupported("A collection argument with incompatible element types");
-                    if (auto var = dynamic_cast<VarNode*>(call->args[i].get())) slotAddress(lookup(var->getName()), EAX);
-                    else {
-                        const auto temporary = int32_t(8 * (call->args.size() + i));
-                        storeValue({ESP, temporary, type, ""}, type);
-                        enc.lea(EAX, ESP, temporary);
-                    }
-                    enc.store(ESP, int32_t(8 * i), EAX);
-                } else storeValue({ESP, int32_t(8 * i), formal, width}, type);
-            }
-            enc.call(fn->second.entry);
-            if (bytes) enc.alu(Add, ESP, bytes);
-            return callee.returnType;
+            return callFunction(fn->second, call->args);
         }
         unsupported("This expression");
     }
@@ -1507,6 +1663,21 @@ class Codegen {
                 const auto value = expression(assign->expr.get());
                 storeValue(slot, emitBinary(assign->op.substr(0, assign->op.size() - 1), slot.type, value));
             }
+        } else if (auto assign = dynamic_cast<MemberAssignNode*>(node)) {
+            const auto& slot = field(assign->target.get(), assign->memberName);
+            enc.push(EAX);
+            if (assign->op != "=") {
+                enc.mov(ECX, EAX);
+                loadValue(slot);
+                saveValue();
+            }
+            auto value = expression(assign->expr.get());
+            if (assign->op != "=")
+                value = emitBinary(assign->op.substr(0, assign->op.size() - 1), slot.type, value);
+            normalize(slot.type, slot.width, value);
+            enc.pop(ECX);
+            enc.store(ECX, slot.offset, EAX);
+            enc.store(ECX, slot.offset + 4, EDX);
         } else if (auto open = dynamic_cast<FileOpenBlockNode*>(node)) {
             scopedFile(open);
         } else if (auto block = dynamic_cast<TryExceptNode*>(node)) {
@@ -1571,8 +1742,9 @@ class Codegen {
 
     void declareFrameLocals(const std::vector<VarDeclNode*>& decls, int32_t& frame) {
         for (const auto* decl : decls) {
-            if (!scalar(decl->varType) && !collection(decl->varType))
+            if (!slotType(decl->varType))
                 unsupported("Type of variable '" + decl->varName + "'");
+            if (decl->varType == ThavaType::CUSTOM) classLayout(decl->customTypeName);
             if (locals.try_emplace(decl->varName, Slot{EBP, -frame - 8, decl->varType, decl->customTypeName}).second)
                 frame += 8;
         }
@@ -1640,11 +1812,13 @@ class Codegen {
         functionCleanup = {};
         if (!entry) {
             const auto& fn = *currentFunction;
+            const int32_t first = fn.owner.empty() ? 8 : 16;
             for (size_t i = 0; i < fn.params.size(); ++i) {
                 const auto& [type, name] = fn.params[i];
-                if (!scalar(type) && !collection(type)) unsupported("Parameter '" + name + "' of '" + fn.name + "'");
+                if (!slotType(type)) unsupported("Parameter '" + name + "' of '" + fn.name + "'");
                 const auto width = i < fn.paramCustomTypes.size() ? fn.paramCustomTypes[i] : "";
-                Slot slot{EBP, int32_t(8 + 8 * i), type, width};
+                if (type == ThavaType::CUSTOM) classLayout(width);
+                Slot slot{EBP, first + int32_t(8 * i), type, width};
                 slot.indirect = collection(type);
                 auto info = g_funcListParamElem.find(fn.name);
                 if (slot.indirect && info != g_funcListParamElem.end() && i < info->second.size())
@@ -1686,13 +1860,13 @@ class Codegen {
         enc.ret();
     }
 
-    void emitFunction(const Function& function) {
-        const auto& fn = *function.decl;
-        if (!scalar(fn.returnType) && fn.returnType != ThavaType::VOID)
+    void emitFunction(const Function& fn) {
+        if (!scalar(fn.returnType) && fn.returnType != ThavaType::CUSTOM && fn.returnType != ThavaType::VOID)
             unsupported("Return type of '" + fn.name + "'");
+        if (fn.returnType == ThavaType::CUSTOM) classLayout(fn.customReturnType);
         currentFunction = &fn;
         returnLabel = enc.label();
-        enc.bind(function.entry);
+        enc.bind(fn.entry);
         beginFrame(fn.body, false);
         for (const auto& node : fn.body) statement(node.get());
         defaultValue(fn.returnType);
@@ -1707,6 +1881,63 @@ class Codegen {
         enc.ret();
         emitFunctionCleanup();
         currentFunction = nullptr;
+    }
+
+    void registerClass(const ClassDeclNode& decl) {
+        ClassLayout layout{&decl, enc.label()};
+        if (!decl.baseClassName.empty()) {
+            const auto& base = classLayout(decl.baseClassName);
+            layout.size = base.size;
+            layout.fields = base.fields;
+        }
+        for (const auto& field : decl.fields) {
+            if (!scalar(field.type) && field.type != ThavaType::CUSTOM)
+                unsupported("Type of field '" + field.name + "'");
+            layout.fields.insert_or_assign(field.name, Slot{ECX, layout.size, field.type, field.customTypeName});
+            layout.size += 8;
+        }
+        for (const auto& ctor : decl.constructors)
+            layout.constructors.push_back({decl.className + "::init", decl.className, ThavaType::VOID, "",
+                                           ctor.params, ctor.paramCustomTypes, ctor.body, enc.label()});
+        for (const auto& method : decl.methods)
+            layout.methods.emplace(method.name, Function{decl.className + "::" + method.name, decl.className,
+                                   method.returnType, method.customReturnType, method.params,
+                                   method.paramCustomTypes, method.body, enc.label()});
+        classes.emplace(decl.className, std::move(layout));
+    }
+
+    void emitClassInitializer(const ClassLayout& layout) {
+        locals.clear();
+        initializerClass = layout.decl->className;
+        enc.bind(layout.initializer);
+        enc.push(EBP);
+        enc.mov(EBP, ESP);
+        if (!layout.decl->baseClassName.empty()) {
+            enc.pushImm(0);
+            enc.load(EAX, EBP, 8);
+            enc.push(EAX);
+            enc.call(classLayout(layout.decl->baseClassName).initializer);
+            enc.alu(Add, ESP, 8);
+        }
+        for (const auto& field : layout.decl->fields) {
+            const auto& slot = layout.fields.at(field.name);
+            if (field.type == ThavaType::CUSTOM) classLayout(field.customTypeName);
+            defaultValue(slot.type);
+            enc.load(ECX, EBP, 8);
+            enc.store(ECX, slot.offset, EAX);
+            enc.store(ECX, slot.offset + 4, EDX);
+        }
+        for (const auto& field : layout.decl->fields) {
+            if (!field.initExpr) continue;
+            const auto& slot = layout.fields.at(field.name);
+            normalize(slot.type, slot.width, expression(field.initExpr.get()));
+            enc.load(ECX, EBP, 8);
+            enc.store(ECX, slot.offset, EAX);
+            enc.store(ECX, slot.offset + 4, EDX);
+        }
+        enc.leave();
+        enc.ret();
+        initializerClass.clear();
     }
 
     void exitProcess(uint32_t status) {
@@ -2225,11 +2456,15 @@ public:
         if (g_isLibraryMode || g_hasDLAttach) unsupported("Dynamic libraries");
         cleanupHead = addSlot();
         pendingException = addSlot();
+        for (const auto& node : ast)
+            if (auto decl = dynamic_cast<ClassDeclNode*>(node.get())) registerClass(*decl);
         for (const auto& node : ast) {
             if (auto func = dynamic_cast<FunctionDeclNode*>(node.get()))
-                functions.emplace(func->name, Function{func, enc.label()});
+                functions.emplace(func->name, Function{func->name, "", func->returnType, func->customReturnType,
+                                  func->params, func->paramCustomTypes, func->body, enc.label()});
             else if (auto decl = dynamic_cast<VarDeclNode*>(node.get())) {
-                if (!scalar(decl->varType) && !collection(decl->varType)) unsupported("Type of global '" + decl->varName + "'");
+                if (!slotType(decl->varType)) unsupported("Type of global '" + decl->varName + "'");
+                if (decl->varType == ThavaType::CUSTOM) classLayout(decl->customTypeName);
                 Slot slot{EBX, int32_t(addSlot()), decl->varType, decl->customTypeName};
                 if (decl->varType == ThavaType::LIST || decl->varType == ThavaType::TUPLE)
                     slot.shape.element = g_programEnv->getListElem(decl->varName);
@@ -2274,7 +2509,8 @@ public:
         }
         beginFrame(ast, true);
         for (const auto& node : ast) {
-            if (dynamic_cast<FunctionDeclNode*>(node.get()) || dynamic_cast<ForwardDeclNode*>(node.get()))
+            if (dynamic_cast<FunctionDeclNode*>(node.get()) || dynamic_cast<ForwardDeclNode*>(node.get()) ||
+                dynamic_cast<ClassDeclNode*>(node.get()))
                 continue;
             statement(node.get());
         }
@@ -2283,6 +2519,11 @@ public:
         emitFunctionCleanup();
 
         for (const auto& entry : functions) emitFunction(entry.second);
+        for (const auto& entry : classes) {
+            emitClassInitializer(entry.second);
+            for (const auto& ctor : entry.second.constructors) emitFunction(ctor);
+            for (const auto& method : entry.second.methods) emitFunction(method.second);
+        }
         emitOutput();
         emitDivision();
         emitUnwind();
