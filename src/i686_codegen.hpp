@@ -3,6 +3,7 @@
 #include "elf_i686_emitter.hpp"
 #include "i686_encoder.hpp"
 #include "i686_runtime_data.hpp"
+#include "i686_os_ops.h"
 #include "unicode_case.hpp"
 #include <stdexcept>
 
@@ -52,6 +53,7 @@ class Codegen {
     size_t readLineLabel = enc.label(), readByteLabel = enc.label();
     bool readUsed = false;
     uint32_t caseTable = UINT32_MAX;
+    uint32_t environmentSlot = 0;
     uint32_t randomState = UINT32_MAX;
     size_t allocateLabel = enc.label();
     bool allocatorUsed = false;
@@ -846,6 +848,137 @@ class Codegen {
         return elem;
     }
 
+    void loadOsImport(const char* library, const char* name, int32_t offset) {
+        pe.addImport(library, name);
+        enc.load(EAX, EBX);
+        importFixups.emplace_back(enc.code.size() - 4, name);
+        enc.store(ESP, offset, EAX);
+    }
+
+    void beginOsCall(OsOperation operation) {
+        pushAllocationContext();
+        enc.alu(Sub, ESP, 32);
+        enc.imm(EAX, operation);
+        enc.store(ESP, 0, EAX);
+        enc.alu(Xor, EAX, EAX);
+        for (int offset = 4; offset < 32; offset += 4) enc.store(ESP, offset, EAX);
+    }
+
+    void finishOsCall(const char* library, const char* first = nullptr) {
+        if (windows && first) loadOsImport(library, first, 20);
+        else if (!windows) {
+            dataAddress(EAX, environmentSlot);
+            enc.store(ESP, 20, EAX);
+        }
+        callRuntime(windows ? runtime::rt_windows_os : runtime::rt_linux_os, 40);
+    }
+
+    void emitSleep(const std::vector<ASTPtr>& args) {
+        if (args.size() > 1) unsupported("Sleep with more than one argument");
+        beginOsCall(OS_SLEEP);
+        if (args.empty()) integer(0);
+        else normalize(ThavaType::INT, "int64", expression(args[0].get()));
+        storeArgument(4);
+        finishOsCall("kernel32.dll", "Sleep");
+    }
+
+    ThavaType osMethod(OsMethodNode* node) {
+        if (node->method == "name") {
+            stringValue(windows ? "windows" : "linux");
+            return ThavaType::STRING;
+        }
+        if (node->method == "sleep") {
+            if (node->args.empty()) unsupported("os.sleep without a duration");
+            emitSleep(node->args);
+            return ThavaType::INT;
+        }
+        struct Operation { OsOperation operation; unsigned count; const char* api; bool crt = false; };
+        static const std::map<std::string, Operation> methods = {
+            {"getpid", {OS_PID, 0, "GetCurrentProcessId"}},
+            {"cpu_count", {OS_CPU, 0, "GetActiveProcessorCount"}},
+            {"getcwd", {OS_CWD, 0, "GetCurrentDirectoryA"}},
+            {"chdir", {OS_CHDIR, 1, "_chdir", true}},
+            {"mkdir", {OS_MKDIR, 1, "_mkdir", true}},
+            {"rmdir", {OS_RMDIR, 1, "_rmdir", true}},
+            {"remove", {OS_REMOVE, 1, "remove", true}},
+            {"rename", {OS_RENAME, 2, "rename", true}},
+            {"exists", {OS_EXISTS, 1, "GetFileAttributesExA"}},
+            {"is_file", {OS_IS_FILE, 1, "GetFileAttributesExA"}},
+            {"is_dir", {OS_IS_DIR, 1, "GetFileAttributesExA"}},
+            {"getsize", {OS_SIZE, 1, "GetFileAttributesExA"}},
+            {"listdir", {OS_LIST, 1, "FindFirstFileA"}},
+            {"getenv", {OS_ENV, 1, "getenv", true}},
+            {"setenv", {OS_SETENV, 2, "_putenv", true}},
+            {"system", {OS_SYSTEM, 1, "system", true}},
+            {"showmessagebox", {OS_MESSAGE, 4, "MessageBoxA"}},
+        };
+        auto found = methods.find(node->method);
+        if (found == methods.end()) unsupported("OS method '" + node->method + "'");
+        const auto& method = found->second;
+        const bool defaultDirectory = method.operation == OS_LIST && node->args.empty();
+        if (node->args.size() != method.count && !defaultDirectory)
+            unsupported("Arguments to os." + node->method);
+        beginOsCall(method.operation);
+        if (defaultDirectory) {
+            stringValue(".");
+            enc.store(ESP, 4, EAX);
+        }
+        for (size_t i = 0; i < node->args.size(); ++i) {
+            expectString(node->args[i].get());
+            enc.store(ESP, static_cast<int32_t>(4 + 4 * i), EAX);
+        }
+        if (windows && method.operation == OS_LIST) {
+            loadOsImport("kernel32.dll", "FindNextFileA", 24);
+            loadOsImport("kernel32.dll", "FindClose", 28);
+        }
+        const char* library = method.crt ? "msvcrt.dll" :
+                              method.operation == OS_MESSAGE ? "user32.dll" : "kernel32.dll";
+        finishOsCall(library, method.api);
+        lastShape = method.operation == OS_LIST ? Shape{ThavaType::UNKNOWN, ThavaType::STRING} : Shape{};
+        return node->getType(nullptr);
+    }
+
+    ThavaType timeMethod(TimeMethodNode* node) {
+        const auto& method = node->method;
+        if (method == "sleep") {
+            emitSleep(node->args);
+            return ThavaType::INT;
+        }
+        if (method == "timestamp") {
+            if (!node->args.empty()) unsupported("Arguments to time.timestamp");
+            beginOsCall(TIME_STAMP);
+            finishOsCall("kernel32.dll", "GetSystemTimeAsFileTime");
+            return ThavaType::INT;
+        }
+        if (method == "now" || method == "date") {
+            if (node->args.size() > 1) unsupported("Arguments to time." + method);
+            beginOsCall(TIME_FORMAT);
+            if (node->args.empty()) stringValue(method == "date" ? "date" : "datetime");
+            else {
+                expectString(node->args[0].get());
+                const auto haveFormat = enc.label();
+                enc.loadByte(ECX, EAX);
+                enc.alu(Cmp, ECX, 0);
+                enc.jump(NotEqual, haveFormat);
+                stringValue(method == "date" ? "date" : "datetime");
+                enc.bind(haveFormat);
+            }
+            enc.store(ESP, 4, EAX);
+            finishOsCall("kernel32.dll", "GetLocalTime");
+            return ThavaType::STRING;
+        }
+        static const std::map<std::string, uint32_t> fields = {
+            {"year",0}, {"month",1}, {"day",2}, {"hour",3}, {"minute",4}, {"second",5}, {"millis",6}
+        };
+        auto field = fields.find(method);
+        if (field == fields.end() || !node->args.empty()) unsupported("Time method '" + method + "'");
+        beginOsCall(TIME_FIELD);
+        enc.imm(EAX, field->second);
+        enc.store(ESP, 4, EAX);
+        finishOsCall("kernel32.dll", "GetLocalTime");
+        return ThavaType::INT;
+    }
+
     ThavaType expression(ASTNode* node) {
         if (auto lit = dynamic_cast<LiteralNode*>(node)) {
             const auto type = lit->getLitType();
@@ -940,6 +1073,8 @@ class Codegen {
         if (auto method = dynamic_cast<DictMethodNode*>(node)) return dictMethod(method);
         if (auto method = dynamic_cast<StrMethodNode*>(node)) return stringMethod(method);
         if (auto method = dynamic_cast<StrAdvMethodNode*>(node)) return stringSearch(method);
+        if (auto os = dynamic_cast<OsMethodNode*>(node)) return osMethod(os);
+        if (auto time = dynamic_cast<TimeMethodNode*>(node)) return timeMethod(time);
         if (auto method = dynamic_cast<FileMethodNode*>(node)) return fileMethod(method);
         if (auto len = dynamic_cast<LenNode*>(node)) {
             const auto type = expression(len->arg.get());
@@ -1861,6 +1996,15 @@ public:
             enc.pushImm(uint32_t(-10)); // STD_INPUT_HANDLE
             callWindows("GetStdHandle");
             dataAddress(ECX, stdinSlot);
+            enc.store(ECX, 0, EAX);
+        }
+        if (!windows) {
+            environmentSlot = addSlot();
+            enc.load(EAX, ESP);
+            enc.shift(4, EAX, 2);
+            enc.alu(Add, EAX, ESP);
+            enc.alu(Add, EAX, 8); // argc, argv[0..argc-1], null, then envp
+            dataAddress(ECX, environmentSlot);
             enc.store(ECX, 0, EAX);
         }
         for (const auto& [name, slot] : globals) {

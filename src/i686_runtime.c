@@ -741,3 +741,4 @@ u64 rt_randres(Collection *items, Collection *weights, u32 floating_values, u64 
     }
     return items->entries[(u32)random_less_than(n, state)].value;
 }
+#include "i686_os_runtime.h"
