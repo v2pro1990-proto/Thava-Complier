@@ -1,6 +1,8 @@
 """Verify the 32-bit target format and run an executable built by Thava."""
 import os
 from pathlib import Path
+import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -140,6 +142,25 @@ with tempfile.TemporaryDirectory() as tmp:
                 )
                 assert output.stdout.splitlines() == expected, output.stdout
             print(target, filename, "OK")
+
+        qemu = shutil.which("qemu-i386") if not windows else None
+        if "--ish-syscalls" in sys.argv[2:] and qemu is None:
+            raise RuntimeError("qemu-i386 is required for the iSH syscall check")
+        if qemu:
+            ish = Path(tmp) / "ish-regression"
+            with (Path(tmp) / "large.bin").open("wb") as sparse:
+                sparse.truncate(5_000_000_003)
+            subprocess.run([str(compiler), str(source.with_name("i686_ish.thv")),
+                            "--target", target, "--native", "-O2", "-o", str(ish)],
+                           cwd=tmp, env=env, check=True, timeout=30)
+            result = subprocess.run([qemu, "-r", "4.20.69-ish", "-strace", str(ish)], cwd=tmp,
+                                    check=True, capture_output=True, encoding="utf-8", timeout=10)
+            assert result.stdout.splitlines() == ["true 0 0 true true true false 5000000003 -1"], result.stdout
+            calls = set(re.findall(r"^\s*\d+\s+(\w+)\(", result.stderr, re.MULTILINE))
+            assert {"uname", "gettimeofday", "nanosleep", "stat64"} <= calls, result.stderr
+            assert not {"clock_gettime64", "clock_nanosleep_time64", "statx"} & calls, result.stderr
+            assert not re.search(r"Unknown syscall (403|407)\b", result.stderr), result.stderr
+            print(target, "iSH release detection and legacy syscalls OK")
 
         module_build = Path(tmp) / "module-build"
         module_run = Path(tmp) / "module-run"

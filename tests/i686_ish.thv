@@ -1,0 +1,16 @@
+<int64> stamp = time.timestamp()
+<str> date = time.date()
+<str> clock = time.now("time")
+<int> millis = time.millis()
+<bool> clockOK = stamp > 0 and date.len() == 10 and clock.len() == 8 and millis >= 0 and millis < 1000
+
+<int> firstSleep = time.sleep(1)
+<int> secondSleep = os.sleep(1)
+
+<bool> exists = os.exists("large.bin")
+<bool> regular = os.is_file("large.bin")
+<bool> directory = os.is_dir(".")
+<bool> absent = os.exists("missing.bin")
+<int64> size = os.getsize("large.bin")
+<int64> missingSize = os.getsize("missing.bin")
+cons.out("@{clockOK} @{firstSleep} @{secondSleep} @{exists} @{regular} @{directory} @{absent} @{size} @{missingSize}")

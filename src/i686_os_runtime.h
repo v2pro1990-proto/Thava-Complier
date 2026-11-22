@@ -174,9 +174,24 @@ static u64 divide_u64_u32(u64 value, u32 divisor, u32 *remainder) {
 typedef struct { i64 sec, nsec; } Time64;
 typedef struct { unsigned short year, month, weekday, day, hour, minute, second, millis; } Calendar;
 
-static Time64 linux_clock(void) {
+enum LinuxPlatform { LINUX_UNCHECKED, LINUX_STANDARD, LINUX_ISH };
+
+static int linux_is_ish(u32 *platform) {
+    if (*platform == LINUX_UNCHECKED) {
+        struct { char system[65], node[65], release[65], version[65], machine[65], domain[65]; } name;
+        *platform = LINUX_STANDARD;
+        if (LINUX(122, &name, 0, 0) == 0) { /* uname */
+            u32 length = bytes(name.release);
+            if (length >= 4 && matches(name.release + length - 4, "-ish")) *platform = LINUX_ISH;
+        }
+    }
+    return *platform == LINUX_ISH;
+}
+
+static Time64 linux_clock(u32 *platform) {
     Time64 now = {0, 0};
-    if (LINUX(403, 0, &now, 0) < 0) {
+    // iSH build 494 sends SIGSYS on unknown syscalls before an ENOSYS fallback can run.
+    if (linux_is_ish(platform) || LINUX(403, 0, &now, 0) < 0) {
         int old[2];
         if (LINUX(78, old, 0, 0) == 0) now.sec = old[0], now.nsec = (i64)old[1] * 1000;
     }
@@ -258,27 +273,61 @@ static unsigned calendar_field(Calendar cal, u32 index) {
     }
 }
 
-static void linux_sleep(i64 millis) {
+static void linux_sleep(i64 millis, u32 *platform) {
     if (millis <= 0) return;
     u32 remainder;
     Time64 request;
     request.sec = divide_u64_u32((u64)millis, 1000, &remainder);
     request.nsec = remainder * 1000000;
     int status;
-    do { status = linux_call(407, 1, 0, (u32)&request, (u32)&request, 0); } while (status == -4);
-    if (status == -38 && request.sec <= 0x7fffffff) {
-        int old[] = {(int)request.sec, (int)request.nsec};
-        while (LINUX(162, old, old, 0) == -4) {}
+    if (!linux_is_ish(platform)) {
+        do { status = linux_call(407, 1, 0, (u32)&request, (u32)&request, 0); } while (status == -4);
+        if (status != -38) return;
     }
+    do {
+        const int last = request.sec <= 0x7fffffff;
+        const int seconds = last ? (int)request.sec : 0x7fffffff;
+        int old[] = {seconds, last ? (int)request.nsec : 0};
+        do { status = LINUX(162, old, old, 0); } while (status == -4);
+        if (status != 0 || last) return;
+        request.sec -= seconds;
+    } while (request.sec || request.nsec);
+}
+
+static int linux_path_stat(const char *path, u32 *mode, u64 *size, u32 *platform) {
+    if (!linux_is_ish(platform)) {
+        struct {
+            u32 mask, blocksize;
+            u64 attributes;
+            u32 links, uid, gid;
+            unsigned short mode, pad;
+            u64 inode, size;
+            char rest[208];
+        } data;
+        int result = linux_call(383, (u32)-100, (u32)path, 0, 0x201, (u32)&data);
+        if (result != -38) {
+            if (result != 0) return 0;
+            *mode = data.mode;
+            *size = data.size;
+            return 1;
+        }
+    }
+    // i386 stat64 is 96 bytes, with mode at 16 and the unaligned 64-bit size at 44.
+    u32 data[24];
+    if (LINUX(195, path, data, 0) != 0) return 0;
+    *mode = data[4];
+    *size = ((u64)data[12] << 32) | data[11];
+    return 1;
 }
 
 static i64 join_signed(u32 lo, u32 hi) { return (i64)(((u64)hi << 32) | lo); }
 
-u64 rt_linux_os(u32 operation, u32 a, u32 b, u32 c, u32 d, u32 imports, u32 unused1,
+u64 rt_linux_os(u32 operation, u32 a, u32 b, u32 c, u32 d, u32 imports, u32 platform_slot,
                   u32 unused2, Allocate allocate, u32 image) {
-    (void)c; (void)d; (void)unused1; (void)unused2;
+    (void)c; (void)d; (void)unused2;
     const char *first = (const char *)a, *second = (const char *)b;
     const char ***environment = (const char ***)imports;
+    u32 *platform = (u32 *)platform_slot;
     switch (operation) {
     case OS_PID: return LINUX(20, 0, 0, 0);
     case OS_CPU: {
@@ -299,18 +348,12 @@ u64 rt_linux_os(u32 operation, u32 a, u32 b, u32 c, u32 d, u32 imports, u32 unus
     case OS_REMOVE: return LINUX(10, first, 0, 0) == 0 || LINUX(40, first, 0, 0) == 0;
     case OS_RENAME: return LINUX(38, first, second, 0) == 0;
     case OS_EXISTS: case OS_IS_FILE: case OS_IS_DIR: case OS_SIZE: {
-        struct {
-            u32 mask, blocksize;
-            u64 attributes;
-            u32 links, uid, gid;
-            unsigned short mode, pad;
-            u64 inode, size;
-            char rest[208];
-        } stat;
-        int found = linux_call(383, (u32)-100, a, 0, 0x201, (u32)&stat) == 0; /* statx */
-        if (operation == OS_SIZE) return found ? stat.size : (u64)-1;
+        u32 mode;
+        u64 size;
+        int found = linux_path_stat(first, &mode, &size, platform);
+        if (operation == OS_SIZE) return found ? size : (u64)-1;
         if (operation == OS_EXISTS) return found;
-        return found && (stat.mode & 0170000) == (operation == OS_IS_DIR ? 0040000 : 0100000);
+        return found && (mode & 0170000) == (operation == OS_IS_DIR ? 0040000 : 0100000);
     }
     case OS_LIST: return (u32)linux_list(first, allocate, image);
     case OS_ENV:
@@ -332,11 +375,11 @@ u64 rt_linux_os(u32 operation, u32 a, u32 b, u32 c, u32 d, u32 imports, u32 unus
         do { waited = LINUX(7, child, &status, 0); } while (waited == -4);
         return waited < 0 ? (u64)-1 : (u64)status;
     }
-    case OS_SLEEP: linux_sleep(join_signed(a, b)); return 0;
+    case OS_SLEEP: linux_sleep(join_signed(a, b), platform); return 0;
     case OS_MESSAGE: return 0;
-    case TIME_STAMP: return linux_clock().sec;
-    case TIME_FORMAT: return (u32)format_calendar(utc_calendar(linux_clock()), first, allocate, image);
-    case TIME_FIELD: return calendar_field(utc_calendar(linux_clock()), a);
+    case TIME_STAMP: return linux_clock(platform).sec;
+    case TIME_FORMAT: return (u32)format_calendar(utc_calendar(linux_clock(platform)), first, allocate, image);
+    case TIME_FIELD: return calendar_field(utc_calendar(linux_clock(platform)), a);
     default: return 0;
     }
 }

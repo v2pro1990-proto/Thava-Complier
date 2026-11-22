@@ -132,15 +132,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install the 32-bit GCC C++ runtime and headers
+      - name: Install 32-bit build dependencies and QEMU
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends g++-multilib
+          sudo apt-get install -y --no-install-recommends g++-multilib qemu-user
 
       - name: Build the compiler and test ELF32 output
         run: |
           g++ -O0 -std=c++17 src/thavac.cpp -o thavac-linux-x64
-          python3 tests/i686_verify.py ./thavac-linux-x64
+          python3 tests/i686_verify.py ./thavac-linux-x64 --ish-syscalls
 
   release:
     name: Publish Release

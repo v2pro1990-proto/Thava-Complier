@@ -97,6 +97,7 @@ class Codegen {
     bool readUsed = false;
     uint32_t caseTable = UINT32_MAX;
     uint32_t environmentSlot = 0;
+    uint32_t linuxPlatformSlot = 0;
     uint32_t randomState = UINT32_MAX;
     size_t allocateLabel = enc.label();
     bool allocatorUsed = false;
@@ -939,6 +940,9 @@ class Codegen {
         else if (!windows) {
             dataAddress(EAX, environmentSlot);
             enc.store(ESP, 20, EAX);
+            if (!linuxPlatformSlot) linuxPlatformSlot = addSlot();
+            dataAddress(EAX, linuxPlatformSlot);
+            enc.store(ESP, 24, EAX);
         }
         callRuntime(windows ? runtime::rt_windows_os : runtime::rt_linux_os, 40);
     }
