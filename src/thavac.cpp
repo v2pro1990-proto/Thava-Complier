@@ -261,6 +261,7 @@ struct DLLibraryInfo {
     bool hasPEInitializer = false;
     bool hasOffsets = false;
     std::vector<uint32_t> relocs;   // image offsets of 8-byte absolute words
+    std::map<std::string, std::string> objectLayouts;
 };
 
 inline std::map<std::string, DLLibraryInfo> g_dlLibraryInfos;
@@ -366,6 +367,12 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
         if (lineStr.rfind("text:", 0) == 0)  { libInfo.textRva = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); libInfo.hasOffsets = true; continue; }
         if (lineStr == "pe-dll:1") { libInfo.hasPEInitializer = true; continue; }
         if (lineStr.rfind("machine:", 0) == 0) { libInfo.machine = lineStr.substr(8); continue; }
+        if (lineStr.rfind("layout:", 0) == 0) {
+            const auto separator = lineStr.find('|', 7);
+            if (separator != std::string::npos)
+                libInfo.objectLayouts[lineStr.substr(7, separator - 7)] = lineStr.substr(separator + 1);
+            continue;
+        }
         if (lineStr.rfind("data:", 0) == 0)  { libInfo.dataRva = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); continue; }
         if (lineStr.rfind("init:", 0) == 0)  { libInfo.initOffset = (uint32_t)std::strtoul(lineStr.c_str() + 5, nullptr, 0); libInfo.hasInit = true; continue; }
         if (lineStr.rfind("reloc:", 0) == 0) {
@@ -389,6 +396,14 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
         std::vector<std::string> paramWidths;
         uint32_t funcOffset = 0;
         bool hasOffset = false;
+        const auto signatureType = [](const std::string& name, std::string& width) {
+            if (name.rfind("custom:", 0) == 0) {
+                width = name.substr(7);
+                return ThavaType::CUSTOM;
+            }
+            if (name == "int16" || name == "int64") width = name;
+            return stringToType(name);
+        };
 
         std::stringstream lineStream(lineStr);
         std::string part;
@@ -397,8 +412,7 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
                 fname = part.substr(5);
             } else if (part.rfind("ret:", 0) == 0) {
                 const auto name = part.substr(4);
-                retType = stringToType(name);
-                if (name == "int16" || name == "int64") returnWidth = name;
+                retType = signatureType(name, returnWidth);
             } else if (part.rfind("off:", 0) == 0) {
                 funcOffset = (uint32_t)std::strtoul(part.c_str() + 4, nullptr, 0);
                 hasOffset = true;
@@ -415,9 +429,10 @@ inline void parseDLMetadata(const std::string& content, const std::string& libPa
                         size_t spacePos = pClean.find(' ');
                         std::string pTypeName = (spacePos != std::string::npos) ? pClean.substr(0, spacePos) : pClean;
                         std::string pName = (spacePos != std::string::npos) ? pClean.substr(spacePos + 1) : "";
-                        paramTypes.push_back(stringToType(pTypeName));
+                        std::string width;
+                        paramTypes.push_back(signatureType(pTypeName, width));
                         paramNames.push_back(pName);
-                        paramWidths.push_back(pTypeName == "int16" || pTypeName == "int64" ? pTypeName : "");
+                        paramWidths.push_back(std::move(width));
                     }
                 }
             }
@@ -3677,6 +3692,11 @@ inline std::string resolveTargetClass(ASTNode* target, std::shared_ptr<Environme
     if (auto cls = dynamic_cast<ClassInstantiateNode*>(target)) {
         return cls->className;
     }
+    if (auto structure = dynamic_cast<StructInstantiateNode*>(target)) return structure->structName;
+    if (auto call = dynamic_cast<CallNode*>(target); call && call->returnType == ThavaType::CUSTOM) {
+        const auto imported = g_dlFunctions.find(call->name);
+        if (imported != g_dlFunctions.end()) return imported->second.returnWidth;
+    }
     if (auto mem = dynamic_cast<MemberAccessNode*>(target)) {
         std::string subTargetClass = resolveTargetClass(mem->target.get(), env, currentClassName, currentBaseClassName);
         if (!subTargetClass.empty()) {
@@ -4173,7 +4193,7 @@ class Parser {
                     return std::make_unique<CallNode>(name, std::move(args), g_funcReturnTypes[name]);
                 }
                 // If not in g_funcReturnTypes, this is an indirect call via callback variable
-                return std::make_unique<CallNode>(name, std::move(args), ThavaType::INT);
+                return std::make_unique<CallNode>(name, std::move(args), ThavaType::UNKNOWN);
             }
         }
 

@@ -393,6 +393,19 @@ typedef struct { u64 bits; u32 kind; } Value;
 typedef struct { Value key, value; } Entry;
 typedef struct { u32 length, capacity; Entry *entries; } Collection;
 
+typedef struct { const char *name; u32 offset, kind; } ObjectField;
+typedef struct { const char *signature; void *entry; const char *public_name; void *boxed_entry; } ObjectMethod;
+typedef struct ObjectType {
+    const char *name;
+    const struct ObjectType *parent;
+    u32 field_count;
+    const ObjectField *fields;
+    u32 method_count;
+    const ObjectMethod *methods;
+    const char *layout;
+} ObjectType;
+typedef struct { const ObjectType *type; } Object;
+
 Collection *rt_collection_new(Allocate allocate, u32 image) {
     Collection *list = (Collection *)allocate(sizeof(Collection), image);
     if (list) list->length = list->capacity = 0, list->entries = 0;
@@ -600,6 +613,68 @@ u64 rt_value_as(const Value *value, u32 kind) {
     return 0;
 }
 
+static int text_equal(const char *a, const char *b) {
+    while (*a && *a == *b) ++a, ++b;
+    return *a == *b;
+}
+
+const Object *rt_object_as(const Object *object, const ObjectType *expected) {
+    for (const ObjectType *type = object ? object->type : 0; type; type = type->parent)
+        if (type == expected || (text_equal(type->name, expected->name) && text_equal(type->layout, expected->layout)))
+            return object;
+    return 0;
+}
+
+u32 rt_value_as_object(const Value *value, const ObjectType *expected) {
+    if (!value || value->kind == VALUE_NONE) return 0;
+    if (value->kind != VALUE_OBJECT) return ~0u;
+    const Object *object = (const Object *)(u32)value->bits;
+    if (!object || rt_object_as(object, expected)) return (u32)object;
+    return ~0u;
+}
+
+const Value *rt_value_member(const Value *value, const char *name, Allocate allocate, u32 image) {
+    if (!value || value->kind != VALUE_OBJECT || !value->bits) return 0;
+    const Object *object = (const Object *)(u32)value->bits;
+    for (const ObjectType *type = object->type; type; type = type->parent) {
+        for (u32 i = 0; i < type->field_count; ++i) {
+            const ObjectField *field = &type->fields[i];
+            if (!text_equal(field->name, name)) continue;
+            if (field->kind == ~0u) return 0;
+            u64 bits = *(const u64 *)((const char *)object + field->offset);
+            u32 kind = (!bits && (field->kind == VALUE_OBJECT || field->kind == VALUE_FUNCTION)) ?
+                VALUE_NONE : field->kind;
+            return rt_value_new((Value){bits, kind}, allocate, image);
+        }
+    }
+    return 0;
+}
+
+void *rt_object_method(const Object *object, const char *signature) {
+    for (const ObjectType *type = object ? object->type : 0; type; type = type->parent)
+        for (u32 i = 0; i < type->method_count; ++i)
+            if (text_equal(type->methods[i].signature, signature)) return type->methods[i].entry;
+    return 0;
+}
+
+void *rt_value_method(const Value *value, const char *name) {
+    if (!value || value->kind != VALUE_OBJECT || !value->bits) return 0;
+    const Object *object = (const Object *)(u32)value->bits;
+    // Select the public signature first, then dispatch it on the original object.
+    for (const ObjectType *type = object->type; type; type = type->parent) {
+        for (u32 i = 0; i < type->method_count; ++i) {
+            const ObjectMethod *method = &type->methods[i];
+            if (method->public_name && text_equal(method->public_name, name)) {
+                for (const ObjectType *dispatch = object->type; dispatch; dispatch = dispatch->parent)
+                    for (u32 j = 0; j < dispatch->method_count; ++j)
+                        if (text_equal(dispatch->methods[j].signature, method->signature))
+                            return dispatch->methods[j].boxed_entry;
+            }
+        }
+    }
+    return 0;
+}
+
 Value *rt_value_index(Value base, Value key, Value fallback, u32 missing_ok, Allocate allocate, u32 image) {
     Collection *collection = (Collection *)(u32)base.bits;
     const Value *item = 0;
@@ -691,6 +766,8 @@ static const char *format_value(Value value, const FormatPath *path, u32 depth, 
         case VALUE_REAL: return rt_format_float(value.bits, allocate, image);
         case VALUE_BOOL: return value.bits ? "true" : "false";
         case VALUE_INT: return rt_format_int(value.bits, allocate, image);
+        case VALUE_OBJECT: return value.bits ? ((const Object *)(u32)value.bits)->type->name : "none";
+        case VALUE_FUNCTION: return value.bits ? "<func>" : "none";
         case VALUE_LIST: case VALUE_TUPLE: case VALUE_DICT:
             return depth < 32 ? format_collection((Collection *)(u32)value.bits, value.kind == VALUE_DICT,
                                                   path, depth, allocate, image) : "...";

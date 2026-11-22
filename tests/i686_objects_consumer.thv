@@ -1,0 +1,36 @@
+@attach <i686_objects_types.thv>
+@dlattach <i686_objects.thdl>
+
+func failFromProgram() {
+    defer cons.out("program defer")
+    throw "program exception"
+}
+
+<Parcel> claimed = dispatchParcel()
+<Packet> packet = Packet()
+<Packet> changed = updatePacket(packet, claimed)
+<dict> nested = {"objects": [claimed, changed]}
+<lst> items = nested["objects"]
+<Parcel> parcel = items[0]
+<str> typed = parcel.describe()
+<str> dynamic = items[0].describe()
+<str> label = items[0].label
+<int64> size = items[1].count
+<bool> found = claimed in items
+<bool> same = packet == changed
+cons.out("@{typed} / @{dynamic} / @{label} / @{size} / @{found} @{same}")
+
+try {
+    <Packet> wrong = items[0]
+} except RuntimeError as message {
+    cons.out(message)
+}
+
+try {
+    failFromLibrary()
+} except LibraryError as message {
+    cons.out(message)
+}
+
+<str> result = handleCallback(failFromProgram)
+cons.out(result)

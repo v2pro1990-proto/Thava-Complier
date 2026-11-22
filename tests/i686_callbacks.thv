@@ -1,0 +1,38 @@
+<str> func decorate(<str> text, <int> number) {
+    return text + <str>number
+}
+
+<func> func choose() {
+    return decorate
+}
+
+<str> func apply(<func> callback, <str> text) {
+    <str> result = callback(text, 7)
+    return result
+}
+
+func replaceValues(<lst> values) {
+    values = [11, "changed"]
+}
+
+<func> callback = choose()
+<lst> operations = [callback, replaceValues]
+<func> formatter = operations[0]
+<func> rebind = operations[1]
+<lst> values = [0]
+rebind(values)
+<str> decorated = apply(formatter, "call-")
+cons.out("@{decorated} @{values}")
+
+try {
+    formatter("one argument")
+} except RuntimeError as message {
+    cons.out(message)
+}
+
+<func> empty = none
+try {
+    empty()
+} except RuntimeError as message {
+    cons.out(message)
+}

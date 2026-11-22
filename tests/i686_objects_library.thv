@@ -1,0 +1,36 @@
+@attach <i686_objects_types.thv>
+
+<int> func moduleNumber() {
+    return 17
+}
+
+class ExpressParcel : Parcel {
+    <str> func describe() {
+        return "express " + parvar.describe()
+    }
+}
+
+<Parcel> func dispatchParcel() {
+    <ExpressParcel> parcel = ExpressParcel()
+    parcel.label = "box"
+    return parcel
+}
+
+<Packet> func updatePacket(<Packet> packet, <Parcel> parcel) {
+    packet.count += parcel.describe().len()
+    return packet
+}
+
+func failFromLibrary() {
+    defer cons.out("library defer")
+    raise_error(r, "LibraryError", "library exception")
+}
+
+<str> func handleCallback(<func> callback) {
+    try {
+        callback()
+    } except RuntimeError as message {
+        return message
+    }
+    return "callback did not throw"
+}

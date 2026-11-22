@@ -79,6 +79,9 @@ with tempfile.TemporaryDirectory() as tmp:
                 "true 5000000021 boxed 3.75 5000000003", "Cannot access a member of none",
                 "5000000012", "int string",
             ], None),
+            ("i686_callbacks.thv", [
+                "call-7 [11, changed]", "Wrong number of arguments for 'decorate'", "Cannot call a null function",
+            ], None),
             ("i686_mixed.thv", [
                 "1 8 bells 4.5 box true true",
                 "[8, bells, [4.5, false], {name: box}, none]",
@@ -181,7 +184,7 @@ with tempfile.TemporaryDirectory() as tmp:
                            cwd=module_build, env=env, check=True, timeout=30)
             info = subprocess.run([str(compiler), "--info", str(library)], cwd=module_build,
                                   env=env, check=True, stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
-            assert (b"machine:i686-pe\n" if windows else b"machine:i686-elf\n") in library.read_bytes()
+            assert (b"machine:i686-pe-v2\n" if windows else b"machine:i686-elf-v2\n") in library.read_bytes()
             assert exported in info.stdout, info.stdout
         consumer = module_run / ("consumer.exe" if windows else "consumer")
         subprocess.run([str(compiler), str(source.with_name("thdl_arm64_consumer.thv")),
@@ -194,8 +197,50 @@ with tempfile.TemporaryDirectory() as tmp:
         assert result.stdout.splitlines() == ["42 43 44 5.5 thdl", "45 4.5 2 9"], result.stdout
         print(target, "native libraries, dependencies and moved modules OK")
 
+        objects = module_build / "i686_objects.thdl"
+        subprocess.run([str(compiler), str(source.with_name("i686_objects_library.thv")),
+                        "--target", target, "--native", "--lib", "-O2", "-o", str(objects)],
+                       cwd=module_build, env=env, check=True, timeout=30)
+        for opt in ("-O0", "-O2"):
+            consumer = module_run / ("objects" + opt + (".exe" if windows else ""))
+            subprocess.run([str(compiler), str(source.with_name("i686_objects_consumer.thv")),
+                            "--target", target, "--native", opt, "-o", str(consumer)],
+                           cwd=module_build, env=env, check=True, timeout=30)
+            result = subprocess.run([str(consumer)], cwd=module_run, check=True,
+                                    stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+            assert result.stdout.splitlines() == [
+                "express box / express box / box / 5000000011 / true true",
+                "Expected object of type 'Packet'", "library defer", "library exception",
+                "program defer", "program exception",
+            ], result.stdout
+        print(target, "objects, callbacks and deferred exceptions across .thdl OK")
+
+        scalar_consumer = module_build / "scalar-consumer.thv"
+        scalar_consumer.write_text('@dlattach <i686_objects.thdl>\ncons.out(moduleNumber())\n', encoding="utf-8")
+        consumer = module_run / ("scalar.exe" if windows else "scalar")
+        subprocess.run([str(compiler), str(scalar_consumer), "--target", target, "--native", "-o", str(consumer)],
+                       cwd=module_build, env=env, check=True, timeout=30)
+        result = subprocess.run([str(consumer)], cwd=module_run, check=True,
+                                stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+        assert result.stdout.splitlines() == ["17"], result.stdout
+
+        incompatible = module_build / "incompatible.thv"
+        different_type = source.with_name("i686_objects_types.thv").read_text(encoding="utf-8")
+        incompatible.write_text(
+            different_type.replace("<int64> count = 5000000000", "<int> count = 0") +
+            '\n@dlattach <i686_objects.thdl>\n<Packet> result = updatePacket(Packet(), Parcel())\n',
+            encoding="utf-8",
+        )
+        rejected = module_build / ("incompatible.exe" if windows else "incompatible")
+        result = subprocess.run([str(compiler), str(incompatible), "--target", target, "--native", "-o", str(rejected)],
+                                cwd=module_build, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                encoding="utf-8", timeout=30)
+        assert result.returncode != 0 and "Object layout of 'Packet' differs" in result.stdout, result.stdout
+        assert not rejected.exists()
+
         source = Path(tmp) / "unsupported.thv"
-        source.write_text('class Item {}\n<lst> collection = [Item()]\n', encoding="utf-8")
+        source.write_text('file.open("sample.txt", "w") as opened {\n    <lst> collection = [opened]\n}\n',
+                          encoding="utf-8")
         rejected = Path(tmp) / ("unsupported.exe" if windows else "unsupported")
         result = subprocess.run([str(compiler), str(source), "--target", target, "--native",
                                  "-o", str(rejected)], cwd=tmp, env=env, stdout=subprocess.PIPE,

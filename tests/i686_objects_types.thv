@@ -1,0 +1,11 @@
+struct Packet {
+    <int64> count = 5000000000
+}
+
+class Parcel {
+    <str> label = "base"
+
+    <str> func describe() {
+        return locvar.label
+    }
+}

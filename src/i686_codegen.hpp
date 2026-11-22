@@ -23,7 +23,8 @@ class Codegen {
     struct LoopSlots { Slot first, second; };
     struct LoopTarget { size_t end, next, scopes; };
     struct Cleanup { int32_t offset; size_t action; };
-    enum RecordField { Previous = 0, Frame = 4, Action = 8, Stack = 12, Defers = 16, RecordBytes = 24 };
+    enum RecordField { Previous = 0, Frame = 4, Action = 8, Stack = 12, Defers = 16, Image = 20, RecordBytes = 24 };
+    enum ExceptionField { CleanupHead = 0, PendingException = 8 };
     enum DeferField { NextDefer = 0, DeferAction = 4, DeferBytes = 8 };
     struct Function {
         std::string name, owner;
@@ -37,11 +38,12 @@ class Codegen {
     struct ObjectLayout {
         size_t initializer;
         int32_t size = 0;
+        uint32_t descriptor = 0;
         std::map<std::string, Slot> fields;
+        std::string schema;
     };
     struct ClassLayout : ObjectLayout {
         const ClassDeclNode* decl;
-        uint32_t id;
         std::vector<Function> constructors;
         std::map<std::string, Function> methods;
     };
@@ -65,6 +67,8 @@ class Codegen {
     std::vector<std::pair<size_t, std::string>> importFixups;
     std::map<std::string, Slot> globals, locals;
     std::map<std::string, Function> functions;
+    const std::vector<ASTPtr> emptyBody;
+    std::map<size_t, std::pair<Function, size_t>> boxedBridges, methodBridges;
     std::map<std::string, Import> imports;
     std::map<std::string, uint32_t> moduleSlots;
     uint32_t moduleRegistry = 0, moduleRegistryPointer = 0, moduleState = 0;
@@ -82,7 +86,7 @@ class Codegen {
     std::vector<Cleanup> scopes;
     Cleanup functionCleanup{};
     bool inDefer = false;
-    uint32_t cleanupHead = 0, pendingException = 0;
+    uint32_t exceptionContext = 0;
     size_t unwindLabel = enc.label(), runDefersLabel = enc.label();
     struct OpenFile { std::string name; const Slot* slot; Cleanup cleanup; };
     std::vector<OpenFile> activeFiles;
@@ -122,7 +126,7 @@ class Codegen {
     }
 
     static bool slotType(ThavaType type) {
-        return scalar(type) || collection(type) || type == ThavaType::CUSTOM;
+        return scalar(type) || collection(type) || type == ThavaType::CUSTOM || type == ThavaType::FUNC;
     }
 
     static uint32_t valueKind(ThavaType type) {
@@ -135,6 +139,8 @@ class Codegen {
             case ThavaType::LIST: case ThavaType::MULTYPE: return VALUE_LIST;
             case ThavaType::TUPLE: return VALUE_TUPLE;
             case ThavaType::DICT: return VALUE_DICT;
+            case ThavaType::CUSTOM: return VALUE_OBJECT;
+            case ThavaType::FUNC: return VALUE_FUNCTION;
             default: unsupported("This collection value type");
         }
     }
@@ -145,6 +151,12 @@ class Codegen {
         const uint32_t offset = static_cast<uint32_t>(elfData.size());
         elfData.resize(offset + 8);
         return offset;
+    }
+
+    uint32_t reserveData(size_t bytes) {
+        const auto base = addSlot();
+        for (size_t i = 8; i < bytes; i += 8) addSlot();
+        return base;
     }
 
     uint32_t addString(const std::string& value) {
@@ -221,15 +233,30 @@ class Codegen {
     void normalize(ThavaType expected, const std::string& width, ThavaType actual) {
         if (expected == ThavaType::UNKNOWN && actual == ThavaType::UNKNOWN) return;
         if (actual == ThavaType::UNKNOWN) {
-            enc.pushImm(valueKind(expected));
-            enc.push(EAX);
-            callRuntime(runtime::rt_value_as, 8);
+            if (expected == ThavaType::CUSTOM) {
+                dataAddress(ECX, objectLayout(width).descriptor);
+                enc.push(ECX);
+                enc.push(EAX);
+                callRuntime(runtime::rt_value_as_object, 8);
+                const auto valid = enc.label();
+                enc.alu(Cmp, EAX, uint32_t(-1));
+                enc.jump(NotEqual, valid);
+                LiteralNode message("Expected object of type '" + width + "'", ThavaType::STRING);
+                raiseException(&message);
+                enc.bind(valid);
+                enc.alu(Xor, EDX, EDX);
+            } else {
+                enc.pushImm(valueKind(expected));
+                enc.push(EAX);
+                callRuntime(runtime::rt_value_as, 8);
+            }
             actual = expected;
+            lastCustomType = expected == ThavaType::CUSTOM ? width : "";
         }
         if (collection(expected) && collection(actual) &&
             (expected == ThavaType::MULTYPE || actual == ThavaType::MULTYPE) &&
             expected != ThavaType::DICT && actual != ThavaType::DICT) return;
-        if (expected == ThavaType::CUSTOM && actual == ThavaType::NONE) return;
+        if ((expected == ThavaType::CUSTOM || expected == ThavaType::FUNC) && actual == ThavaType::NONE) return;
         if (expected == ThavaType::CUSTOM && actual == ThavaType::CUSTOM && !lastCustomType.empty()) {
             std::string type = lastCustomType;
             while (type != width) {
@@ -257,9 +284,14 @@ class Codegen {
         enc.store(ECX, 4, EDX);
     }
 
+    Slot* findSlot(const std::string& name) {
+        if (auto found = locals.find(name); found != locals.end()) return &found->second;
+        if (auto found = globals.find(name); found != globals.end()) return &found->second;
+        return nullptr;
+    }
+
     Slot& lookup(const std::string& name) {
-        if (auto found = locals.find(name); found != locals.end()) return found->second;
-        if (auto found = globals.find(name); found != globals.end()) return found->second;
+        if (auto* slot = findSlot(name)) return *slot;
         unsupported("Variable '" + name + "'");
     }
 
@@ -312,8 +344,8 @@ class Codegen {
             return emitValueBinary(op, left, right);
         loadLeft();
         if ((op == "==" || op == "!=") &&
-            (left == ThavaType::CUSTOM || left == ThavaType::NONE) &&
-            (right == ThavaType::CUSTOM || right == ThavaType::NONE)) {
+            (left == ThavaType::CUSTOM || left == ThavaType::FUNC || left == ThavaType::NONE) &&
+            (right == ThavaType::CUSTOM || right == ThavaType::FUNC || right == ThavaType::NONE)) {
             const auto yes = enc.label(), done = enc.label();
             enc.alu(Cmp, ECX, EAX);
             enc.jump(condition(op, false), yes);
@@ -592,6 +624,14 @@ class Codegen {
             stringValue("none");
             return;
         }
+        if (type == ThavaType::CUSTOM || type == ThavaType::FUNC) {
+            pushAllocationContext();
+            enc.alu(Sub, ESP, 12);
+            storeTagged(type, 0);
+            callRuntime(runtime::rt_value_new, 20);
+            formatScalar(ThavaType::UNKNOWN);
+            return;
+        }
         if (type != ThavaType::INT && !floating(type)) unsupported("Formatting this type");
         pushAllocationContext();
         saveValue();
@@ -610,7 +650,16 @@ class Codegen {
             enc.load(ECX, EAX, 8);
             enc.load(EDX, EAX, 4);
             enc.load(EAX, EAX);
-        } else enc.imm(ECX, valueKind(type));
+        } else {
+            enc.imm(ECX, valueKind(type));
+            if (type == ThavaType::CUSTOM || type == ThavaType::FUNC) {
+                const auto value = enc.label();
+                enc.alu(Cmp, EAX, 0);
+                enc.jump(NotEqual, value);
+                enc.imm(ECX, VALUE_NONE);
+                enc.bind(value);
+            }
+        }
         storeArgument(offset);
         enc.store(ESP, offset + 8, ECX);
     }
@@ -1135,56 +1184,100 @@ class Codegen {
         unsupported("Method '" + lastCustomType + "::" + name + "'");
     }
 
-    static bool overrides(const Function& base, const Function& candidate) {
-        if (base.returnType != candidate.returnType || base.customReturnType != candidate.customReturnType ||
-            base.params.size() != candidate.params.size()) return false;
-        for (size_t i = 0; i < base.params.size(); ++i) {
-            if (base.params[i].first != candidate.params[i].first) return false;
-            const auto a = i < base.paramCustomTypes.size() ? base.paramCustomTypes[i] : "";
-            const auto b = i < candidate.paramCustomTypes.size() ? candidate.paramCustomTypes[i] : "";
-            if (a != b) return false;
-        }
-        return true;
+    static std::string moduleTypeName(ThavaType type, const std::string& width) {
+        if (type == ThavaType::CUSTOM) return "custom:" + width;
+        return type == ThavaType::INT && !width.empty() ? width : typeToString(type);
+    }
+
+    static std::string methodSignature(const std::string& name, const Function& fn) {
+        std::string signature = name + ":" + moduleTypeName(fn.returnType, fn.customReturnType);
+        for (size_t i = 0; i < fn.params.size(); ++i)
+            signature += "," + moduleTypeName(fn.params[i].first, i < fn.paramCustomTypes.size() ? fn.paramCustomTypes[i] : "");
+        return signature;
     }
 
     void callMethod(const Function& callee, const std::string& methodName) {
-        size_t done = 0;
-        for (const auto& [name, layout] : classes) {
-            if (name == callee.owner || !derivesFrom(name, callee.owner)) continue;
-            const Function* target = nullptr;
-            for (auto type = name; type != callee.owner; type = classLayout(type).decl->baseClassName) {
-                const auto& methods = classLayout(type).methods;
-                const auto found = methods.find(methodName);
-                if (found != methods.end() && overrides(callee, found->second)) { target = &found->second; break; }
-            }
-            if (!target) continue;
-            if (!done) {
-                done = enc.label();
-                enc.load(EAX, ESP);
-                enc.load(ECX, EAX); // Runtime class ID, ahead of the inherited fields.
-            }
-            const auto next = enc.label();
-            enc.alu(Cmp, ECX, layout.id);
-            enc.jump(NotEqual, next);
-            enc.call(target->entry);
-            enc.jump(done);
-            enc.bind(next);
-        }
-        enc.call(callee.entry);
-        if (done) enc.bind(done);
+        enc.load(EAX, ESP);
+        dataAddress(ECX, addString(methodSignature(methodName, callee)));
+        enc.push(ECX);
+        enc.push(EAX);
+        callRuntime(runtime::rt_object_method, 8);
+        requireValue("Cannot dispatch method on this object");
+        enc.callReg(EAX);
     }
 
     void requireObject() {
         requireValue("Cannot access a member of none");
     }
 
-    const Slot& field(ASTNode* target, const std::string& name) {
-        if (expression(target) != ThavaType::CUSTOM) unsupported("A member target without fields");
-        const auto& fields = objectLayout(lastCustomType).fields;
+    size_t bridge(const Function& fn, bool boxed) {
+        auto& entries = boxed ? boxedBridges : methodBridges;
+        const auto found = entries.find(fn.entry);
+        if (found != entries.end()) return found->second.second;
+        const auto entry = enc.label();
+        entries.emplace(fn.entry, std::make_pair(fn, entry));
+        return entry;
+    }
+
+    Function importSignature(const Import& importer) const {
+        const auto& info = *importer.info;
+        const auto& library = g_dlLibraryInfos.at(info.libPath);
+        validateImportedObject(library, info.retType, info.returnWidth);
+        for (size_t i = 0; i < info.paramTypes.size(); ++i)
+            validateImportedObject(library, info.paramTypes[i], info.paramWidths[i]);
+        return {info.name, "", info.retType, info.returnWidth, importer.params,
+                info.paramWidths, emptyBody, importer.entry};
+    }
+
+    // A boxed call passes 16 bytes per argument: Value followed by an optional lvalue address.
+    ThavaType boxedCall(const std::vector<ASTPtr>& args) {
+        if (args.size() > 254) unsupported("A callback frame larger than 4080 bytes");
+        const int32_t bytes = static_cast<int32_t>(16 * args.size());
+        saveValue(); // entry and optional receiver
+        if (bytes) enc.alu(Sub, ESP, bytes);
+        for (size_t i = 0; i < args.size(); ++i) {
+            const int32_t offset = static_cast<int32_t>(i * 16);
+            const auto type = expression(args[i].get());
+            storeTagged(type, offset);
+            const auto* variable = dynamic_cast<VarNode*>(args[i].get());
+            if (collection(type) && variable) slotAddress(lookup(variable->getName()), EAX);
+            else enc.alu(Xor, EAX, EAX);
+            enc.store(ESP, offset + 12, EAX);
+        }
+        enc.lea(EAX, ESP, 0);
+        enc.load(ECX, ESP, bytes);
+        enc.load(EDX, ESP, bytes + 4);
+        enc.push(EDX);
+        enc.pushImm(static_cast<uint32_t>(args.size()));
+        enc.push(EAX);
+        enc.callReg(ECX);
+        enc.alu(Add, ESP, bytes + 20);
+        requireValue("Cannot allocate callback result");
+        return ThavaType::UNKNOWN;
+    }
+
+    const Slot& objectField(ThavaType type, const std::string& name) {
+        if (type != ThavaType::CUSTOM) unsupported("A member target without fields");
+        const auto& layout = objectLayout(lastCustomType);
+        const auto& fields = layout.fields;
         const auto found = fields.find(name);
         if (found == fields.end()) unsupported("Field '" + lastCustomType + "::" + name + "'");
         requireObject();
+        const auto compatible = enc.label();
+        enc.load(EDX, EAX);
+        dataAddress(ECX, layout.descriptor);
+        enc.alu(Cmp, EDX, ECX);
+        enc.jump(Equal, compatible);
+        enc.push(ECX);
+        enc.push(EAX);
+        callRuntime(runtime::rt_object_as, 8);
+        requireValue("Object layout does not match the member declaration");
+        enc.bind(compatible);
         return found->second;
+    }
+
+    const Slot& field(ASTNode* target, const std::string& name) {
+        return objectField(expression(target), name);
     }
 
     ThavaType callFunction(const Function& callee, const std::vector<ASTPtr>& args, const std::string& virtualMethod = "") {
@@ -1245,6 +1338,8 @@ class Codegen {
         LiteralNode message("Cannot allocate object", ThavaType::STRING);
         raiseException(&message);
         enc.bind(allocated);
+        dataAddress(ECX, layout.descriptor);
+        enc.store(EAX, 0, ECX);
         enc.alu(Xor, EDX, EDX);
     }
 
@@ -1261,8 +1356,6 @@ class Codegen {
         if (!init && (!layout.constructors.empty() || !instance.args.empty()))
             unsupported("Constructor arguments for '" + instance.className + "'");
         allocateObject(layout);
-        enc.imm(ECX, layout.id);
-        enc.store(EAX, 0, ECX);
         saveValue();
         enc.call(layout.initializer);
         if (init) {
@@ -1318,9 +1411,16 @@ class Codegen {
             return type;
         }
         if (auto var = dynamic_cast<VarNode*>(node)) {
-            const auto& slot = lookup(var->getName());
-            loadValue(slot);
-            return slot.type;
+            if (const auto* slot = findSlot(var->getName())) {
+                loadValue(*slot);
+                return slot->type;
+            }
+            const auto fn = functions.find(var->getName());
+            const auto imported = imports.find(var->getName());
+            if (fn == functions.end() && imported == imports.end()) unsupported("Variable '" + var->getName() + "'");
+            codeAddress(EAX, bridge(fn != functions.end() ? fn->second : importSignature(imported->second), true));
+            enc.alu(Xor, EDX, EDX);
+            return ThavaType::FUNC;
         }
         if (dynamic_cast<LocVarNode*>(node) || dynamic_cast<ParVarNode*>(node)) {
             const auto* parent = dynamic_cast<ParVarNode*>(node);
@@ -1334,13 +1434,35 @@ class Codegen {
         if (auto instance = dynamic_cast<StructInstantiateNode*>(node))
             return instantiateStruct(structs.at(instance->structName), instance->args);
         if (auto member = dynamic_cast<MemberAccessNode*>(node)) {
-            const auto& slot = field(member->target.get(), member->memberName);
+            const auto type = expression(member->target.get());
+            if (type == ThavaType::UNKNOWN) {
+                pushAllocationContext();
+                dataAddress(ECX, addString(member->memberName));
+                enc.push(ECX);
+                enc.push(EAX);
+                callRuntime(runtime::rt_value_member, 16);
+                requireValue("Cannot read this public member");
+                return ThavaType::UNKNOWN;
+            }
+            const auto& slot = objectField(type, member->memberName);
             enc.mov(ECX, EAX);
             loadValue(slot);
             return slot.type;
         }
         if (auto call = dynamic_cast<MethodCallNode*>(node)) {
-            if (expression(call->target.get()) != ThavaType::CUSTOM) unsupported("A non-class method target");
+            const auto type = expression(call->target.get());
+            if (type == ThavaType::UNKNOWN) {
+                enc.push(EAX);
+                dataAddress(ECX, addString(call->methodName));
+                enc.push(ECX);
+                enc.push(EAX);
+                callRuntime(runtime::rt_value_method, 8);
+                requireValue("Cannot call this public method");
+                enc.pop(EDX);
+                enc.load(EDX, EDX);
+                return boxedCall(call->args);
+            }
+            if (type != ThavaType::CUSTOM) unsupported("A non-class method target");
             const auto& callee = method(call->methodName, call->args);
             requireObject();
             const bool direct = call->methodName == "init" || dynamic_cast<ParVarNode*>(call->target.get());
@@ -1441,15 +1563,16 @@ class Codegen {
         if (auto contains = dynamic_cast<InNode*>(node)) return membership(contains);
         if (auto random = dynamic_cast<RandCallNode*>(node)) return randomCall(random);
         if (auto call = dynamic_cast<CallNode*>(node)) {
+            if (const auto* slot = findSlot(call->name); slot && slot->type == ThavaType::FUNC) {
+                loadValue(*slot);
+                requireValue("Cannot call a null function");
+                return boxedCall(call->args);
+            }
             const auto fn = functions.find(call->name);
             if (fn != functions.end()) return callFunction(fn->second, call->args);
             const auto imported = imports.find(call->name);
             if (imported == imports.end()) unsupported("Call to '" + call->name + "'");
-            const auto& target = imported->second;
-            const std::vector<ASTPtr> body;
-            const Function signature{call->name, "", target.info->retType, target.info->returnWidth,
-                                     target.params, target.info->paramWidths, body, target.entry};
-            return callFunction(signature, call->args);
+            return callFunction(importSignature(imported->second), call->args);
         }
         unsupported("This expression");
     }
@@ -1631,14 +1754,21 @@ class Codegen {
         enc.bind(done);
     }
 
+    void exceptionAddress(Reg reg, ExceptionField field) {
+        dataAddress(reg, exceptionContext);
+        enc.load(reg, reg);
+        if (field != CleanupHead) enc.lea(reg, reg, field);
+    }
+
     void enterCleanup(Cleanup record) {
-        dataAddress(EDI, cleanupHead);
+        exceptionAddress(EDI, CleanupHead);
         enc.load(EAX, EDI);
         enc.store(EBP, record.offset + Previous, EAX);
         enc.store(EBP, record.offset + Frame, EBP);
         codeAddress(EAX, record.action);
         enc.store(EBP, record.offset + Action, EAX);
         enc.store(EBP, record.offset + Stack, ESP);
+        enc.store(EBP, record.offset + Image, EBX);
         enc.alu(Xor, EAX, EAX);
         enc.store(EBP, record.offset + Defers, EAX);
         enc.lea(EAX, EBP, record.offset);
@@ -1647,7 +1777,7 @@ class Codegen {
 
     void popCleanup(Cleanup record) {
         enc.load(EAX, EBP, record.offset + Previous);
-        dataAddress(EDI, cleanupHead);
+        exceptionAddress(EDI, CleanupHead);
         enc.store(EDI, 0, EAX);
     }
 
@@ -1671,7 +1801,7 @@ class Codegen {
         if (type) formatScalar(expression(type));
         else stringValue("RuntimeError");
         enc.pop(ECX);
-        dataAddress(EDI, pendingException);
+        exceptionAddress(EDI, PendingException);
         enc.store(EDI, 0, ECX);
         enc.store(EDI, 4, EAX);
         enc.jump(unwindLabel);
@@ -1698,7 +1828,7 @@ class Codegen {
             size_t next = 0;
             if (!catchAll) {
                 next = enc.label();
-                dataAddress(EDI, pendingException);
+                exceptionAddress(EDI, PendingException);
                 enc.load(ECX, EDI, 4);
                 stringValue(clause.exceptionType);
                 enc.call(compareStringsLabel);
@@ -1710,7 +1840,7 @@ class Codegen {
                 shadow = locals.extract(clause.varName);
                 const auto& slot = catchSlots.at(&clause);
                 locals.emplace(clause.varName, slot);
-                dataAddress(EAX, pendingException);
+                exceptionAddress(EAX, PendingException);
                 enc.load(EAX, EAX);
                 enc.alu(Xor, EDX, EDX);
                 storeValue(slot, ThavaType::STRING);
@@ -2054,15 +2184,19 @@ class Codegen {
         if (!slotType(field.type))
             unsupported("Type of field '" + field.name + "'");
         layout.fields.insert_or_assign(field.name, Slot{ECX, layout.size, field.type, field.customTypeName});
+        layout.schema += ";" + field.name + ":" + moduleTypeName(field.type, field.customTypeName) +
+                         ":" + std::to_string(static_cast<int>(field.access));
         layout.size += 8;
     }
 
     void registerClass(const ClassDeclNode& decl) {
-        ClassLayout layout{{enc.label(), 8}, &decl, static_cast<uint32_t>(classes.size() + 1)};
+        ClassLayout layout{{enc.label(), 8, reserveData(28)}, &decl};
+        layout.schema = "class:" + decl.className;
         if (!decl.baseClassName.empty()) {
             const auto& base = classLayout(decl.baseClassName);
             layout.size = base.size;
             layout.fields = base.fields;
+            layout.schema += "[" + base.schema + "]";
         }
         for (const auto& field : decl.fields) appendField(layout, field);
         for (const auto& ctor : decl.constructors)
@@ -2072,16 +2206,76 @@ class Codegen {
             layout.methods.emplace(method.name, Function{decl.className + "::" + method.name, decl.className,
                                    method.returnType, method.customReturnType, method.params,
                                    method.paramCustomTypes, method.body, enc.label()});
+        for (const auto& method : decl.methods)
+            layout.schema += ";func:" + methodSignature(method.name, layout.methods.at(method.name)) +
+                             ":" + std::to_string(static_cast<int>(method.access));
         classes.emplace(decl.className, std::move(layout));
     }
 
     void registerStruct(const StructDeclNode& decl) {
-        StructLayout layout{{enc.label()}, &decl};
+        StructLayout layout{{enc.label(), 8, reserveData(28)}, &decl};
+        layout.schema = "struct:" + decl.structName;
         for (const auto& field : decl.fields) {
             if (layout.fields.count(field.name)) unsupported("Duplicate struct field '" + field.name + "'");
             appendField(layout, field);
         }
         structs.emplace(decl.structName, std::move(layout));
+    }
+
+    void writeDescriptorWord(uint32_t base, uint32_t offset, uint32_t value) {
+        enc.imm(EAX, value);
+        writeDescriptorPointer(base, offset);
+    }
+
+    void writeDescriptorPointer(uint32_t base, uint32_t offset) {
+        dataAddress(ECX, base);
+        enc.store(ECX, offset, EAX);
+    }
+
+    void writeDescriptorString(uint32_t base, uint32_t offset, const std::string& value) {
+        dataAddress(EAX, addString(value));
+        writeDescriptorPointer(base, offset);
+    }
+
+    void emitObjectDescriptor(const std::string& name, const ObjectLayout& layout,
+                              const std::vector<ClassFieldDecl>& fields, const ClassLayout* cls = nullptr) {
+        const auto descriptor = layout.descriptor;
+        writeDescriptorString(descriptor, 0, name);
+        writeDescriptorString(descriptor, 24, layout.schema);
+        if (cls && !cls->decl->baseClassName.empty()) {
+            dataAddress(EAX, classLayout(cls->decl->baseClassName).descriptor);
+            writeDescriptorPointer(descriptor, 4);
+        }
+        if (!fields.empty()) {
+            const auto table = reserveData(fields.size() * 12);
+            writeDescriptorWord(descriptor, 8, static_cast<uint32_t>(fields.size()));
+            dataAddress(EAX, table);
+            writeDescriptorPointer(descriptor, 12);
+            uint32_t offset = 0;
+            for (const auto& field : fields) {
+                writeDescriptorString(table, offset, field.name);
+                writeDescriptorWord(table, offset + 4, layout.fields.at(field.name).offset);
+                writeDescriptorWord(table, offset + 8, field.access == AccessModifier::PUBLIC ? valueKind(field.type) : UINT32_MAX);
+                offset += 12;
+            }
+        }
+        if (!cls || cls->methods.empty()) return;
+        const auto table = reserveData(cls->methods.size() * 16);
+        writeDescriptorWord(descriptor, 16, static_cast<uint32_t>(cls->methods.size()));
+        dataAddress(EAX, table);
+        writeDescriptorPointer(descriptor, 20);
+        uint32_t offset = 0;
+        for (const auto& [methodName, fn] : cls->methods) {
+            const auto method = std::find_if(cls->decl->methods.begin(), cls->decl->methods.end(),
+                                             [&](const auto& item) { return item.name == methodName; });
+            writeDescriptorString(table, offset, methodSignature(methodName, fn));
+            codeAddress(EAX, bridge(fn, false));
+            writeDescriptorPointer(table, offset + 4);
+            if (method->access == AccessModifier::PUBLIC) writeDescriptorString(table, offset + 8, methodName);
+            codeAddress(EAX, bridge(fn, true));
+            writeDescriptorPointer(table, offset + 12);
+            offset += 16;
+        }
     }
 
     void emitStructInitializer(const StructLayout& layout) {
@@ -2333,37 +2527,40 @@ class Codegen {
     void emitUnwind() {
         // Division reaches the error path before borrowing EBX for arithmetic.
         enc.bind(errorLabel);
-        dataAddress(EDI, pendingException);
+        exceptionAddress(EDI, PendingException);
         dataAddress(EAX, addString("Division by zero"));
         enc.store(EDI, 0, EAX);
         dataAddress(EAX, addString("RuntimeError"));
         enc.store(EDI, 4, EAX);
 
         enc.bind(unwindLabel);
-        dataAddress(EDI, cleanupHead);
+        exceptionAddress(EDI, CleanupHead);
         enc.load(ECX, EDI);
         enc.alu(Cmp, ECX, 0);
         const auto fatal = enc.label();
         enc.jump(Equal, fatal);
         // Cleanups may catch their own exception and then return to this unwind.
-        dataAddress(EDI, pendingException);
+        enc.push(EBX);
+        exceptionAddress(EDI, PendingException);
         enc.load(EAX, EDI, 0);
         enc.push(EAX);
         enc.load(EAX, EDI, 4);
         enc.push(EAX);
         enc.load(EBP, ECX, Frame);
         enc.load(EAX, ECX, Action);
+        enc.load(EBX, ECX, Image);
         enc.callReg(EAX);
-        dataAddress(EDI, pendingException);
+        exceptionAddress(EDI, PendingException);
         enc.pop(EAX);
         enc.store(EDI, 4, EAX);
         enc.pop(EAX);
         enc.store(EDI, 0, EAX);
+        enc.pop(EBX);
         enc.jump(unwindLabel);
 
         enc.bind(fatal);
         printText("[Runtime Exception]: ");
-        dataAddress(EAX, pendingException);
+        exceptionAddress(EAX, PendingException);
         enc.load(EAX, EAX);
         enc.call(printStringLabel);
         printText("\n");
@@ -2652,7 +2849,22 @@ class Codegen {
         enc.ret();
     }
 
-    static bool moduleType(ThavaType type) { return scalar(type) || collection(type); }
+    static bool moduleType(ThavaType type) { return slotType(type); }
+
+    const char* moduleMachine() const { return windows ? "i686-pe" : "i686-elf"; }
+
+    bool sharedExceptionModule(const DLLibraryInfo& info) const {
+        return info.machine == std::string(moduleMachine()) + "-v2";
+    }
+
+    void validateImportedObject(const DLLibraryInfo& library, ThavaType type, const std::string& name) const {
+        if (type != ThavaType::CUSTOM) return;
+        const auto layout = library.objectLayouts.find(name);
+        if ((!classes.count(name) && !structs.count(name)) || layout == library.objectLayouts.end())
+            throw std::runtime_error("Include the shared class or struct declaration for '" + name + "' before using it across .thdl modules.");
+        if (layout->second != objectLayout(name).schema)
+            throw std::runtime_error("Object layout of '" + name + "' differs from the definition in '" + library.path + "'.");
+    }
 
     void prepareModules() {
         if (g_isLibraryMode) moduleState = addSlot();
@@ -2662,8 +2874,8 @@ class Codegen {
         }
         for (const auto& path : g_dlLibraries) {
             const auto& info = g_dlLibraryInfos.at(path);
-            const std::string machine = windows ? "i686-pe" : "i686-elf";
-            if (info.machine != machine || !info.hasOffsets || !info.hasInit || info.textRva != ElfI686Emitter::textRva ||
+            const std::string machine = moduleMachine();
+            if ((info.machine != machine && !sharedExceptionModule(info)) || !info.hasOffsets || !info.hasInit || info.textRva != ElfI686Emitter::textRva ||
                 info.dataRva <= info.textRva || info.initOffset >= info.dataRva - info.textRva)
                 throw std::runtime_error("Library '" + path + "' is not a compatible native " + machine + " module.");
             moduleSlots.emplace(path, addSlot());
@@ -2747,9 +2959,18 @@ class Codegen {
             if (windows) {
                 windowsExport(slot, moduleInitializer);
                 requireValue("Cannot find the native i686 library initializer");
+                if (sharedExceptionModule(info)) {
+                    exceptionAddress(ECX, CleanupHead);
+                    enc.push(ECX);
+                }
                 enc.callReg(EAX);
+                if (sharedExceptionModule(info)) enc.alu(Add, ESP, 4);
             } else {
                 enc.alu(Add, EAX, info.textRva + info.initOffset);
+                if (sharedExceptionModule(info)) {
+                    exceptionAddress(ECX, CleanupHead);
+                    enc.push(ECX);
+                }
                 dataAddress(ECX, environmentSlot);
                 enc.load(EDX, ECX);
                 enc.push(EDX);
@@ -2757,7 +2978,7 @@ class Codegen {
                 enc.load(EDX, ECX);
                 enc.push(EDX);
                 enc.callReg(EAX);
-                enc.alu(Add, ESP, 8);
+                enc.alu(Add, ESP, sharedExceptionModule(info) ? 12 : 8);
             }
             requireValue(("Cannot initialize library '" + path + "'").c_str());
         }
@@ -2785,10 +3006,92 @@ class Codegen {
         }
     }
 
+    void emitRawBridge(const Function& fn) {
+        enc.push(EBX);
+        imageBase();
+        const auto bytes = static_cast<uint32_t>(fn.params.size() + !fn.owner.empty()) * 8;
+        if (bytes > 4080) unsupported("A library or method frame larger than 4080 bytes");
+        if (bytes) {
+            enc.alu(Sub, ESP, bytes);
+            for (uint32_t index = 0; index < bytes; index += 4) {
+                enc.load(EAX, ESP, bytes + 8 + index);
+                enc.store(ESP, index, EAX);
+            }
+        }
+        enc.call(fn.entry);
+        if (bytes) enc.alu(Add, ESP, bytes);
+        enc.pop(EBX);
+        enc.ret();
+    }
+
+    void emitBoxedBridge(const Function& fn) {
+        enc.push(EBP);
+        enc.mov(EBP, ESP);
+        enc.push(EBX);
+        imageBase();
+        const auto arity = enc.label();
+        if (fn.params.size() <= 254) {
+            enc.load(EAX, EBP, 12);
+            enc.alu(Cmp, EAX, static_cast<uint32_t>(fn.params.size()));
+            enc.jump(Equal, arity);
+        }
+        LiteralNode message("Wrong number of arguments for '" + fn.name + "'", ThavaType::STRING);
+        raiseException(&message);
+        enc.bind(arity);
+        if (fn.params.size() > 254) return;
+
+        const int32_t receiver = fn.owner.empty() ? 0 : 8;
+        const int32_t bytes = receiver + static_cast<int32_t>(8 * fn.params.size());
+        const int32_t frame = bytes + static_cast<int32_t>(8 * fn.params.size());
+        if (frame) enc.alu(Sub, ESP, frame);
+        if (receiver) {
+            enc.load(EAX, EBP, 16);
+            enc.alu(Xor, EDX, EDX);
+            storeArgument(0);
+        }
+        for (size_t i = 0; i < fn.params.size(); ++i) {
+            const auto formal = fn.params[i].first;
+            const auto width = i < fn.paramCustomTypes.size() ? fn.paramCustomTypes[i] : "";
+            const auto boxed = static_cast<int32_t>(16 * i);
+            const auto offset = receiver + static_cast<int32_t>(8 * i);
+            enc.load(EAX, EBP, 8);
+            if (boxed) enc.lea(EAX, EAX, boxed);
+            if (collection(formal)) {
+                const auto temporary = bytes + static_cast<int32_t>(8 * i);
+                storeValue({ESP, temporary, formal, width}, ThavaType::UNKNOWN);
+                enc.load(ECX, EBP, 8);
+                enc.load(EAX, ECX, boxed + 12);
+                enc.load(EDX, ECX, boxed + 8);
+                const auto temp = enc.label(), ready = enc.label();
+                enc.alu(Cmp, EAX, 0);
+                enc.jump(Equal, temp);
+                enc.alu(Cmp, EDX, valueKind(formal));
+                enc.jump(Equal, ready);
+                enc.bind(temp);
+                enc.lea(EAX, ESP, temporary);
+                enc.bind(ready);
+                enc.store(ESP, offset, EAX);
+            } else storeValue({ESP, offset, formal, width}, ThavaType::UNKNOWN);
+        }
+        enc.call(fn.entry);
+        const auto type = fn.returnType == ThavaType::VOID ? ThavaType::NONE : fn.returnType;
+        if (type == ThavaType::NONE) integer(0);
+        pushAllocationContext();
+        enc.alu(Sub, ESP, 12);
+        storeTagged(type, 0);
+        callRuntime(runtime::rt_value_new, 20);
+        enc.load(EBX, EBP, -4);
+        enc.leave();
+        enc.ret();
+    }
+
     std::string emitModuleExports(const std::string& output) {
         std::string metadata = "__THAVA_METADATA_START__\nmachine:";
-        metadata += windows ? "i686-pe\npe-dll:1\n" : "i686-elf\n";
+        metadata += std::string(moduleMachine()) + "-v2\n";
+        if (windows) metadata += "pe-dll:1\n";
         metadata += "text:" + std::to_string(ElfI686Emitter::textRva) + '\n';
+        for (const auto& [name, layout] : classes) metadata += "layout:" + name + '|' + layout.schema + '\n';
+        for (const auto& [name, layout] : structs) metadata += "layout:" + name + '|' + layout.schema + '\n';
         if (windows) {
             pe.setDll(true);
             pe.setEntryPointRva(0);
@@ -2799,33 +3102,15 @@ class Codegen {
             if (name == moduleInitializer) unsupported("Reserved module function name '" + name + "'");
             if ((fn.returnType != ThavaType::VOID && !moduleType(fn.returnType)) ||
                 std::any_of(fn.params.begin(), fn.params.end(), [](const auto& param) { return !moduleType(param.first); })) continue;
-            if (fn.params.size() > 510) unsupported("A library call frame larger than 4080 bytes");
-
             const auto offset = static_cast<uint32_t>(enc.code.size());
             if (windows) pe.addExport(name, offset);
-            enc.push(EBX);
-            imageBase();
-            const auto bytes = static_cast<uint32_t>(fn.params.size()) * 8;
-            if (bytes) {
-                enc.alu(Sub, ESP, bytes);
-                for (uint32_t index = 0; index < bytes; index += 4) {
-                    enc.load(EAX, ESP, bytes + 8 + index);
-                    enc.store(ESP, index, EAX);
-                }
-            }
-            enc.call(fn.entry);
-            if (bytes) enc.alu(Add, ESP, bytes);
-            enc.pop(EBX);
-            enc.ret();
+            emitRawBridge(fn);
 
-            const auto typeName = [](ThavaType type, const std::string& width) {
-                return type == ThavaType::INT && !width.empty() ? width : typeToString(type);
-            };
-            metadata += "func:" + name + "|ret:" + typeName(fn.returnType, fn.customReturnType) + "|params:";
+            metadata += "func:" + name + "|ret:" + moduleTypeName(fn.returnType, fn.customReturnType) + "|params:";
             for (size_t i = 0; i < fn.params.size(); ++i) {
                 if (i) metadata += ',';
                 const auto& [type, param] = fn.params[i];
-                metadata += typeName(type, i < fn.paramCustomTypes.size() ? fn.paramCustomTypes[i] : "") + " " + param;
+                metadata += moduleTypeName(type, i < fn.paramCustomTypes.size() ? fn.paramCustomTypes[i] : "") + " " + param;
             }
             metadata += "|off:" + std::to_string(offset) + '\n';
         }
@@ -2836,13 +3121,14 @@ public:
     explicit Codegen(bool windowsTarget) : windows(windowsTarget) {}
 
     bool compile(const std::vector<ASTPtr>& ast, const std::string& output) {
-        cleanupHead = addSlot();
-        pendingException = addSlot();
-        prepareModules();
+        exceptionContext = addSlot();
+        const auto localExceptionState = g_isLibraryMode ? 0 : addSlot();
+        if (!g_isLibraryMode) addSlot(); // Pending exception message and type.
         for (const auto& node : ast) {
             if (auto decl = dynamic_cast<ClassDeclNode*>(node.get())) registerClass(*decl);
             else if (auto decl = dynamic_cast<StructDeclNode*>(node.get())) registerStruct(*decl);
         }
+        prepareModules();
         for (const auto& node : ast) {
             if (auto func = dynamic_cast<FunctionDeclNode*>(node.get()))
                 functions.emplace(func->name, Function{func->name, "", func->returnType, func->customReturnType,
@@ -2868,6 +3154,10 @@ public:
             enc.imm(EAX, 1);
             enc.store(ECX, 0, EAX);
         }
+        if (g_isLibraryMode) enc.load(EAX, ESP, windows ? 8 : 16);
+        else dataAddress(EAX, localExceptionState);
+        dataAddress(ECX, exceptionContext);
+        enc.store(ECX, 0, EAX);
         if (windows) {
             stdoutSlot = addSlot();
             stdinSlot = addSlot();
@@ -2900,6 +3190,8 @@ public:
             dataAddress(ECX, environmentSlot);
             enc.store(ECX, 0, EAX);
         }
+        for (const auto& [name, layout] : structs) emitObjectDescriptor(name, layout, layout.decl->fields);
+        for (const auto& [name, layout] : classes) emitObjectDescriptor(name, layout, layout.decl->fields, &layout);
         loadModules();
         for (const auto& [name, slot] : globals) {
             if (slot.type != ThavaType::STRING && !collection(slot.type)) continue;
@@ -2943,6 +3235,14 @@ public:
         emitUnwind();
         emitInput();
         emitFileCallbacks();
+        for (const auto& [target, entry] : methodBridges) {
+            enc.bind(entry.second);
+            emitRawBridge(entry.first);
+        }
+        for (const auto& [target, entry] : boxedBridges) {
+            enc.bind(entry.second);
+            emitBoxedBridge(entry.first);
+        }
         emitAllocator();
         emitModuleThunks();
         const auto metadata = g_isLibraryMode ? emitModuleExports(output) : std::string();
