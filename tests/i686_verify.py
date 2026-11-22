@@ -14,6 +14,12 @@ source = Path(__file__).with_name("i686.thv").resolve()
 windows = os.name == "nt"
 arm64 = "--windows-arm64" in sys.argv[2:]
 target = "win-arm64" if arm64 else ("win-i686" if windows else "linux-i686")
+success_banner = "[Thava Native] Build and run successful!"
+
+
+def assert_native_output(output, expected_lines):
+    assert output.splitlines() == [*expected_lines, "", success_banner], output
+
 
 with tempfile.TemporaryDirectory() as tmp:
     output = Path(tmp) / ("smoke.exe" if windows else "smoke")
@@ -51,6 +57,7 @@ with tempfile.TemporaryDirectory() as tmp:
                                     "missing-compiler", "-o", str(native)], cwd=tmp, env=env,
                                    check=True, stdout=subprocess.PIPE, text=True, timeout=30)
             assert "Success! Native i686" in build.stdout, build.stdout
+            assert success_banner not in build.stdout, build.stdout
             data = native.read_bytes()
             if windows:
                 pe = struct.unpack_from("<I", data, 0x3C)[0]
@@ -66,10 +73,10 @@ with tempfile.TemporaryDirectory() as tmp:
                            for i in range(phcount))  # No PT_DYNAMIC or PT_INTERP
             result = subprocess.run([str(native)], cwd=tmp, check=True,
                                     stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
-            assert result.stdout.splitlines() == [
+            assert_native_output(result.stdout, [
                 "5000000008 -9223372036854775808 -15000000000 -555555555 -8 2 2000000000",
                 "8 -1 1099511627776 -1 true false true trời đẹp",
-            ], result.stdout
+            ])
         print(target, "native code generation and runtime output OK")
 
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
@@ -132,7 +139,7 @@ with tempfile.TemporaryDirectory() as tmp:
                             "-O0", "-o", str(native)], cwd=tmp, env=env, check=True, timeout=30)
             output = subprocess.run([str(native)], cwd=tmp, input=input_data, check=True,
                                     stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
-            assert output.stdout.splitlines() == expected, output.stdout
+            assert_native_output(output.stdout, expected)
             if windows and input_data is not None:
                 window = subprocess.STARTUPINFO()
                 window.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -143,7 +150,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     encoding="utf-8", creationflags=subprocess.CREATE_NEW_CONSOLE,
                     startupinfo=window, timeout=30,
                 )
-                assert output.stdout.splitlines() == expected, output.stdout
+                assert_native_output(output.stdout, expected)
             print(target, filename, "OK")
 
         qemu = shutil.which("qemu-i386") if not windows else None
@@ -159,11 +166,11 @@ with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run([qemu, "-r", "4.20.69-ish", "-E", "THAVA_TEST_SPARSE=large.bin",
                                      "-strace", str(ish)], cwd=tmp,
                                     check=True, capture_output=True, encoding="utf-8", timeout=10)
-            assert result.stdout.splitlines() == [
+            assert_native_output(result.stdout, [
                 "Chào mừng bạn đến với Thava trên iSH!", "[PASS] UTF-8", "[PASS] time",
                 "[PASS] time.sleep / os.sleep", "[PASS] os.exists / os.is_file / os.is_dir",
                 "[PASS] os.getsize", "[PASS] os.getsize > 4 GiB", "iSH smoke test OK",
-            ], result.stdout
+            ])
             assert not list(Path(tmp).glob("thava-ish-test-*")), "iSH smoke test left a scratch directory"
             calls = set(re.findall(r"^\s*\d+\s+(\w+)\(", result.stderr, re.MULTILINE))
             assert {"uname", "gettimeofday", "nanosleep", "stat64"} <= calls, result.stderr
@@ -194,7 +201,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (module_build / name).replace(module_run / name)
         result = subprocess.run([str(consumer)], cwd=module_run, check=True,
                                 stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
-        assert result.stdout.splitlines() == ["42 43 44 5.5 thdl", "45 4.5 2 9"], result.stdout
+        assert_native_output(result.stdout, ["42 43 44 5.5 thdl", "45 4.5 2 9"])
         print(target, "native libraries, dependencies and moved modules OK")
 
         objects = module_build / "i686_objects.thdl"
@@ -208,11 +215,11 @@ with tempfile.TemporaryDirectory() as tmp:
                            cwd=module_build, env=env, check=True, timeout=30)
             result = subprocess.run([str(consumer)], cwd=module_run, check=True,
                                     stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
-            assert result.stdout.splitlines() == [
+            assert_native_output(result.stdout, [
                 "express box / express box / box / 5000000011 / true true",
                 "Expected object of type 'Packet'", "library defer", "library exception",
                 "program defer", "program exception",
-            ], result.stdout
+            ])
         print(target, "objects, callbacks and deferred exceptions across .thdl OK")
 
         scalar_consumer = module_build / "scalar-consumer.thv"
@@ -222,7 +229,7 @@ with tempfile.TemporaryDirectory() as tmp:
                        cwd=module_build, env=env, check=True, timeout=30)
         result = subprocess.run([str(consumer)], cwd=module_run, check=True,
                                 stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
-        assert result.stdout.splitlines() == ["17"], result.stdout
+        assert_native_output(result.stdout, ["17"])
 
         incompatible = module_build / "incompatible.thv"
         different_type = source.with_name("i686_objects_types.thv").read_text(encoding="utf-8")

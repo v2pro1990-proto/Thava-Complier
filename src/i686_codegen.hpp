@@ -3220,7 +3220,10 @@ public:
             enc.alu(Xor, EAX, EAX);
             enc.pop(EBX);
             enc.ret();
-        } else exitProcess(0);
+        } else {
+            printText("\n[Thava Native] Build and run successful!\n");
+            exitProcess(0);
+        }
         emitFunctionCleanup();
 
         for (const auto& entry : functions) emitFunction(entry.second);
