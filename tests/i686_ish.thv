@@ -1,16 +1,43 @@
+func check(<bool> passed, <str> name) {
+    if not passed {
+        throw "[FAIL] " + name
+    }
+    cons.out("[PASS] " + name)
+}
+
+<str> platform = "iSH"
+cons.out("Chào mừng bạn đến với Thava trên @{platform}!")
+check("trời đẹp".upper() == "TRỜI ĐẸP", "UTF-8")
+
 <int64> stamp = time.timestamp()
 <str> date = time.date()
 <str> clock = time.now("time")
 <int> millis = time.millis()
 <bool> clockOK = stamp > 0 and date.len() == 10 and clock.len() == 8 and millis >= 0 and millis < 1000
+check(clockOK, "time")
 
-<int> firstSleep = time.sleep(1)
-<int> secondSleep = os.sleep(1)
+<int> firstSleep = time.sleep(10)
+<int> secondSleep = os.sleep(10)
+check(firstSleep == 0 and secondSleep == 0, "time.sleep / os.sleep")
 
-<bool> exists = os.exists("large.bin")
-<bool> regular = os.is_file("large.bin")
-<bool> directory = os.is_dir(".")
-<bool> absent = os.exists("missing.bin")
-<int64> size = os.getsize("large.bin")
-<int64> missingSize = os.getsize("missing.bin")
-cons.out("@{clockOK} @{firstSleep} @{secondSleep} @{exists} @{regular} @{directory} @{absent} @{size} @{missingSize}")
+<str> dirPath = "thava-ish-test-" + <str>os.getpid()
+if not os.mkdir(dirPath) {
+    throw "[FAIL] mkdir " + dirPath
+}
+defer os.rmdir(dirPath)
+
+<str> filePath = dirPath + "/sample.txt"
+<str> missingPath = dirPath + "/missing.txt"
+defer os.remove(filePath)
+file.open(filePath, "wb") as output {
+    output.write("ABC")
+}
+check(os.exists(filePath) and os.is_file(filePath) and os.is_dir(dirPath), "os.exists / os.is_file / os.is_dir")
+check(os.getsize(filePath) == 3 and os.getsize(missingPath) == -1 and not os.exists(missingPath), "os.getsize")
+
+<str> sparsePath = os.getenv("THAVA_TEST_SPARSE")
+if sparsePath.len() > 0 {
+    check(os.getsize(sparsePath) == 5000000003, "os.getsize > 4 GiB")
+}
+
+cons.out("iSH smoke test OK")

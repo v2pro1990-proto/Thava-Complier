@@ -153,9 +153,15 @@ with tempfile.TemporaryDirectory() as tmp:
             subprocess.run([str(compiler), str(source.with_name("i686_ish.thv")),
                             "--target", target, "--native", "-O2", "-o", str(ish)],
                            cwd=tmp, env=env, check=True, timeout=30)
-            result = subprocess.run([qemu, "-r", "4.20.69-ish", "-strace", str(ish)], cwd=tmp,
+            result = subprocess.run([qemu, "-r", "4.20.69-ish", "-E", "THAVA_TEST_SPARSE=large.bin",
+                                     "-strace", str(ish)], cwd=tmp,
                                     check=True, capture_output=True, encoding="utf-8", timeout=10)
-            assert result.stdout.splitlines() == ["true 0 0 true true true false 5000000003 -1"], result.stdout
+            assert result.stdout.splitlines() == [
+                "Chào mừng bạn đến với Thava trên iSH!", "[PASS] UTF-8", "[PASS] time",
+                "[PASS] time.sleep / os.sleep", "[PASS] os.exists / os.is_file / os.is_dir",
+                "[PASS] os.getsize", "[PASS] os.getsize > 4 GiB", "iSH smoke test OK",
+            ], result.stdout
+            assert not list(Path(tmp).glob("thava-ish-test-*")), "iSH smoke test left a scratch directory"
             calls = set(re.findall(r"^\s*\d+\s+(\w+)\(", result.stderr, re.MULTILINE))
             assert {"uname", "gettimeofday", "nanosleep", "stat64"} <= calls, result.stderr
             assert not {"clock_gettime64", "clock_nanosleep_time64", "statx"} & calls, result.stderr
