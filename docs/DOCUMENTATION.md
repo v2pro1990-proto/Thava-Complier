@@ -218,6 +218,16 @@ greeting += name      # "Hello, <name>"
 ```
 `+=` on an `<int>`/`<dbl>` accepts a list element (`total += xs[i]`) on every backend, including `--cpp`. Operators that have no meaning on strings (`-=`, `/=`, `%=`) are rejected at compile time.
 
+#### Constants
+
+Place `const` between the type and the name. A const variable requires an initializer, which can be a runtime expression. The compiler rejects reassignment, compound assignment, and direct writes such as changing a list element through its const name. A const global can be read from functions without a `global` declaration. Objects and collections may still be changed through a shared mutable reference.
+
+```thava
+<int> const a = 10
+<fl> const b = 2.4
+<dbl> const so_thuc = 12
+```
+
 #### Function-Level Scoping
 Blocks do **not** open a new scope: a variable declared inside `if`, `while` or `for` lives until the end of the enclosing function (or until the end of the program at top level).
 ```thava

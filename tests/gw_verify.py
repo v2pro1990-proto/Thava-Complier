@@ -18,7 +18,8 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
             "strings_search": "1 -1 3 0 [cXY-XY-XY][cab-ab-ab][c--][Alpha Beta][one||three|]",
             "membership_rand": "true false true false true false true -4 true only",
             "file_arm64": "[alpha][17]\n18\n4 [2.5][true]",
-            "optimizer": "42\n19\n6\n9\n4"}
+            "optimizer": "42\n19\n6\n9\n4",
+            "const_variables": "10 2.4 12 const 4 15"}
 
 unicode_output = (
     "hôm nay trời đẹp quá",
@@ -86,6 +87,8 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 levels.append("-O3")
             if case == "optimizer":
                 levels += ["-O1", "-O2", "-O3"]
+            if case == "const_variables":
+                levels.append("-O2")
             for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
                 subprocess.run([str(compiler), str(source), "--backend",
@@ -157,3 +160,27 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
         message = result.stdout.lower()
         assert result.returncode != 0 and ("global" in message or "already been declared" in message), result.stdout
     print("9 invalid declarations/writes rejected", flush=True)
+
+    invalid_const_cases = [
+        ("<int> const a\n", "requires an initializer"),
+        ('<int> const a = "wrong"\n', "declared with type"),
+        ("<int> const a = 1\na = 2\n", "cannot modify const variable 'a'"),
+        ("func f() { <int> const a = 1\na += 2 }\n", "cannot modify const variable 'a'"),
+        ("func f() { a = 2 }\n<int> const a = 1\n", "cannot modify const variable 'a'"),
+        ("<int> const a = 1\nfunc f() { global <int> a }\n", "cannot modify const variable 'a'"),
+        ("<int> const a = 1\n<int> a = 2\n", "already been declared"),
+        ("<int> const a = 1\nif true { <int> a = 2 }\n", "already been declared"),
+        ("<lst> const a = [1]\na[0] = 2\n", "cannot modify const variable 'a'"),
+        ("<lst> const a = [1]\na.addval(2)\n", "cannot modify const variable 'a'"),
+        ('<dict> const a = {"key": 1}\na.clear()\n', "cannot modify const variable 'a'"),
+        ("struct Point { <int> x = 1 }\n<Point> const p = Point()\np.x = 2\n",
+         "cannot modify const variable 'p'"),
+        ("<int> const a = 1\nfor a in range(3) { cons.out(a) }\n", "cannot modify const variable 'a'"),
+        ("<int> const a = 1\ndefer { a = 2 }\n", "cannot modify const variable 'a'"),
+    ]
+    for source, diagnostic in invalid_const_cases:
+        Path(tmp, "invalid_const.thv").write_text(source, encoding="utf-8")
+        result = subprocess.run([str(compiler), "invalid_const.thv", "-O2", "-o", "invalid_const"],
+                                cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        assert result.returncode != 0 and diagnostic in result.stdout.lower(), result.stdout
+    print("Invalid const declarations and writes rejected", flush=True)

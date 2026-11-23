@@ -1,0 +1,20 @@
+<int> const a = 10
+<fl> const b = 2.4
+<dbl> const so_thuc = 12
+<str> const label = "const"
+<lst> const values = [3, 4]
+
+<int> func local_value(<int> input) {
+    <int> const doubled = input * 2
+    <int> a = 1
+    a += doubled
+    return a
+}
+
+<int> func read_global() {
+    return a
+}
+
+<int> local_result = local_value(7)
+<int> global_result = read_global()
+cons.out("@{global_result} @{b} @{so_thuc} @{label} @{values[1]} @{local_result}")

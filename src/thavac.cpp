@@ -59,8 +59,10 @@ inline bool detectCNameVariable(const std::vector<Token>& toks) {
     };
     for (size_t i = 1; i + 1 < toks.size(); ++i) {
         if (toks[i].type != TokenType::IDENTIFIER || toks[i].lexeme != "c") continue;
-        // `<<type>> c ...` : a builtin type or the closing '>' of a class type.
-        if (!isTypeTok(toks[i - 1].type) && toks[i - 1].type != TokenType::GREATER) continue;
+        size_t typeEnd = i - 1;
+        if (typeEnd > 0 && toks[typeEnd].type == TokenType::IDENTIFIER && toks[typeEnd].lexeme == "const")
+            --typeEnd;
+        if (!isTypeTok(toks[typeEnd].type) && toks[typeEnd].type != TokenType::GREATER) continue;
         // Declarator followed by an initializer, a parameter list or a field list.
         TokenType nt = toks[i + 1].type;
         if (nt == TokenType::ASSIGN || nt == TokenType::COMMA || nt == TokenType::RPAREN ||
@@ -1198,8 +1200,11 @@ inline MemberLookupResult lookupMethod(const std::string& className, const std::
 // ==========================================
 // 2. ENVIRONMENT & SCOPE RESOLUTION (Environment)
 // ==========================================
+class VarDeclNode;
+
 struct Environment {
     std::unordered_map<std::string, ThavaType> variables;
+    std::unordered_map<std::string, const VarDeclNode*> constants;
     std::string functionName;
     std::unordered_set<std::string> writableGlobals;
     // Names declared at the top level of the program (true globals).
@@ -1223,6 +1228,11 @@ struct Environment {
         return ThavaType::UNKNOWN;
     }
 
+    bool isConst(const std::string& name) const {
+        if (variables.count(name)) return constants.count(name) != 0;
+        return parent && parent->isConst(name);
+    }
+
     std::string getCustomType(const std::string& name) const {
         if (customTypes.count(name)) return customTypes.at(name);
         if (parent) return parent->getCustomType(name);
@@ -1243,8 +1253,11 @@ struct Environment {
 
     std::unordered_map<std::string, ThavaType> listElemTypes;
 
-    void define(const std::string& name, ThavaType type, const std::string& custom = "") {
+    void define(const std::string& name, ThavaType type, const std::string& custom = "",
+                const VarDeclNode* constDeclaration = nullptr) {
         variables[name] = type;
+        if (constDeclaration) constants[name] = constDeclaration;
+        else constants.erase(name);
         if (!custom.empty()) customTypes[name] = custom;
     }
 
@@ -1766,8 +1779,15 @@ static bool canWriteGlobal(std::shared_ptr<Environment> env, const std::string& 
     return false;
 }
 
-static void rejectGlobalWrite(std::shared_ptr<Environment> env, const std::string& name,
-                              const std::string& where) {
+static void rejectConstWrite(const Environment& env, const std::string& name) {
+    if (!env.isConst(name)) return;
+    std::cerr << "[Static Type Error]: Cannot modify const variable '" << name << "'.\n";
+    exit(1);
+}
+
+static void rejectVariableWrite(std::shared_ptr<Environment> env, const std::string& name,
+                                const std::string& where) {
+    rejectConstWrite(*env, name);
     if (where.empty() || !g_globalVars.count(name) || declaredInLocalScope(env, name) ||
         canWriteGlobal(env, name)) return;
     std::cerr << "[Static Type Error]: Cannot modify global variable '" << name
@@ -1791,9 +1811,10 @@ public:
     std::string customTypeName;
     std::string varName;
     ASTPtr initExpr;
+    bool isConst;
 
-    VarDeclNode(ThavaType t, std::string n, ASTPtr expr, std::string ct = "") 
-        : varType(t), customTypeName(std::move(ct)), varName(std::move(n)), initExpr(std::move(expr)) {}
+    VarDeclNode(ThavaType t, std::string n, ASTPtr expr, std::string ct = "", bool constant = false)
+        : varType(t), customTypeName(std::move(ct)), varName(std::move(n)), initExpr(std::move(expr)), isConst(constant) {}
 
     std::string cppTypeName() const {
         switch (varType) {
@@ -2720,7 +2741,7 @@ public:
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
         if (env) {
-            rejectGlobalWrite(env, varName, env->functionName);
+            rejectVariableWrite(env, varName, env->functionName);
             for (auto& arg : args) arg->getType(env);
         }
         return ThavaType::UNKNOWN;
@@ -2976,6 +2997,8 @@ public:
     DictMethodNode(ASTPtr b, std::string m, std::vector<ASTPtr> a = {}, int l = 0)
         : base(std::move(b)), method(std::move(m)), args(std::move(a)), line(l) {}
 
+    bool isMutating() const { return method == "clear" || method == "remove" || method == "del"; }
+
     std::string generateCode() override {
         if (method == "keys") return "((" + base->generateCode() + ").keys())";
         if (method == "values") return "((" + base->generateCode() + ").values())";
@@ -2998,15 +3021,15 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
-        if (env && (method == "clear" || method == "remove" || method == "del")) {
+        if (env && isMutating()) {
             if (auto var = dynamic_cast<VarNode*>(base.get()))
-                rejectGlobalWrite(env, var->getName(), env->functionName);
+                rejectVariableWrite(env, var->getName(), env->functionName);
         }
         if (base) base->getType(env);
         for (auto& a : args) a->getType(env);
         if (method == "keys" || method == "values" || method == "items") return ThavaType::LIST;
         if (method == "has" || method == "contains") return ThavaType::BOOL;
-        if (method == "clear" || method == "remove" || method == "del") return ThavaType::VOID;
+        if (isMutating()) return ThavaType::VOID;
         return ThavaType::UNKNOWN;
     }
 };
@@ -3752,6 +3775,22 @@ static ThavaType inferCollectionElemType(ASTNode* expr, std::shared_ptr<Environm
 static void noteListParamElemType(const std::string& fname, size_t idx, ThavaType et);
 static void noteMethodListParamElemType(const std::string& key, size_t idx, ThavaType et);
 
+static void rejectConstTargetWrite(const Environment& env, const ASTNode* target) {
+    while (target) {
+        if (auto var = dynamic_cast<const VarNode*>(target)) {
+            rejectConstWrite(env, var->getName());
+            return;
+        }
+        if (auto member = dynamic_cast<const MemberAccessNode*>(target)) {
+            target = member->target.get();
+        } else if (auto index = dynamic_cast<const IndexNode*>(target)) {
+            target = index->base.get();
+        } else {
+            return;
+        }
+    }
+}
+
 inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
                       const std::string& currentClassName = "",
                       const std::string& currentBaseClassName = "") {
@@ -3763,6 +3802,7 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
         enforceAccess(targetClass, mem->memberName, false, mem->line, currentClassName);
     }
     else if (auto ma = dynamic_cast<MemberAssignNode*>(expr)) {
+        rejectConstTargetWrite(*env, ma->target.get());
         checkExpr(ma->target.get(), env, currentClassName, currentBaseClassName);
         checkExpr(ma->expr.get(), env, currentClassName, currentBaseClassName);
         std::string targetClass = resolveTargetClass(ma->target.get(), env, currentClassName, currentBaseClassName);
@@ -3827,6 +3867,7 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
         }
     }
     else if (auto dictM = dynamic_cast<DictMethodNode*>(expr)) {
+        if (dictM->isMutating()) rejectConstTargetWrite(*env, dictM->base.get());
         checkExpr(dictM->base.get(), env, currentClassName, currentBaseClassName);
         for (auto& a : dictM->args) checkExpr(a.get(), env, currentClassName, currentBaseClassName);
     }
@@ -4744,18 +4785,27 @@ class Parser {
             exit(1);
         }
 
+        // Treat const as a modifier in a variable declaration. Keep existing
+        // declarations such as <int> const = 1 valid for native backends.
+        const bool isConst = check(TokenType::IDENTIFIER) && peek().lexeme == "const" &&
+                             peekAt(1).type != TokenType::ASSIGN;
+        if (isConst) advance();
         if (!check(TokenType::IDENTIFIER)) { std::cerr << "Parser Error: Missing variable name at line " << peek().line << "\n"; exit(1); }
         std::string name = advance().lexeme;
 
         ASTPtr expr = nullptr;
         if (match(TokenType::ASSIGN)) {
             expr = expression();
+        } else if (isConst) {
+            std::cerr << "Parser Error: Const variable '" << name << "' requires an initializer at line "
+                      << tokens[current - 1].line << "\n";
+            exit(1);
         } else if (targetType != ThavaType::CUSTOM) {
             std::cerr << "Parser Error: Missing '=' in assignment at line " << peek().line << "\n";
             exit(1);
         }
 
-        return std::make_unique<VarDeclNode>(targetType, name, std::move(expr), customTypeName);
+        return std::make_unique<VarDeclNode>(targetType, name, std::move(expr), customTypeName, isConst);
     }
 
     ASTPtr assignOrExprStatement() {
@@ -5990,8 +6040,10 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
     if (!node) return;
     if (auto listMethod = dynamic_cast<ListMethodNode*>(node))
         checkExpr(listMethod, env, currentClassName, currentBaseClassName);
-    if (auto dictMethod = dynamic_cast<DictMethodNode*>(node))
+    if (auto dictMethod = dynamic_cast<DictMethodNode*>(node)) {
         dictMethod->getType(env);
+        checkExpr(dictMethod, env, currentClassName, currentBaseClassName);
+    }
     if (dynamic_cast<StructDeclNode*>(node)) return;
     if (dynamic_cast<EnumDeclNode*>(node)) return;
 
@@ -6003,14 +6055,20 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
                       << "'. Expected a matching top-level variable and no conflicting local.\n";
             exit(1);
         }
+        rejectConstWrite(*env, decl->name);
         env->writableGlobals.insert(decl->name);
         return;
     }
     if (auto varDecl = dynamic_cast<VarDeclNode*>(node)) {
         // Top-level variables were pre-registered as globals, so their own
-        // declaration is not a duplicate.
+        // declaration is not a duplicate. The type checker may visit a const
+        // declaration again while inferring collection types across calls.
+        const auto previousConst = env->constants.find(varDecl->varName);
+        const bool sameConst = previousConst != env->constants.end() && previousConst->second == varDecl;
+        const bool registeredMutableGlobal = env.get() == g_programEnv.get() &&
+            env->globals.count(varDecl->varName) && !varDecl->isConst && previousConst == env->constants.end();
         if ((canWriteGlobal(env, varDecl->varName) || env->variables.count(varDecl->varName)) &&
-            !(env->globals.count(varDecl->varName) && env.get() == g_programEnv.get())) {
+            !sameConst && !registeredMutableGlobal) {
             std::cerr << "[Static Type Error]: Variable '" << varDecl->varName 
                       << "' has already been declared in the same scope!\n";
             exit(1);
@@ -6028,7 +6086,8 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
                 if (sam->method == "split") env->defineListElem(varDecl->varName, ThavaType::STRING);
             }
         }
-        env->define(varDecl->varName, varDecl->varType, varDecl->customTypeName);
+        env->define(varDecl->varName, varDecl->varType, varDecl->customTypeName,
+                    varDecl->isConst ? varDecl : nullptr);
         if ((varDecl->varType == ThavaType::LIST || varDecl->varType == ThavaType::TUPLE) &&
             varDecl->initExpr && env->getListElem(varDecl->varName) == ThavaType::UNKNOWN) {
             ThavaType elemT = inferCollectionElemType(varDecl->initExpr.get(), env);
@@ -6040,7 +6099,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             std::cerr << "[Static Type Error]: Variable '" << assign->name << "' is not declared before assignment!\n";
             exit(1);
         }
-        rejectGlobalWrite(env, assign->name, currentFuncName);
+        rejectVariableWrite(env, assign->name, currentFuncName);
         if (auto sam = dynamic_cast<StrAdvMethodNode*>(assign->expr.get())) {
             if (sam->method == "split") env->defineListElem(assign->name, ThavaType::STRING);
         }
@@ -6084,11 +6143,14 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             std::cerr << "[Static Type Error]: Variable '" << idxAssign->varName << "' is not declared before index assignment!\n";
             exit(1);
         }
-        rejectGlobalWrite(env, idxAssign->varName, currentFuncName);
+        rejectVariableWrite(env, idxAssign->varName, currentFuncName);
         idxAssign->indexExpr->getType(env);
         idxAssign->valExpr->getType(env);
         checkExpr(idxAssign->indexExpr.get(), env, currentClassName, currentBaseClassName);
         checkExpr(idxAssign->valExpr.get(), env, currentClassName, currentBaseClassName);
+    }
+    else if (auto deferred = dynamic_cast<DeferNode*>(node)) {
+        checkTypes(deferred->stmt.get(), env, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
     }
     else if (auto block = dynamic_cast<BlockNode*>(node)) {
         // Thava uses function-level scoping: a declaration inside a block
@@ -6191,6 +6253,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         checkExpr(rangeFor->startExpr.get(), env, currentClassName, currentBaseClassName);
         checkExpr(rangeFor->stopExpr.get(), env, currentClassName, currentBaseClassName);
         checkExpr(rangeFor->stepExpr.get(), env, currentClassName, currentBaseClassName);
+        rejectConstWrite(*innerEnv, rangeFor->varName);
         innerEnv->variables[rangeFor->varName] = rangeFor->varType;
         checkTypes(rangeFor->body.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
     }
@@ -6240,6 +6303,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             }
             forEach->varType = elemType;
         }
+        rejectConstWrite(*innerEnv, forEach->varName);
         innerEnv->variables[forEach->varName] = forEach->varType;
         checkTypes(forEach->body.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
     }
@@ -6297,6 +6361,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         // Thava uses function-level scoping: a declaration inside a block
         // (if/while/for/try) stays visible until the end of the function.
         auto innerEnv = env;
+        rejectConstWrite(*innerEnv, fileBlock->varName);
         innerEnv->variables[fileBlock->varName] = ThavaType::FILE;
         for (const auto& stmt : fileBlock->body) {
             checkTypes(stmt.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
@@ -6326,6 +6391,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         for (const auto& clause : tryExcept->exceptClauses) {
             auto excEnv = env;
             if (!clause.varName.empty()) {
+                rejectConstWrite(*excEnv, clause.varName);
                 excEnv->variables[clause.varName] = ThavaType::STRING;
             }
             for (const auto& stmt : clause.body) {
@@ -6765,7 +6831,12 @@ int main(int argc, char* argv[]) {
     g_globalVars.clear();
     for (const auto& stmt : ast) {
         if (auto vd = dynamic_cast<VarDeclNode*>(stmt.get())) {
-            globalEnv->define(vd->varName, vd->varType, vd->customTypeName);
+            if (globalEnv->variables.count(vd->varName) && (vd->isConst || globalEnv->isConst(vd->varName))) {
+                std::cerr << "[Static Type Error]: Const variable '" << vd->varName
+                          << "' has already been declared in the same scope!\n";
+                return 1;
+            }
+            globalEnv->define(vd->varName, vd->varType, vd->customTypeName, vd->isConst ? vd : nullptr);
             globalEnv->globals[vd->varName] = true;
             g_globalVars[vd->varName] = { vd->varType, vd->customTypeName };
         }
