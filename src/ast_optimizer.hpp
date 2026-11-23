@@ -5,6 +5,7 @@
 #include <memory>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
 #include <map>
 
@@ -23,6 +24,16 @@ public:
     std::map<std::string, InlinableFunc> inlinableLeafs;
 
     ASTOptimizer(int level) : optLevel(level) {}
+
+    static constexpr int64_t minInt = (std::numeric_limits<int64_t>::min)();
+    static constexpr int64_t maxInt = (std::numeric_limits<int64_t>::max)();
+
+    static bool canMultiply(int64_t left, int64_t right) {
+        if (left > 0) return right <= maxInt / left && right >= minInt / left;
+        if (left < 0 && right > 0) return left >= minInt / right;
+        if (left < 0 && right < 0) return left >= maxInt / right;
+        return true;
+    }
 
     // Check if an AST expression is pure (free of side effects)
     bool isPure(const ASTNode* node) {
@@ -122,8 +133,8 @@ public:
             if (auto lit = dynamic_cast<LiteralNode*>(u->expr.get())) {
                 if (lit->getLitType() == ThavaType::INT) {
                     try {
-                        int64_t val = -std::stoll(lit->getVal());
-                        return std::make_unique<LiteralNode>(std::to_string(val), ThavaType::INT);
+                        const int64_t val = std::stoll(lit->getVal());
+                        if (val != minInt) return std::make_unique<LiteralNode>(std::to_string(-val), ThavaType::INT);
                     } catch (...) {}
                 } else if (lit->getLitType() == ThavaType::FLOAT || lit->getLitType() == ThavaType::DOUBLE) {
                     try {
@@ -239,31 +250,39 @@ public:
                         int64_t v1 = std::stoll(litL->getVal());
                         int64_t v2 = std::stoll(litR->getVal());
 
-                        if (op == "+") return std::make_unique<LiteralNode>(std::to_string(v1 + v2), ThavaType::INT);
-                        if (op == "-") return std::make_unique<LiteralNode>(std::to_string(v1 - v2), ThavaType::INT);
-                        if (op == "*") return std::make_unique<LiteralNode>(std::to_string(v1 * v2), ThavaType::INT);
+                        if (op == "+") {
+                            if ((v2 > 0 && v1 > maxInt - v2) || (v2 < 0 && v1 < minInt - v2)) return expr;
+                            return std::make_unique<LiteralNode>(std::to_string(v1 + v2), ThavaType::INT);
+                        }
+                        if (op == "-") {
+                            if ((v2 > 0 && v1 < minInt + v2) || (v2 < 0 && v1 > maxInt + v2)) return expr;
+                            return std::make_unique<LiteralNode>(std::to_string(v1 - v2), ThavaType::INT);
+                        }
+                        if (op == "*") {
+                            if (!canMultiply(v1, v2)) return expr;
+                            return std::make_unique<LiteralNode>(std::to_string(v1 * v2), ThavaType::INT);
+                        }
                         if (op == "/" || op == "//") {
-                            if (v2 != 0) return std::make_unique<LiteralNode>(std::to_string(v1 / v2), ThavaType::INT);
+                            if (v2 == 0 || (v1 == minInt && v2 == -1)) return expr;
+                            return std::make_unique<LiteralNode>(std::to_string(v1 / v2), ThavaType::INT);
                         }
                         if (op == "%") {
-                            if (v2 != 0) return std::make_unique<LiteralNode>(std::to_string(v1 % v2), ThavaType::INT);
+                            if (v2 == 0 || (v1 == minInt && v2 == -1)) return expr;
+                            return std::make_unique<LiteralNode>(std::to_string(v1 % v2), ThavaType::INT);
                         }
                         if (op == "**") {
                             if (v2 >= 0 && v2 <= 62) {
                                 int64_t res = 1;
-                                for (int64_t i = 0; i < v2; ++i) res *= v1;
+                                for (int64_t i = 0; i < v2; ++i) {
+                                    if (!canMultiply(res, v1)) return expr;
+                                    res *= v1;
+                                }
                                 return std::make_unique<LiteralNode>(std::to_string(res), ThavaType::INT);
                             }
                         }
-                        if (op == "&") return std::make_unique<LiteralNode>(std::to_string(v1 & v2), ThavaType::INT);
-                        if (op == "|") return std::make_unique<LiteralNode>(std::to_string(v1 | v2), ThavaType::INT);
-                        if (op == "^") return std::make_unique<LiteralNode>(std::to_string(v1 ^ v2), ThavaType::INT);
-                        if (op == "<<") {
-                            if (v2 >= 0 && v2 < 63) return std::make_unique<LiteralNode>(std::to_string(v1 << v2), ThavaType::INT);
-                        }
-                        if (op == ">>") {
-                            if (v2 >= 0 && v2 < 63) return std::make_unique<LiteralNode>(std::to_string(v1 >> v2), ThavaType::INT);
-                        }
+                        if (op == "band") return std::make_unique<LiteralNode>(std::to_string(v1 & v2), ThavaType::INT);
+                        if (op == "bor") return std::make_unique<LiteralNode>(std::to_string(v1 | v2), ThavaType::INT);
+                        if (op == "bxor") return std::make_unique<LiteralNode>(std::to_string(v1 ^ v2), ThavaType::INT);
                         if (op == "==") return std::make_unique<LiteralNode>(v1 == v2 ? "true" : "false", ThavaType::BOOL);
                         if (op == "!=") return std::make_unique<LiteralNode>(v1 != v2 ? "true" : "false", ThavaType::BOOL);
                         if (op == "<")  return std::make_unique<LiteralNode>(v1 <  v2 ? "true" : "false", ThavaType::BOOL);
@@ -335,26 +354,16 @@ public:
             }
 
             // Case B: Algebraic identity reductions (one side constant)
-            std::string op = bin->op;
+            const std::string& op = bin->op;
             if (litR && litR->getLitType() == ThavaType::INT) {
-                int64_t v = 0;
-                try { v = std::stoll(litR->getVal()); } catch (...) {}
-                if (op == "+" && v == 0) return std::move(bin->left);
-                if (op == "-" && v == 0) return std::move(bin->left);
-                if (op == "*" && v == 1) return std::move(bin->left);
-                if ((op == "/" || op == "//") && v == 1) return std::move(bin->left);
-                if (op == "*" && v == 0 && isPure(bin->left.get())) {
-                    return std::make_unique<LiteralNode>("0", ThavaType::INT);
-                }
+                const auto value = litR->getVal();
+                if ((op == "+" || op == "-") && value == "0") return std::move(bin->left);
+                if ((op == "*" || op == "/" || op == "//") && value == "1") return std::move(bin->left);
             }
             if (litL && litL->getLitType() == ThavaType::INT) {
-                int64_t v = 0;
-                try { v = std::stoll(litL->getVal()); } catch (...) {}
-                if (op == "+" && v == 0) return std::move(bin->right);
-                if (op == "*" && v == 1) return std::move(bin->right);
-                if (op == "*" && v == 0 && isPure(bin->right.get())) {
-                    return std::make_unique<LiteralNode>("0", ThavaType::INT);
-                }
+                const auto value = litL->getVal();
+                if (op == "+" && value == "0") return std::move(bin->right);
+                if (op == "*" && value == "1") return std::move(bin->right);
             }
 
             // Logical boolean short-circuit identities
@@ -394,6 +403,92 @@ public:
         }
 
         return expr;
+    }
+
+    using LocalConstants = std::unordered_map<std::string, LiteralNode>;
+
+    static bool isLocalScalar(const LiteralNode* literal) {
+        if (!literal) return false;
+        if (literal->getLitType() == ThavaType::BOOL) return true;
+        if (literal->getLitType() != ThavaType::INT) return false;
+        // The C++ backend stores ordinary <int> locals in 32 bits.
+        try {
+            const auto text = literal->getVal();
+            const auto value = std::stoll(text);
+            return value >= (std::numeric_limits<int32_t>::min)() &&
+                   value <= (std::numeric_limits<int32_t>::max)() &&
+                   text == std::to_string(value);
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Replace only complete scalar expressions. This avoids changing the type
+    // or evaluation of an operand inside a call, cast, or mixed expression.
+    std::unique_ptr<LiteralNode> evaluateLocalScalar(const ASTNode* expr, const LocalConstants& constants) {
+        if (const auto* literal = dynamic_cast<const LiteralNode*>(expr)) {
+            if (isLocalScalar(literal)) return std::make_unique<LiteralNode>(*literal);
+            return nullptr;
+        }
+        if (const auto* var = dynamic_cast<const VarNode*>(expr)) {
+            auto found = constants.find(var->getName());
+            if (found != constants.end()) return std::make_unique<LiteralNode>(found->second);
+            return nullptr;
+        }
+
+        ASTPtr folded;
+        if (const auto* binary = dynamic_cast<const BinaryOpNode*>(expr)) {
+            auto left = evaluateLocalScalar(binary->left.get(), constants);
+            auto right = evaluateLocalScalar(binary->right.get(), constants);
+            if (!left || !right || left->getLitType() != right->getLitType()) return nullptr;
+            if ((binary->op == "/" || binary->op == "//" || binary->op == "%") &&
+                left->getVal() == "-2147483648" && right->getVal() == "-1") return nullptr;
+            folded = foldExpr(std::make_unique<BinaryOpNode>(std::move(left), binary->op, std::move(right)));
+        } else if (const auto* unary = dynamic_cast<const UnaryNotNode*>(expr)) {
+            auto operand = evaluateLocalScalar(unary->expr.get(), constants);
+            if (!operand || operand->getLitType() != ThavaType::BOOL) return nullptr;
+            folded = foldExpr(std::make_unique<UnaryNotNode>(std::move(operand)));
+        }
+        const auto* literal = dynamic_cast<const LiteralNode*>(folded.get());
+        if (isLocalScalar(literal)) return std::make_unique<LiteralNode>(*literal);
+        return nullptr;
+    }
+
+    void propagateLocalConstants(ASTNode& stmt, LocalConstants& constants) {
+        auto propagate = [&](ASTPtr& expr) {
+            if (auto literal = evaluateLocalScalar(expr.get(), constants)) expr = std::move(literal);
+        };
+        if (auto* decl = dynamic_cast<VarDeclNode*>(&stmt)) {
+            propagate(decl->initExpr);
+            if (!isPure(decl->initExpr.get())) constants.clear();
+            const auto* literal = dynamic_cast<const LiteralNode*>(decl->initExpr.get());
+            if (decl->customTypeName.empty() && !g_funcReturnTypes.count(decl->varName) &&
+                isLocalScalar(literal) && decl->varType == literal->getLitType()) {
+                constants.insert_or_assign(decl->varName, *literal);
+            } else {
+                constants.erase(decl->varName);
+            }
+            return;
+        }
+        if (auto* assign = dynamic_cast<AssignNode*>(&stmt)) {
+            if (assign->op == "=") propagate(assign->expr);
+            if (!isPure(assign->expr.get())) constants.clear();
+            auto found = constants.find(assign->name);
+            if (found != constants.end()) {
+                const auto* literal = dynamic_cast<const LiteralNode*>(assign->expr.get());
+                if (assign->op == "=" && isLocalScalar(literal) && found->second.getLitType() == literal->getLitType()) {
+                    found->second = *literal;
+                } else {
+                    constants.erase(found);
+                }
+            }
+            return;
+        }
+        if (auto* ret = dynamic_cast<ReturnNode*>(&stmt)) propagate(ret->expr);
+        if (auto* branch = dynamic_cast<IfNode*>(&stmt)) propagate(branch->cond);
+        // Calls, branches, loops, and other statements end the straight-line
+        // region. Do not carry its facts into the next statement.
+        constants.clear();
     }
 
     // Statement Optimizer & Dead Code Eliminator
@@ -468,7 +563,9 @@ public:
         // 5. FunctionDeclNode: fold statements in body
         if (auto func = dynamic_cast<FunctionDeclNode*>(stmt.get())) {
             std::vector<ASTPtr> newBody;
+            LocalConstants constants;
             for (auto& s : func->body) {
+                if (optLevel >= 2) propagateLocalConstants(*s, constants);
                 auto fs = foldStmt(std::move(s));
                 if (fs) {
                     bool isTerm = (dynamic_cast<ReturnNode*>(fs.get()) != nullptr);

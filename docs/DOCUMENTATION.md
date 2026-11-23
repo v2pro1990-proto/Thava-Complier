@@ -851,10 +851,10 @@ Usage: thavac <source.thv> [-o <output_binary>] [--arch x86_64|arm64] [--backend
 | `--info <file>` | Inspect embedded metadata of a Thava Dynamic Library (`.thdl` / `.so`). |
 
 ### Optimization Levels (`-O0` to `-O3`)
-* **`-O0` (No Optimizations):** Fast debug builds. Generates direct stack frame instructions for every statement.
-* **`-O1` (Peephole & Constant Folding):** Folds compile-time arithmetic (`2 + 3 * 4` -> `14`), algebraic identities (`x + 0`, `x * 1`, `x * 0`), and constant boolean conditions.
-* **`-O2` (AST Inlining & Dead Code Elimination):** Expands `inline func` declarations directly into call sites, prunes dead conditional branches, and optimizes variable copies.
-* **`-O3` (Instruction Scheduling & Memory-Direct Arithmetic):** Replaces memory loads and stores with single compound instructions and maximizes register utilization.
+* **`-O0`** skips AST optimization.
+* **`-O1`** folds literal expressions, eliminates branches with constant conditions, and expands eligible `inline func` declarations. Native backends can also apply instruction-level optimizations.
+* **`-O2`** adds constant propagation for ordinary `<int>` and `<bl>` locals in straight-line function code. For example, after `<int> base = 40`, it folds `return base + 2` into `return 42`. A call or control-flow boundary ends the region where those values are tracked.
+* **`-O3`** also tries to inline eligible leaf functions automatically.
 
 ### Embedded Binary Metadata Format
 When generating dynamic libraries (`--lib`), `thavac` embeds an internal metadata section bounded by `__THAVA_METADATA_START__` and `__THAVA_METADATA_END__`. When another Thava program links against the library using `@dlattach`, the compiler automatically discovers and types every exported symbol without requiring separate header files or `.meta` companion files.

@@ -6784,9 +6784,9 @@ int main(int argc, char* argv[]) {
     // 3.5. Optimization Pipeline (AST transformations for -O1, -O2, -O3)
     if (g_optLevel > 0) {
         std::cout << "[Thava Optimizer] Activating optimization level: -O" << g_optLevel;
-        if (g_optLevel == 1) std::cout << " (Peephole, Strength Reduction, Immediate Arithmetic, Fast Zeroing)\n";
-        else if (g_optLevel == 2) std::cout << " (AST Constant Folding, Dead Branch Pruning, Direct Memory Ops, Register Caching)\n";
-        else if (g_optLevel >= 3) std::cout << " (Aggressive Leaf Inlining, Bounded Loop Unrolling, Multi-pass Optimization)\n";
+        if (g_optLevel == 1) std::cout << " (Constant Folding, Dead Branch Pruning, Native Peephole)\n";
+        else if (g_optLevel == 2) std::cout << " (Local Constant Propagation, Constant Folding, Dead Branch Pruning)\n";
+        else if (g_optLevel >= 3) std::cout << " (Automatic Leaf Inlining, Local Constant Propagation, Constant Folding)\n";
 
         ASTOptimizer astOpt(g_optLevel);
         ast = astOpt.optimize(std::move(ast));

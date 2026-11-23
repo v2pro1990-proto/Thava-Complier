@@ -1,0 +1,39 @@
+<int> func folded_result() {
+    <int> base = 20 + 20
+    <int> total = base + 1
+    total = total + 1
+    <bl> ready = total == 42
+    if not ready {
+        cons.out("optimizer should eliminate this branch entirely")
+    }
+    <int> mask = (15 band 10) bxor 8
+    return mask + 40
+}
+
+<int> func changing(<int> input) {
+    <int> value = 15
+    value += input
+    return value + 1
+}
+
+<int> func across_branch(<bl> replace) {
+    <int> value = 5
+    if replace {
+        value = 8
+    }
+    return value + 1
+}
+
+<int> func across_loop() {
+    <int> value = 1
+    while value < 4 {
+        value += 1
+    }
+    return value
+}
+
+cons.out(folded_result())
+cons.out(changing(3))
+cons.out(across_branch(false))
+cons.out(across_branch(true))
+cons.out(across_loop())

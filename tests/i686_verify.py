@@ -79,6 +79,17 @@ with tempfile.TemporaryDirectory() as tmp:
             ])
         print(target, "native code generation and runtime output OK")
 
+        fixture = source.with_name("optimizer.thv")
+        native = Path(tmp) / ("optimizer.exe" if windows else "optimizer")
+        for opt in ("-O1", "-O2"):
+            subprocess.run([str(compiler), str(fixture), "--target", target, "--native",
+                            opt, "-o", str(native)], cwd=tmp, env=env, check=True, timeout=30)
+            dead_branch = b"optimizer should eliminate this branch entirely"
+            assert (dead_branch in native.read_bytes()) == (opt == "-O1"), (target, opt)
+            result = subprocess.run([str(native)], cwd=tmp, check=True,
+                                    stdout=subprocess.PIPE, encoding="utf-8", timeout=10)
+            assert_native_output(result.stdout, ["42", "19", "6", "9", "4"])
+
         unicode_input = "HÔM NAY TRỜI ĐẸP QUÁ\nhôm nay trời đẹp quá\n"
         for filename, expected, input_data in [
             ("gw.thv", ["4 3 AB new 9"], None),

@@ -2,7 +2,7 @@ name: CI Build & Release
 
 on:
   push:
-    branches: [ "main", "codex/global-write-ci" ]
+    branches: [ "main", "codex/optimizer" ]
     tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]

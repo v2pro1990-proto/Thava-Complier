@@ -17,7 +17,8 @@ if run_windows_arm64:
 expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][abc-19][Ab C][][][][][AbC-19]",
             "strings_search": "1 -1 3 0 [cXY-XY-XY][cab-ab-ab][c--][Alpha Beta][one||three|]",
             "membership_rand": "true false true false true false true -4 true only",
-            "file_arm64": "[alpha][17]\n18\n4 [2.5][true]"}
+            "file_arm64": "[alpha][17]\n18\n4 [2.5][true]",
+            "optimizer": "42\n19\n6\n9\n4"}
 
 unicode_output = (
     "hôm nay trời đẹp quá",
@@ -80,10 +81,18 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
             cases["stack_arm64"] = "19 29 38\nstack 71"
         for case, line in cases.items():
             output = Path(tmp) / (case + (".exe" if windows else ""))
-            for opt in (["-O0", "-O3"] if case == "gw" and target != "cpp" else ["-O0"]):
+            levels = ["-O0"]
+            if case == "gw" and target != "cpp":
+                levels.append("-O3")
+            if case == "optimizer":
+                levels += ["-O1", "-O2", "-O3"]
+            for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
                 subprocess.run([str(compiler), str(source), "--backend",
                                 target, opt, "-o", output.name], cwd=tmp, check=True)
+                if case == "optimizer" and target != "cpp":
+                    dead_branch = b"optimizer should eliminate this branch entirely"
+                    assert (dead_branch in output.read_bytes()) == (opt in ("-O0", "-O1")), (target, opt)
                 if target == "pe-arm64":
                     data = output.read_bytes()
                     header = struct.unpack_from("<I", data, 0x3C)[0]
@@ -116,6 +125,20 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                                      if s and not s.startswith("[Thava Native]")]
                     assert console_lines == line.splitlines(), (target, "console", console_lines)
                     print(target, "Unicode console input OK", flush=True)
+
+        if target == "cpp":
+            source = Path(tmp) / "optimizer_division.thv"
+            source.write_text(
+                'try {\n    <int> quotient = 0 * (1 / 0)\n    cons.out(quotient)\n'
+                '} except Exception {\n    cons.out("division was evaluated")\n}\n',
+                encoding="utf-8",
+            )
+            output = Path(tmp) / "optimizer_division.exe"
+            subprocess.run([str(compiler), str(source), "--cpp", "-O2", "-o", str(output)],
+                           cwd=tmp, check=True)
+            result = subprocess.run([str(output)], cwd=tmp, check=True,
+                                    stdout=subprocess.PIPE, encoding="utf-8")
+            assert result.stdout.splitlines()[0] == "division was evaluated", result.stdout
 
     for source in [
         "<int> x = 0\nfunc f() { x = 1 }",
