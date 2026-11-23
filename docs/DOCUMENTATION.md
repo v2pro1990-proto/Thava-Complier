@@ -103,24 +103,40 @@ Identifiers start with an ASCII letter or underscore (`[a-zA-Z_]`) followed by a
 
 ## 3. Type System
 
-Thava employs explicit, static typing with a clean angle-bracket syntax `<type>` that clearly differentiates type annotations from variable identifiers.
+Thava uses angle brackets for type annotations. Write `<type> name = value` for a variable or `<type> const name = value` for a [read-only variable](#constants).
 
 ### Primitive Types
-| Type | Keyword | Size | Description |
+| Type | Keyword | Alias | Description |
 | :--- | :--- | :--- | :--- |
-| **Integer** | `<int>` | 64-bit | Signed two's-complement integer (`long long`). |
-| **Float** | `<fl>` | 32-bit | Single-precision IEEE 754 floating-point. |
-| **Double** | `<dbl>` | 64-bit | Double-precision IEEE 754 floating-point. |
-| **Boolean** | `<bl>` | 8-bit / 1-bit | Logical truth value (`true` or `false`). |
-| **String** | `<str>` | Dynamic | Heap-allocated UTF-8 character string. |
+| Signed 16-bit integer | `<int16>` | | Range −32,768 to 32,767. |
+| Signed 32-bit integer | `<int>` | | Range −2,147,483,648 to 2,147,483,647. |
+| Signed 64-bit integer | `<int64>` | | Range −9,223,372,036,854,775,808 to 9,223,372,036,854,775,807. |
+| Float | `<fl>` | `<float>` | Single-precision type. See the precision note below. |
+| Double | `<dbl>` | `<double>` | Double-precision floating-point. |
+| Boolean | `<bl>` | `<bool>` | `true` or `false`. |
+| String | `<str>` | `<string>` | UTF-8 text. See [String Manipulation](#string-manipulation-str) for indexing and lengths. |
+
+Integer widths apply to declared values. Use `<int64>` to keep a value such as `5000000000` or a 64-bit native handle.
+
+```thava
+<int16> offset = -120
+<int> count = 500
+<int64> const limit = 5000000000
+<float> ratio = 2.4
+<double> exact = 12
+```
+
+Native i686 and the C++ backend round values stored as `<fl>` to single precision. Native x86-64 and ARM64 can keep double precision in `<fl>` computations or storage. Code that depends on exact single-precision rounding should account for the target backend.
 
 ### Collection Types
-| Type | Keyword | Description |
-| :--- | :--- | :--- |
-| **List** | `<lst>` | Dynamic array of heterogeneous `ThavaValue` elements (`[1, "two", 3.0]`). |
-| **Tuple** | `<tple>` | Fixed-size immutable sequence (`(10, 20, "label")`). |
-| **Dictionary** | `<dict>` | Associative key-value map (`{"id": 101, "role": "admin"}`). |
-| **Multi-Type** | `<multype>` | Generic variant container holding any supported primitive or collection. |
+| Type | Keyword | Alias | Literal example |
+| :--- | :--- | :--- | :--- |
+| List | `<lst>` | `<list>` | `[1, "two", 3.0]` |
+| Tuple | `<tple>` | `<tuple>` | `{10, 20, "label"}` |
+| Dictionary | `<dict>` | `<map>` | `{"id": 101, "role": "admin"}` |
+| Multi-type collection | `<multype>` | | A list or tuple value, such as `[1, "two"]`. |
+
+Lists and tuples are ordered and indexed from zero. Use a list for portable element updates because tuple mutation depends on the backend. `{}` creates an empty dictionary. `<multype>` accepts list or tuple values and has limited support on native x86-64 and ARM64. Use `<lst>` or `<tple>` for portable code.
 
 ### First-Class Function Type (`<func>`)
 Thava treats functions as first-class citizens without the cryptic syntax of C function pointers. The `<func>` type (aliases: `<fn>`, `<callback>`) stores references to functions with arbitrary signatures:
@@ -137,14 +153,17 @@ Thava treats functions as first-class citizens without the cryptic syntax of C f
 ```
 
 ### Special Types
-* `<void>`: Indicates that a function returns no value.
-* `none`: Represents the absence of a value (`ThavaNoneType`). Equivalent to `None` in Python or `nullptr`.
+* `<void>` indicates that a function returns no value.
+* `none` is a literal for an absent value. Examples include a missing dictionary value and an empty callback. Whether it can initialize a typed variable depends on that type and backend.
+* A class or struct name can appear as a type annotation, such as `<Point>`. See [Classes & Single Inheritance](#classes--single-inheritance) and [Native Structs](#native-structs).
 
 ### Type Casting
-Thava provides explicit type casting using either `<target_type>(expr)` or `<target_type> expr`:
+Use `<target_type>(expr)` to cast a whole expression or `<target_type> value` to cast one operand. Numeric types can also convert when initializing a variable or passing an argument. Converting a finite, in-range floating-point value to an integer drops the fractional part toward zero.
+
 ```thava
 <dbl> precise = 9.99
 <int> truncated = <int>(precise) # 9
+<int> negative = <int>(-9.75) # -9
 
 <int> number = 42
 <str> as_string = <str>(number) # "42"
