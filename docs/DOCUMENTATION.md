@@ -681,7 +681,7 @@ cons.out("Interpolated: @{name} has @{count * 2} items")
 * `key.input(<type>, prompt)`: Displays `prompt` to standard output and reads input from standard input, parsing it into the requested type `<int>`, `<fl>`, `<dbl>`, `<bl>`, or `<str>`.
 * `key.input.upper(<str>, prompt)`: Reads a line of input and converts all characters to uppercase.
 * `key.input.lower(<str>, prompt)`: Reads a line of input and converts all characters to lowercase.
-* `key.input.title(<str>, prompt)` reads a line of input and applies the same Unicode titlecase mapping as `.title()`.
+* `key.input.title(<str>, prompt)` applies Unicode titlecase on native i686 and the C++ backend. Native x86-64 and ARM64 return the line unchanged for this form. To apply titlecase on every backend, use `key.input(<str>, prompt).title()`.
 
 ```thava
 <int> age = key.input(<int>, "Enter your age: ")
@@ -753,7 +753,7 @@ Thava variables of string and collection types feature built-in methods with sea
 * `s.strip() -> <str>`: Trims leading and trailing whitespace.
 * `s.title() -> <str>`: Applies titlecase to the first character of each whitespace-delimited word and lowercase to the rest.
 
-The three case methods and their `key.input` counterparts use Unicode 17.0 UTF-8 case mappings. Mappings can expand a character, such as `ß` to `SS` in uppercase. Thava applies unconditional case mappings without Unicode normalization or locale-specific rules.
+The three string case methods and `key.input.upper` / `key.input.lower` use Unicode 17.0 UTF-8 case mappings. Mappings can expand a character, such as `ß` to `SS` in uppercase. Thava applies unconditional case mappings without Unicode normalization or locale-specific rules.
 
 * `s.find(<str> substr) -> <int>`: Returns the 0-based index of the first occurrence of `substr` (-1 if not found).
 * `s.count(<str> substr) -> <int>`: Counts non-overlapping occurrences of `substr`.
@@ -761,7 +761,7 @@ The three case methods and their `key.input` counterparts use Unicode 17.0 UTF-8
 * `s.split(<str> delimiter) -> <lst>`: Splits string into a list of substrings.
 * `s.startswith(<str> prefix) -> <bl>`: Returns `true` if string starts with `prefix`.
 * `s.endswith(<str> suffix) -> <bl>`: Returns `true` if string ends with `suffix`.
-* `s.getsubstring(<int> start, <int> end) -> <str>` uses one-based, inclusive UTF-8 code point positions.
+* `s.getsubstring(<int> start, <int> end) -> <str>` takes a one-based, inclusive range. Native i686 and C++ count Unicode code points. Native x86-64 and ARM64 count bytes, so a range can split a UTF-8 character.
 
 ### List Operations (`<lst>`)
 * `lst.len() -> <int>`: Returns element count.
