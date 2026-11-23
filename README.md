@@ -5,7 +5,7 @@
 [![Standard](https://img.shields.io/badge/C%2B%2B-17-orange.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)]()
 
-A blazing-fast, dual-backend systems programming language featuring direct Native Machine Code emission (x86-64 & ARM64 PE/ELF) with zero toolchain dependencies, seamless C++ interop, embedded-metadata dynamic libraries (`.thdl`), and sub-microsecond AI inference.
+A systems programming language with direct PE and ELF machine code generation for x86-64, ARM64, and i686, a C++17 transpiler, and embedded-metadata dynamic libraries (`.thdl`). Native builds require no external assembler or linker.
 
 ---
 
@@ -29,7 +29,7 @@ A blazing-fast, dual-backend systems programming language featuring direct Nativ
 
 Thava is designed to bridge the gap between high-level expressive syntax and low-level bare-metal execution speed. It offers a dual-backend architecture:
 
-1. **Direct Native Machine Code Backend (Default):** Directly emits Windows Portable Executable (PE32+ `.exe`, `.thdl`) and Linux ELF64 binary files in milliseconds. It requires **no external assembler or linker** (no GCC, Clang, NASM, or MSVC SDK needed).
+1. **Direct Native Machine Code Backend (Default)** emits Windows PE32/PE32+ and Linux ELF32/ELF64 executables and libraries without an external assembler or linker.
 2. **C++17 Transpiler Backend (`--cpp`):** Targets optimized standard C++17, enabling seamless interoperability with legacy C/C++ libraries, complex template headers, and full object-oriented classes.
 
 ---
@@ -38,7 +38,7 @@ Thava is designed to bridge the gap between high-level expressive syntax and low
 
 - **Instant Compilation:** Emits complete standalone native executables in ~15 to 30 milliseconds.
 - **Zero Toolchain Dependencies:** The native backend constructs PE and ELF headers, text/data sections, and import address tables from scratch.
-- **Multi-Architecture Support:** Supports x86-64 (Windows PE, Linux ELF) and ARM64 (AArch64 Linux & Windows ARM experimental).
+- **Multi-Architecture Support** includes x86-64, ARM64, and i686 on Windows and Linux. The native i686 backend does not support C interop.
 - **Embedded-Metadata Dynamic Libraries (`.thdl`):** Compile modular libraries with `--lib`. Exported function signatures and types are embedded directly inside binary metadata sections. Consumers import them via `@dlattach` with zero header files required.
 - **C/C++ Interoperability:** Attach C headers via `@cattach <header.h>`, declare signatures with `cfunc`, or call routines dynamically using `c.function()`.
 - **Object-Oriented Programming:** Classes, constructors (`func init`), encapsulated fields, `locvar` (self reference), and `parvar` (base class reference).
@@ -132,6 +132,8 @@ chmod +x build.sh
 
 ## Quick Start
 
+Download the compiler for your operating system and CPU from [GitHub Releases](https://github.com/v2pro1990-proto/Thava-Complier/releases).
+
 ### 1. Hello World (`hello.thv`)
 
 ```thava
@@ -205,6 +207,15 @@ thavac main.thv -o main.exe
 ./main.exe
 ```
 
+### 4. Linux i686 on iSH
+
+Extract the Linux i686 archive and keep `build-ish.sh` next to `thavac-linux-i686`. Run the included smoke test from that directory.
+
+```sh
+sh ./build-ish.sh --i686_ish.thv -o test-ish
+./test-ish
+```
+
 ---
 
 ## CLI Reference
@@ -216,7 +227,7 @@ Usage: thavac <input.thv> [options]
 | Flag | Description |
 | :--- | :--- |
 | `-o <filename>` | Specify the output executable or library filename. |
-| `--native` | Enforce direct machine code generation (PE32+ / ELF64). |
+| `--native` | Enforce direct machine code generation. |
 | `--cpp` | Use the C++17 transpiler backend (auto-detects g++, clang++, or cl). |
 | `--cxx <compiler>` | Specify custom host C++ compiler command or path (also honors CXX env var). |
 | `--lib` | Build as a shared dynamic library (`.thdl` on Windows, `.so` on Linux). |
@@ -224,6 +235,7 @@ Usage: thavac <input.thv> [options]
 | `-O0`, `-O1`, `-O2`, `-O3` | Set optimization level (dead code elimination, register caching, peephole). |
 | `-s` | Strip debug symbols from output binary. |
 | `--arm64` | Target ARM64 architecture (AArch64). |
+| `--target linux-i686`, `--target win-i686` | Target 32-bit x86 on Linux or Windows. |
 | `--version` | Display compiler version and target information. |
 | `--help` | Display command-line usage information. |
 

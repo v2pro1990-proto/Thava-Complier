@@ -41,14 +41,23 @@ jobs:
         with:
           arch: x86
 
-      - name: Build and run a Windows i686 executable
-        run: python tests/i686_verify.py ./thavac.exe
+      - name: Build and test the Windows i686 compiler
+        run: |
+          cl.exe /nologo /O2 /MT /std:c++17 /EHsc /utf-8 /bigobj src\thavac.cpp /Isrc /Fe:thavac-windows-i686.exe /link /MACHINE:X86
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/i686_verify.py ./thavac-windows-i686.exe
 
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
           name: thavac-windows-x64
           path: thavac.exe
+
+      - name: Upload Windows i686 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thavac-windows-i686
+          path: thavac-windows-i686.exe
 
   build-windows-arm64:
     name: Build Windows ARM64 (Experimental)
@@ -108,8 +117,8 @@ jobs:
 
       - name: Smoke test Native ARM64 binary emitter
         run: |
-          ./thavac-linux-x64 examples/01_hello_world.thv --arm64 -o test_hello_arm64
-          file test_hello_arm64 || true
+          qemu-aarch64 -L /usr/aarch64-linux-gnu ./thavac-linux-arm64 examples/01_hello_world.thv --arm64 -o test_hello_arm64
+          qemu-aarch64 ./test_hello_arm64
 
       - name: Verify global writes on ELF and AArch64
         run: python3 tests/gw_verify.py ./thavac-linux-x64
@@ -137,10 +146,18 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends g++-multilib qemu-user
 
-      - name: Build the compiler and test ELF32 output
+      - name: Build and test the Linux i686 compiler
         run: |
-          g++ -O0 -std=c++17 src/thavac.cpp -o thavac-linux-x64
-          python3 tests/i686_verify.py ./thavac-linux-x64 --ish-syscalls
+          g++ -m32 -march=i686 -O2 -std=c++17 -static -s src/thavac.cpp -o thavac-linux-i686
+          python3 tests/i686_verify.py ./thavac-linux-i686 --ish-syscalls
+          sh build-ish.sh --tests/i686_ish.thv -o test-ish
+          qemu-i386 -r 4.20.69-ish ./test-ish
+
+      - name: Upload Linux i686 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thavac-linux-i686
+          path: thavac-linux-i686
 
   release:
     name: Publish Release
@@ -163,22 +180,29 @@ jobs:
           # Package Windows x64
           mkdir -p pkg-win-x64
           cp thavac-windows-x64/thavac.exe pkg-win-x64/thavac.exe
-          cp LICENSE README.md pkg-win-x64/
+          cp LICENSE UNICODE-LICENSE.txt README.md pkg-win-x64/
           cp -r examples docs workload pkg-win-x64/
           (cd pkg-win-x64 && zip -r ../release-assets/thavac-windows-x64.zip .)
 
           # Package Windows ARM64
           mkdir -p pkg-win-arm64
           cp thavac-windows-arm64/thavac-windows-arm64.exe pkg-win-arm64/thavac.exe
-          cp LICENSE README.md pkg-win-arm64/
+          cp LICENSE UNICODE-LICENSE.txt README.md pkg-win-arm64/
           cp -r examples docs workload pkg-win-arm64/
           (cd pkg-win-arm64 && zip -r ../release-assets/thavac-windows-arm64.zip .)
+
+          # Package Windows i686
+          mkdir -p pkg-win-i686
+          cp thavac-windows-i686/thavac-windows-i686.exe pkg-win-i686/thavac.exe
+          cp LICENSE UNICODE-LICENSE.txt README.md pkg-win-i686/
+          cp -r examples docs workload pkg-win-i686/
+          (cd pkg-win-i686 && zip -r ../release-assets/thavac-windows-i686.zip .)
 
           # Package Linux x64
           mkdir -p pkg-linux-x64
           cp thavac-linux-x64/thavac-linux-x64 pkg-linux-x64/thavac
           chmod +x pkg-linux-x64/thavac
-          cp LICENSE README.md pkg-linux-x64/
+          cp LICENSE UNICODE-LICENSE.txt README.md pkg-linux-x64/
           cp -r examples docs pkg-linux-x64/
           (cd pkg-linux-x64 && zip -r ../release-assets/thavac-linux-x64.zip .)
 
@@ -186,9 +210,17 @@ jobs:
           mkdir -p pkg-linux-arm64
           cp thavac-linux-arm64/thavac-linux-arm64 pkg-linux-arm64/thavac
           chmod +x pkg-linux-arm64/thavac
-          cp LICENSE README.md pkg-linux-arm64/
+          cp LICENSE UNICODE-LICENSE.txt README.md pkg-linux-arm64/
           cp -r examples docs pkg-linux-arm64/
           (cd pkg-linux-arm64 && zip -r ../release-assets/thavac-linux-arm64.zip .)
+
+          # Package Linux i686, including the iSH launcher and smoke test.
+          mkdir -p pkg-linux-i686
+          cp thavac-linux-i686/thavac-linux-i686 pkg-linux-i686/
+          cp LICENSE UNICODE-LICENSE.txt README.md build-ish.sh tests/i686_ish.thv pkg-linux-i686/
+          cp -r examples docs pkg-linux-i686/
+          chmod +x pkg-linux-i686/thavac-linux-i686 pkg-linux-i686/build-ish.sh
+          (cd pkg-linux-i686 && zip -r ../release-assets/thavac-linux-i686.zip .)
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -196,6 +228,9 @@ jobs:
           files: |
             release-assets/thavac-windows-x64.zip
             release-assets/thavac-windows-arm64.zip
+            release-assets/thavac-windows-i686.zip
             release-assets/thavac-linux-x64.zip
             release-assets/thavac-linux-arm64.zip
+            release-assets/thavac-linux-i686.zip
+          fail_on_unmatched_files: true
           generate_release_notes: true
