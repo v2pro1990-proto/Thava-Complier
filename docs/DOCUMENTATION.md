@@ -22,6 +22,7 @@ Welcome to the official language specification and technical documentation for *
    - [String Manipulation & Interpolation](#string-manipulation--interpolation)
 5. [Statements & Control Flow](#5-statements--control-flow)
    - [Variable Declarations & Assignments](#variable-declarations--assignments)
+   - [Constants](#constants)
    - [Global Variables](#global-variables)
    - [Branching (`if`, `elif`, `else`)](#branching-if-elif-else)
    - [Loops (`for`, `range`, `while`)](#loops-for-range-while)
@@ -60,9 +61,10 @@ Welcome to the official language specification and technical documentation for *
     - [Compiler Invocation & Flags](#compiler-invocation--flags)
     - [Optimization Levels (`-O0` to `-O3`)](#optimization-levels--o0-to--o3)
     - [Embedded Binary Metadata Format](#embedded-binary-metadata-format)
-13. [Target Platforms & ARM64 Roadmap](#13-target-platforms--arm64-roadmap)
-    - [Current Supported Platforms](#current-supported-platforms)
-    - [AArch64 / ARM64 Backend Architecture & Next Steps](#aarch64--arm64-backend-architecture--next-steps)
+13. [Target Platforms & ARM64 Architecture](#13-target-platforms--arm64-architecture)
+    - [Supported Target Platforms](#supported-target-platforms)
+    - [32-bit x86 (i686)](#32-bit-x86-i686)
+    - [AArch64 / ARM64 Backend Architecture](#aarch64--arm64-backend-architecture)
 
 ---
 
@@ -72,7 +74,7 @@ Welcome to the official language specification and technical documentation for *
 
 ### Core Architectural Pillars
 1. **Self-Contained Direct Code Generation:**
-   `thavac` possesses an integrated x86-64 machine code assembler and file format emitter. It generates standalone Windows PE32+ (`.exe`, `.thdl`) and Linux ELF64 binaries directly to disk with **zero toolchain dependencies** (no external linker, assembler, or C runtime library required).
+   `thavac` emits machine code for x86-64, ARM64, and i686 directly to Windows PE32/PE32+ or Linux ELF32/ELF64. Native builds require no external linker or assembler. Windows targets use system DLLs, while standalone Linux targets call the kernel directly.
 2. **Dual-Backend Resilience:**
    While the direct native backend produces zero-dependency machine code with microsecond build times, Thava also features a transpiler targeting standard C++17. This fallback automatically activates when interfacing with native C++ headers via `@cattach`.
 3. **Determinism and Zero-Cost Abstractions:**
@@ -148,7 +150,8 @@ Thava provides explicit type casting using either `<target_type>(expr)` or `<tar
 <str> as_string = <str>(number) # "42"
 ```
 
-Casting a `<dbl>` to `<str>` renders up to six decimal places with trailing zeros (and a bare trailing dot) removed — `0.333333`, `7`, `99.99`, `-3.25`, `1234.5678`, `123456.789` — identically on all three backends. Integer magnitudes print their full digits with no fraction, including values past `int64` range (`1e18`, `1e19`, `1e20` all match byte for byte on every backend):
+Casting a `<dbl>` to `<str>` formats the numeric value as text. The examples below show rounding and the removal of trailing zeros.
+
 ```thava
 cons.out(<str>(1.0 / 3.0))   # 0.333333
 cons.out(<str>(2.0 * 3.5))   # 7
@@ -260,7 +263,7 @@ class Report {
 }
 ```
 
-Reading a global (including `.len()`, indexing `names[i]`, and passing it to a function) works identically on all three backends: native x86-64, native ARM64 and `--cpp`.
+Functions can read globals, index global collections, and pass them as arguments on native x86-64, ARM64, and i686, as well as through the C++ transpiler.
 
 To write a global inside a function, method or constructor, declare it in that body before the first write. The type must match the top-level declaration, including integer width. Reading a global needs no declaration. A parameter or local variable with the same name cannot also be declared global in that body.
 
@@ -537,6 +540,9 @@ Pass functions as arguments to implement event loops, filters, and strategy patt
 
 ### Classes & Single Inheritance
 Classes support single inheritance with encapsulation and polymorphism:
+
+#### Constructors, `locvar`, and `parvar`
+
 ```thava
 class Vehicle {
     <str> brand;
@@ -617,12 +623,13 @@ Import resolution depends on the target:
 
 - **Windows PE x86-64** loads the `.thdl`/`.dll` at run time through the Windows loader (IAT thunks), exactly like before.
 - **Windows PE ARM64** builds an ARM64 `.thdl` as a DLL with a PE export table. The consumer imports the functions by name and calls each module's initializer once before running its own top-level code. The module's global values persist across calls. Place the DLLs, including transitive dependencies, beside the executable. Rebuild any ARM64 `.thdl` from before this support with `thavac library.thv --target win-arm64 --lib -o library.thdl`. Native ARM64 calls pass arguments beyond the first eight on the stack, including collection references.
+- **Native i686** uses PE32 DLLs on Windows and position-independent ELF32 modules on Linux. Build both sides with the same i686 target and `--native`. Include matching class and struct declarations with `@attach` when a signature shares those types across the module boundary.
 - **`--backend cpp`** keeps its dynamic linking through the host compiler.
 - **Native Linux ELF64 (x86-64 and AArch64)** are zero-libc, so the generated program carries its own loader: at start-up it maps the `.so` with `mmap`, applies the module's relocations, runs its top-level initializer once, and calls the exports through the mapped image. The library is **not** inlined, so — exactly like on Windows — the `.so` has to exist at run time; the executable itself stays a single self-contained file. The `.so` is located by its absolute path at compile time, so the directory you run the executable from does not matter.
 
-The Linux loader first opens the absolute path recorded at compile time and, if that fails (for example a binary built on Windows and run under Linux), retries the plain file name in the current directory.
+The Linux ELF64 loaders first open the absolute path recorded at compile time. If that fails, they retry the library by file name in the current working directory.
 
-On Linux, every attached library gets its own fixed window (`0x10000000`, `0x14000000`, ...) while the executable keeps `0x400000`. Attaching the same library twice is de-duplicated. If a library cannot be mapped the program prints
+The native Linux ELF64 loaders reserve a separate address window for each attached library. Attaching the same library twice is de-duplicated. If a library cannot be mapped the program prints
 ```
 [Thava Runtime] cannot load library '/path/to/thava_math.so'
 ```
@@ -674,6 +681,7 @@ cons.out("Interpolated: @{name} has @{count * 2} items")
 * `key.input(<type>, prompt)`: Displays `prompt` to standard output and reads input from standard input, parsing it into the requested type `<int>`, `<fl>`, `<dbl>`, `<bl>`, or `<str>`.
 * `key.input.upper(<str>, prompt)`: Reads a line of input and converts all characters to uppercase.
 * `key.input.lower(<str>, prompt)`: Reads a line of input and converts all characters to lowercase.
+* `key.input.title(<str>, prompt)` reads a line of input and applies the same Unicode titlecase mapping as `.title()`.
 
 ```thava
 <int> age = key.input(<int>, "Enter your age: ")
@@ -714,7 +722,8 @@ Provides high-performance platform utilities:
 * `time.second() -> <int>`: Current second (`0` - `59`).
 
 ### `clib` (Dynamic Library Interop & Raw Memory FFI)
-The `clib` library allows calling arbitrary shared libraries (`.dll` on Windows, `.so` on Linux) and accessing physical memory addresses:
+Where supported, `clib` loads shared libraries (`.dll` on Windows, `.so` on Linux) and reads or writes memory in the current process. For i686, use the C++ backend for C interop. Store library handles and pointers in `<int64>` on 64-bit targets.
+
 * `clib.load(<str> path) -> <int>`: Loads a dynamic shared library into the address space and returns an opaque library handle.
 * `clib.free(<int> handle) -> <bl>`: Unloads the library from memory.
 * `clib.has(<int> handle, <str> symbol) -> <bl>`: Checks if an exported function symbol exists in the library.
@@ -738,19 +747,21 @@ The `clib` library allows calling arbitrary shared libraries (`.dll` on Windows,
 Thava variables of string and collection types feature built-in methods with seamless dot-notation syntax:
 
 ### String Manipulation (`<str>`)
-* `s.len() -> <int>`: Returns character count.
+* `s.len() -> <int>` returns the UTF-8 byte count.
 * `s.upper() -> <str>`: Returns an uppercase copy.
 * `s.lower() -> <str>`: Returns a lowercase copy.
 * `s.strip() -> <str>`: Trims leading and trailing whitespace.
 * `s.title() -> <str>`: Applies titlecase to the first character of each whitespace-delimited word and lowercase to the rest.
 
-The three methods and `key.input.upper` / `key.input.lower` use the same Unicode 17.0 UTF-8 case mappings on every backend. Mappings can expand a character, such as `ß` to `SS` in uppercase. Thava applies unconditional case mappings without Unicode normalization or locale-specific rules.
+The three case methods and their `key.input` counterparts use Unicode 17.0 UTF-8 case mappings. Mappings can expand a character, such as `ß` to `SS` in uppercase. Thava applies unconditional case mappings without Unicode normalization or locale-specific rules.
+
 * `s.find(<str> substr) -> <int>`: Returns the 0-based index of the first occurrence of `substr` (-1 if not found).
 * `s.count(<str> substr) -> <int>`: Counts non-overlapping occurrences of `substr`.
 * `s.replace(<str> old_str, <str> new_str) -> <str>`: Replaces all occurrences of `old_str` with `new_str`.
 * `s.split(<str> delimiter) -> <lst>`: Splits string into a list of substrings.
 * `s.startswith(<str> prefix) -> <bl>`: Returns `true` if string starts with `prefix`.
 * `s.endswith(<str> suffix) -> <bl>`: Returns `true` if string ends with `suffix`.
+* `s.getsubstring(<int> start, <int> end) -> <str>` uses one-based, inclusive UTF-8 code point positions.
 
 ### List Operations (`<lst>`)
 * `lst.len() -> <int>`: Returns element count.
@@ -762,7 +773,7 @@ The three methods and `key.input.upper` / `key.input.lower` use the same Unicode
 * `lst.count(<multype> val) -> <int>`: Counts occurrences of `val`.
 * `lst.clear()`: Empties the list.
 
-**Element typing and indexed access.** A list's element type is inferred from its declaration (`<lst> xs = [1, 2]` → `<int>`, `[1.5, 2.5]` → `<dbl>`, `["a"]` → `<str>`), and `xs[i]` evaluates to that type. This holds inside functions and methods, for globals and for lists passed as parameters, on all three backends (native x86-64, native ARM64 and `--cpp`):
+**Element typing and indexed access.** For homogeneous lists, the compiler can infer the element type from the declaration (`<lst> xs = [1, 2]` → `<int>`, `[1.5, 2.5]` → `<dbl>`, `["a"]` → `<str>`). The inferred type also helps the compiler handle indexed access when lists are passed to functions or methods:
 ```thava
 <lst> rates = [1.5, 2.5, 3.5]
 <dbl> func rate(<int> i) -> <dbl> {
@@ -812,10 +823,10 @@ Thava handles file input/output through RAII-guarded context blocks (`file.open 
 
 ### Stream Methods
 * `f.read() -> <str>`: Reads the entire file content into a string.
-* `f.readline() -> <str>` / `f.read_line()`: Reads a single line including newline.
+* `f.readline() -> <str>` / `f.read_line()` returns a single line with the line ending removed.
 * `f.readlines() -> <lst>` / `f.read_lines()`: Reads all lines and returns a list of strings.
 * `f.write(<str> text)`: Writes string to the stream.
-* `f.writeline(<str> text)`: Writes string followed by a newline character.
+* `f.writeline(<str> text)` / `f.write_line(<str> text)` writes a string followed by a newline.
 
 ```thava
 # Writing to a file
@@ -827,7 +838,7 @@ file.open("output.txt", "w") as f {
 # Reading lines from a file
 file.open("output.txt", "r") as f {
     for <str> line in f.readlines() {
-        cons.out("Read line:", line.strip())
+        cons.out("Read line: " + line.strip())
     }
 } # Stream is closed deterministically here
 ```
@@ -838,24 +849,25 @@ file.open("output.txt", "r") as f {
 
 ### Compiler Invocation & Flags
 ```text
-Usage: thavac <source.thv> [-o <output_binary>] [--arch x86_64|arm64] [--backend native|elf|pe|arm64|cpp] [--lib] [-O0|-O1|-O2|-O3]
+Usage: thavac <source.thv> [--target <target>] [--native|--cpp] [-o <output>] [--lib] [-O0|-O1|-O2|-O3]
        thavac --info <file.thdl|.so>
 ```
 
 | Flag | Description |
 | :--- | :--- |
 | `-o <filename>` | Specify output executable or dynamic library name. |
-| `--arch arm64` | Target Linux AArch64 / ARM64 architecture (Zero-dependency direct ELF64 emitter). |
-| `--arch x86_64` | Target x86-64 architecture (Default). |
-| `--backend native` | Direct Native machine code generation for host OS (Default). |
+| `--arch x86_64`, `--arch arm64`, `--arch i686` | Select an architecture. Use `--target` to specify both the operating system and architecture. |
+| `--native` / `--backend native` | Select direct machine code generation. Without a target, the default is native x86-64 for the compiler host OS. |
+| `--target win-x64` / `--target linux-x64` | Target Windows or Linux x86-64. |
+| `--target win-arm64` / `--target linux-arm64` | Target Windows or Linux ARM64. |
 | `--backend arm64` / `--backend elf-arm64` | Direct Native Linux AArch64 (ARM64) ELF64 code generation. |
-| `--backend pe-arm64` / `--target win-arm64` | Direct Native Windows ARM64 (PE32+ `0xAA64`) code generation [Experimental]. |
-| `--target win-i686` / `--target linux-i686` | 32-bit x86 executables via a target C++17 toolchain (PE32 or ELF32). |
-| `--backend pe-i686` / `--backend elf-i686` | Direct Windows PE32 or Linux ELF32 code generation (experimental). |
+| `--backend pe-arm64` | Select the native Windows ARM64 emitter (PE32+). |
+| `--target win-i686` / `--target linux-i686` | Target Windows or Linux i686. These targets use the C++ toolchain by default. Add `--native` for direct code generation. |
+| `--backend pe-i686` / `--backend elf-i686` | Select native Windows PE32 or Linux ELF32 directly. |
 | `--backend elf` | Direct Native Linux x86-64 ELF64 binary. |
 | `--backend pe` | Direct Native Windows x86-64 PE32+ binary. |
-| `--backend cpp` | Transpile to optimized C++17 and build via host C++ compiler. |
-| `--backend cpp-arm64` | Transpile to C++17 and cross-compile via `aarch64-linux-gnu-g++`. |
+| `--cpp` / `--backend cpp` | Transpile to C++17 and build with a C++ toolchain for the target. |
+| `--cxx <compiler>` | Select the C++ compiler. `CXX` can also set this value. |
 | `--lib` | Build as a Dynamic Library (`.thdl` on Windows, `.so` on Linux). |
 | `-O0` to `-O3` | AST Optimization levels (Dead Code Elimination, Inlining, Constant Folding). |
 | `--info <file>` | Inspect embedded metadata of a Thava Dynamic Library (`.thdl` / `.so`). |
@@ -867,47 +879,40 @@ Usage: thavac <source.thv> [-o <output_binary>] [--arch x86_64|arm64] [--backend
 * **`-O3`** also tries to inline eligible leaf functions automatically.
 
 ### Embedded Binary Metadata Format
-When generating dynamic libraries (`--lib`), `thavac` embeds an internal metadata section bounded by `__THAVA_METADATA_START__` and `__THAVA_METADATA_END__`. When another Thava program links against the library using `@dlattach`, the compiler automatically discovers and types every exported symbol without requiring separate header files or `.meta` companion files.
+When generating dynamic libraries (`--lib`), `thavac` embeds an internal metadata section bounded by `__THAVA_METADATA_START__` and `__THAVA_METADATA_END__`. `@dlattach` reads export signatures from this section. Native i686 code that shares typed class or struct values also includes their declarations with `@attach`.
 
 Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section carries what the zero-libc loaders need to enter the module:
 
-* `machine:<id>` — the target the library was built for (`x86-64-elf`, `arm64-elf`, `x86-64-pe`, `arm64-pe`). Attaching a library of another target is a compile error instead of a crash.
+* `machine:<id>` identifies the target and, where applicable, the module ABI. Examples include `x86-64-elf`, `arm64-elf`, `x86-64-pe`, `arm64-pe`, `i686-pe-v2`, and `i686-elf-v2`. The compiler rejects libraries built for a different target.
 * `image:0x...` — the base address the library was linked for (`0x400000`).
 * `text:0x...` — image offset of the library's `.text`.
 * `data:0x...` — image offset of its data section.
 * `init:0x...` — offset of the module initializer (its top-level statements), if the library has any.
 * `|off:0x...` on a `func:` line — offset of that export inside `.text`.
-* `reloc:0x...,0x...` — image offsets of the 8-byte absolute words the loader must relocate (the module's internal function-pointer slots). Code itself is position independent: all data references are PC-relative.
+* `reloc:0x...,0x...` records relocation offsets for native ELF64 modules. Each entry identifies an 8-byte absolute word the loader must adjust.
 
 ---
 
 ## 13. Target Platforms & ARM64 Architecture
 
 ### Supported Target Platforms
-1. **Windows x86-64 (Active):**
-   - Emits standalone PE32+ `.exe` executables and `.thdl` dynamic libraries.
-   - Zero-dependency assembler directly writes DOS stub, PE headers, COFF sections (`.text`, `.rdata`, `.data`, `.pdata`, `.xdata`), and import/export directory tables.
-2. **Linux x86-64 (Active):**
-   - Emits standalone ELF64 executables and `.so` shared objects.
-   - Program headers, dynamic symbols, PLT/GOT tables, and GNU hash tables are emitted directly.
-   - Produced executables are already marked executable (`chmod +x` is applied automatically), so they can be run straight away.
-   - The zero-libc runtime formats `<dbl>` values itself (up to six decimal places, trailing zeros trimmed), so `<str>(dbl)` and string concatenation of doubles are byte-identical with the other backends.
-3. **Linux AArch64 / ARM64 (Active):**
-   - Emits standalone ELF64 executables for 64-bit ARM architecture (`EM_AARCH64` = 183 / 0xB7).
-   - Generates pure 32-bit fixed-width A64 instructions with zero external assembler or linker dependencies.
-   - Universal 64KB page alignment (`PAGE_ALIGN = 0x10000`) for seamless execution across all standard Linux distributions, Android kernels, and macOS/Apple Silicon VMs.
-4. **Windows ARM64 (Experimental):**
-   - The global-write fixture (`_t5/gw.thv`) compiles for this target. Its PE machine field has been verified as `0xAA64`. GitHub Actions runs this fixture natively on Windows ARM64 at -O0 and -O3 and checks its output.
-   - Emits standalone PE32+ `.exe` executables with `IMAGE_FILE_MACHINE_ARM64` (`0xAA64`) for Windows on ARM (Snapdragon X Elite, Surface Pro ARM).
-   - Resolves IAT thunk slots via relative `ADR` + `LDR` + `BLR` to invoke standard Windows C runtime functions (`msvcrt.dll` `printf`, `exit`).
-   - AAPCS64 Win64 compliant frame layouts and stack discipline.
-   - `key.input`, `key.input.lower` and `key.input.upper` read Unicode from the Windows console. Redirected input is read as UTF-8. Numeric input is parsed with `_atoi64` / `atof`. String helpers for case conversion, trimming, search, replacement, split and join are shared with Linux ARM64. List and string membership (`in`), `rand()`, `randint()` and `randres()` with optional numeric weights are supported. Dictionaries use the same ARM64 runtime helpers on Linux and Windows. `file.open`, read and write methods use the Windows C runtime. Windows ARM64 provides `os.name`, `system`, `getpid`, `cpu_count`, `getcwd`, `chdir`, `mkdir`, `rmdir`, `remove`, `rename`, `exists`, `is_file`, `is_dir`, `getsize`, `getenv`, and `sleep`. It also supports `time.timestamp()`, `time.sleep()`, and local time components (`year`, `month`, `day`, `hour`, `minute`, `second`, and `millis`). It also supports `os.listdir()`, `os.setenv()`, `os.showmessagebox()`, and formatting dates and times with `time.now()` and `time.date()`. Native `clib` can load ARM64 DLLs and call fixed-signature scalar C functions, including mixed integer and floating-point arguments. Use `<int64>` for handles and pointers. Native `cfunc` / `c.` resolves C runtime symbols from `msvcrt.dll` or existing Windows imports. Header-driven calls (`@cattach`), C global variables, and C++ types use the C++ backend.
-5. **C++17 Transpiler Fallback (Active):**
-   - Automatic fallback when complex native C++ template headers are attached via `@cattach`.
+
+| Native target | Binary format | Library built with `--lib` |
+| :--- | :--- | :--- |
+| `win-x64` | PE32+ x86-64 | `.thdl` |
+| `win-arm64` | PE32+ ARM64 (`0xAA64`) | `.thdl` |
+| `win-i686` with `--native` | PE32 i686 | `.thdl` |
+| `linux-x64` | ELF64 x86-64 | `.so` |
+| `linux-arm64` | ELF64 AArch64 (`EM_AARCH64`) | `.so` |
+| `linux-i686` with `--native` | ELF32 i686 | `.so` |
+
+CI builds compiler packages for all six targets. It runs native Windows ARM64 fixtures for globals, Unicode input, file I/O, OS and time operations, dynamic libraries, and scalar C interop. The source fixtures are in [`tests/`](../tests/).
+
+On Windows ARM64, native `clib` can load ARM64 DLLs and call scalar C functions with fixed signatures, including mixed integer and floating-point arguments. Use `<int64>` for handles and pointers. Native `cfunc` and `c.` resolve C runtime symbols from `msvcrt.dll` or existing Windows imports. Use the C++ backend for `@cattach`, C global variables, or C++ types.
 
 ### 32-bit x86 (i686)
 
-The experimental native backend writes i686 machine code and executable headers directly, with no C++ compiler, assembler or linker.
+The native backend writes i686 machine code and executable headers directly. Building a native i686 program requires no external C++ compiler, assembler, or linker.
 
 - `thavac program.thv --target win-i686 --native -o program.exe`: Windows PE32. The executable calls Kernel32 for console output and process exit. `--backend pe-i686` selects the same backend.
 - `thavac program.thv --target linux-i686 --native -o program`: standalone Linux ELF32 using Linux system calls. `--backend elf-i686` selects the same backend.
@@ -916,6 +921,13 @@ The experimental native backend writes i686 machine code and executable headers 
 The native backend supports integer widths including `<int64>`, integer `+`, `-`, `*`, `/`, `//` and `%`, comparisons, bitwise operations, booleans, UTF-8 string literals and comparisons, scalar functions and recursion, globals, `if`, `while`, C-style `for` and interpolated `cons.out`. The native backend also supports `<fl>` and `<dbl>` arithmetic (+, -, *, /), comparisons and numeric casts, integer exponentiation, string concatenation and repetition, byte length, UTF-8 indexing and `getsubstring()`, substring search and replacement, `strip()`, Unicode case conversion, and `key.input` for strings, integers, real numbers and booleans. Windows console input uses `ReadConsoleW`; redirected input and Linux input use UTF-8 bytes. Native i686 supports lists, tuples, and dictionaries with mixed, nested, object and function values, negative collection indexes, compound indexed assignment, collection returns, list mutation and parameter rebinding, dictionary lookup/mutation and projections, `split()`/`join()`, `foreach` and numeric `range` loops. Scoped `file.open` supports read/write/append, line reads and writes, and `read_lines()`. The scope closes its file on normal exit, `return`, `break` or `continue`. Random operations include `rand()`, `randint()` and `randres()` with optional numeric weights. OS operations cover process information, filesystem paths and directory listings, environment variables, `os.system()` and `os.sleep()`. `os.showmessagebox()` displays a dialog on Windows and returns zero on Linux. The time module includes Unix timestamps, millisecond sleep, calendar fields and formatted date/time strings. Calendar values use local time on Windows and UTC on standalone Linux. Native i686 supports typed `try`/`except`, `throw`, runtime `raise_error` and integer division-by-zero errors. Deferred actions run last-in, first-out when the function or program exits, including when unwound by an exception. A defer inside `file.open` runs before that file closes. Reaching the same defer site again before its scope exits leaves a single pending action. Native i686 supports class instances with scalar, collection and object fields, field defaults, typed constructor overloads, single inheritance, virtual method dispatch and explicit parent access via `parvar`. Class values may be passed to and returned from functions, and a member access through `none` raises `RuntimeError`. Native structs support positional and default field initialization, member reads and writes, and passing or returning struct references. Fields can hold scalars, collections, classes and nested struct references. Named enum members can be used as integer constants. A `<func>` variable can hold a Thava function, be reassigned, returned, or passed as a callback. Use `--lib` with a native i686 target to build a module and `@dlattach` to load one built for the same platform. Windows modules use PE32 DLLs. Linux modules use position-independent ELF32 images loaded by Thava. Native module exports support scalars, collections, function values, class instances and struct references. Include the same class and struct declarations with `@attach` in the library and its callers when sharing typed objects. The compiler checks the object layout when an imported signature is used. Rebuild attached modules with this compiler to propagate typed exceptions and deferred cleanup across module boundaries. Existing scalar and collection modules remain loadable. C interop still uses the C++ path. Unsupported native constructs report a compilation error.
 
 ELF32 programs detect iSH using its Linux release string. On iSH, they use `gettimeofday`, `nanosleep` and `stat64` for time, sleep and file metadata. On the iSH App Store kernel, time values follow its 32-bit clock ABI. Use `--target linux-i686 --native` when building a program for iSH.
+
+The Linux i686 release includes `build-ish.sh`. Keep the script beside `thavac-linux-i686`. The script selects the native i686 target and disables glibc rseq for the compiler process.
+
+```sh
+sh ./build-ish.sh --i686_ish.thv -o test-ish
+./test-ish
+```
 
 The existing C++ path remains the default for `--target win-i686` and `--target linux-i686`. Select it explicitly with `--cpp` or use `--backend cpp-i686` for the current OS. Windows builds use `i686-w64-mingw32-g++` or an x86 MSVC developer environment. Linux builds use `i686-linux-gnu-g++` or GCC with 32-bit C++ libraries (`g++-multilib` on Ubuntu).
 
@@ -951,10 +963,8 @@ flowchart TD
    - Relative Addressing: `ADR` with forward/backward label fixup resolution.
 2. **AAPCS64 Calling Convention & Stack Discipline:**
    - Parameter passing: registers `X0` through `X7` for integer/pointer parameters and return values.
-   - Canonical Frame Layout:
-     - Prologue: `stp x29, x30, [sp, #-16]! ; mov x29, sp ; sub sp, sp, #512`.
-     - Epilogue: `mov sp, x29 ; ldp x29, x30, [sp], #16 ; ret`.
-   - Guaranteed separation between local variables (`[FP - 8]` .. `[FP - 512]`) and temporary stack pushes below `SP`.
+   - The prologue saves the frame pointer and link register before reserving space for locals. Frame size depends on the generated code and is rounded to a 16-byte boundary.
+   - Calls place arguments beyond register capacity on the stack. The epilogue restores the stack pointer, frame pointer, and link register.
 3. **Direct Linux Syscall Runtime (`arm64_runtime.hpp`):**
    - Pure, zero-libc runtime using direct kernel syscalls (`SVC #0`):
      - `sys_write` (syscall 64) for stdout console output.
@@ -964,7 +974,7 @@ flowchart TD
    - Developers can build on Windows or Linux x86-64 and execute bit-accurately via `qemu-aarch64`:
      ```powershell
      # Compile directly on Windows
-     .\thavac.exe my_program.thv --arch arm64 -o my_program
+     .\thavac.exe my_program.thv --target linux-arm64 -o my_program
      # Execute inside WSL via user-space emulation
      wsl qemu-aarch64 ./my_program
      ```

@@ -1,26 +1,27 @@
-# Dynamic Library Example (.thdl)
+# Dynamic Library Example
 
-This example demonstrates how to build and link dynamic libraries in Thava.
+The consumer imports `math_plugin` by name. Add the compiler to your `PATH`, choose a target for both builds, and run the commands from this directory.
 
-## 1. Build the Dynamic Library
+## Windows x86-64
 
-Compile `math_plugin.thv` into a `.thdl` (Windows dynamic library with embedded symbol metadata):
+Build a `.thdl` and keep it beside the executable.
 
-```bash
-thavac math_plugin.thv -o math_plugin.thdl --lib
+```powershell
+thavac.exe math_plugin.thv --target win-x64 --lib -o math_plugin.thdl
+thavac.exe --info math_plugin.thdl
+thavac.exe use_plugin.thv --target win-x64 -o use_plugin.exe
+.\use_plugin.exe
 ```
 
-To inspect exported function signatures embedded in the library:
+## Linux x86-64
 
-```bash
-thavac --info math_plugin.thdl
+Build a `.so` and leave the library available at runtime.
+
+```sh
+thavac math_plugin.thv --target linux-x64 --lib -o math_plugin.so
+thavac --info math_plugin.so
+thavac use_plugin.thv --target linux-x64 -o use_plugin
+./use_plugin
 ```
 
-## 2. Compile and Run the Consumer Application
-
-Compile `use_plugin.thv` which links to `math_plugin.thdl` via `@dlattach "math_plugin"`:
-
-```bash
-thavac use_plugin.thv -o use_plugin.exe
-./use_plugin.exe
-```
+For other architectures, use the same `--target` on both build commands and the library extension for that OS. Add `--native` on both commands for i686.

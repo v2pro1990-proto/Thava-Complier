@@ -29,7 +29,7 @@ A systems programming language with direct PE and ELF machine code generation fo
 
 Thava is designed to bridge the gap between high-level expressive syntax and low-level bare-metal execution speed. It offers a dual-backend architecture:
 
-1. **Direct Native Machine Code Backend (Default)** emits Windows PE32/PE32+ and Linux ELF32/ELF64 executables and libraries without an external assembler or linker.
+1. **Direct Native Machine Code Backend** emits Windows PE32/PE32+ and Linux ELF32/ELF64 executables and libraries without an external assembler or linker. A plain compiler invocation targets x86-64 on the current OS. For native i686, pair `--target win-i686` or `--target linux-i686` with `--native`.
 2. **C++17 Transpiler Backend (`--cpp`):** Targets optimized standard C++17, enabling seamless interoperability with legacy C/C++ libraries, complex template headers, and full object-oriented classes.
 
 ---
@@ -39,7 +39,8 @@ Thava is designed to bridge the gap between high-level expressive syntax and low
 - **Instant Compilation:** Emits complete standalone native executables in ~15 to 30 milliseconds.
 - **Zero Toolchain Dependencies:** The native backend constructs PE and ELF headers, text/data sections, and import address tables from scratch.
 - **Multi-Architecture Support** includes x86-64, ARM64, and i686 on Windows and Linux. The native i686 backend does not support C interop.
-- **Embedded-Metadata Dynamic Libraries (`.thdl`):** Compile modular libraries with `--lib`. Exported function signatures and types are embedded directly inside binary metadata sections. Consumers import them via `@dlattach` with zero header files required.
+- **Dynamic Libraries** use `--lib` to build Windows `.thdl` or Linux `.so` modules. `@dlattach` reads exported signatures from embedded metadata. For native i686 exports that share classes or structs, include the same declarations on both sides with `@attach`.
+- **Constants** use `<type> const name = value` for read-only variables in programs and functions.
 - **C/C++ Interoperability:** Attach C headers via `@cattach <header.h>`, declare signatures with `cfunc`, or call routines dynamically using `c.function()`.
 - **Object-Oriented Programming:** Classes, constructors (`func init`), encapsulated fields, `locvar` (self reference), and `parvar` (base class reference).
 - **Sub-Microsecond AI Inference:** Optimized matrix operations and multi-layer neural network forward passes running purely in native machine code without Python/PyTorch runtime overhead.
@@ -59,19 +60,15 @@ Thava is designed to bridge the gap between high-level expressive syntax and low
                               |
                     [ AST & Type Checker ]
                               |
-                    [ AST Optimizaton ]
+                    [ AST Optimization ]
                               |
              +----------------+----------------+
              |                                 |
    [ Native Backend ]                  [ C++ Transpiler ]
    (Zero Dependencies)                    (With --cpp)
              |                                 |
-  +----------+----------+                      |
-  |                     |                      |
-[x86-64 Emitter]  [ARM64 Emitter]       [g++ / clang++ / cl]
-(Windows PE32+ /  (ELF64 / Win ARM)     (-O3 -march=native)
-  Linux ELF64)          |                      |
-  +----------+----------+                      |
+   x86-64 / ARM64 / i686                g++ / clang++ / cl
+       PE and ELF                             |
              |                                 |
              +----------------+----------------+
                               |
@@ -114,7 +111,7 @@ Or manually:
 g++ -O3 -std=c++17 src\thavac.cpp -Isrc -o thavac.exe
 ```
 
-### Linux / macOS
+### Linux
 
 ```bash
 make
@@ -145,11 +142,18 @@ func main() {
 main()
 ```
 
-Compile directly to a native binary:
+Compile and run on Windows x86-64.
 
-```bash
-thavac hello.thv -o hello.exe
-./hello.exe
+```powershell
+.\thavac.exe hello.thv --target win-x64 -o hello.exe
+.\hello.exe
+```
+
+Compile and run on Linux x86-64.
+
+```sh
+./thavac hello.thv --target linux-x64 -o hello
+./hello
 ```
 
 ### 2. Math & Control Flow
@@ -171,7 +175,7 @@ func main() {
 main()
 ```
 
-### 3. Dynamic Libraries (`.thdl`)
+### 3. Dynamic Libraries (`.thdl` and `.so`)
 
 Create `math_lib.thv`:
 
@@ -181,13 +185,7 @@ Create `math_lib.thv`:
 }
 ```
 
-Build the dynamic library with embedded metadata:
-
-```bash
-thavac math_lib.thv -o math_lib.thdl --lib
-```
-
-Consume the library from another file without header files:
+Save this consumer as `main.thv`. The extensionless name lets the compiler select the library for the target OS.
 
 ```thava
 @dlattach "math_lib"
@@ -200,11 +198,20 @@ func main() {
 main()
 ```
 
-Compile and run:
+Build the library and consumer for the same target. On Windows x86-64, keep the library beside the executable.
 
-```bash
-thavac main.thv -o main.exe
-./main.exe
+```powershell
+.\thavac.exe math_lib.thv --target win-x64 --lib -o math_lib.thdl
+.\thavac.exe main.thv --target win-x64 -o main.exe
+.\main.exe
+```
+
+On Linux x86-64, run the following commands from the directory containing both sources.
+
+```sh
+./thavac math_lib.thv --target linux-x64 --lib -o math_lib.so
+./thavac main.thv --target linux-x64 -o main
+./main
 ```
 
 ### 4. Linux i686 on iSH
@@ -231,13 +238,11 @@ Usage: thavac <input.thv> [options]
 | `--cpp` | Use the C++17 transpiler backend (auto-detects g++, clang++, or cl). |
 | `--cxx <compiler>` | Specify custom host C++ compiler command or path (also honors CXX env var). |
 | `--lib` | Build as a shared dynamic library (`.thdl` on Windows, `.so` on Linux). |
-| `--info <file.thdl>` | Inspect embedded metadata and exported function signatures. |
-| `-O0`, `-O1`, `-O2`, `-O3` | Set optimization level (dead code elimination, register caching, peephole). |
-| `-s` | Strip debug symbols from output binary. |
-| `--arm64` | Target ARM64 architecture (AArch64). |
-| `--target linux-i686`, `--target win-i686` | Target 32-bit x86 on Linux or Windows. |
-| `--version` | Display compiler version and target information. |
-| `--help` | Display command-line usage information. |
+| `--info <file>` | Inspect metadata and exported signatures in a `.thdl` or `.so` file. |
+| `-O0`, `-O1`, `-O2`, `-O3` | Select an [optimization level](docs/DOCUMENTATION.md#optimization-levels--o0-to--o3). |
+| `--target win-x64`, `--target linux-x64` | Select Windows or Linux x86-64. |
+| `--target win-arm64`, `--target linux-arm64` | Select Windows or Linux ARM64. |
+| `--target win-i686`, `--target linux-i686` | Select Windows or Linux i686. Add `--native` for direct code generation. |
 
 ---
 
@@ -249,11 +254,13 @@ Thava_Complier/
 |   |-- thavac.cpp             # Main compiler entry point, lexer, parser, type checker
 |   |-- native_codegen.hpp     # Direct x86-64 machine code generator
 |   |-- x86_encoder.hpp        # x86-64 instruction encoder and fixup resolver
-|   |-- pe_emitter.hpp         # Windows PE32+ binary layout and IAT builder
+|   |-- pe_emitter.hpp         # Windows PE layout, imports and exports
 |   |-- arm64_codegen.hpp      # ARM64 direct code generator
 |   |-- arm64_encoder.hpp      # AArch64 instruction encoder
 |   |-- elf_emitter.hpp        # Linux ELF64 binary layout builder
 |   |-- elf_arm64_emitter.hpp  # Linux ELF ARM64 binary builder
+|   |-- i686_codegen.hpp       # Native Windows and Linux i686 code generation
+|   |-- elf_i686_emitter.hpp   # Linux ELF32 binary builder
 |   |-- ast_optimizer.hpp      # Intermediate AST optimization passes
 |   |-- linux_runtime.hpp      # Bare-metal Linux runtime routines
 |-- docs/
@@ -267,7 +274,8 @@ Thava_Complier/
 |   |-- 06_oop_classes.thv     # Classes, fields, constructors, locvar
 |   +-- 07_dynamic_library/    # Self-contained dynamic library demo (.thdl)
 |-- Makefile                   # Unix build configuration
-|-- build.sh                   # Linux / macOS shell builder
+|-- build.sh                   # Linux compiler build script
+|-- build-ish.sh               # Linux i686 compiler launcher for iSH
 |-- clbuild.bat                # Windows batch builder
 |-- README.md                  # Project documentation
 +-- LICENSE                    # MIT License
@@ -283,7 +291,7 @@ Full language documentation, syntax specifications, module attachments, and C in
 
 ## Contributing
 
-Contributions are welcome. Please check [open issues](https://github.com/) before submitting pull requests.
+Contributions are welcome. Please check [open issues](https://github.com/v2pro1990-proto/Thava-Complier/issues) before submitting pull requests.
 
 1. Fork the repository.
 2. Create your feature branch (`git checkout -b feature/amazing-feature`).
