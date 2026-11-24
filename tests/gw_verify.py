@@ -19,7 +19,8 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
             "membership_rand": "true false true false true false true -4 true only",
             "file_arm64": "[alpha][17]\n18\n4 [2.5][true]",
             "optimizer": "42\n19\n6\n9\n4",
-            "const_variables": "10 2.4 12 const 4 15"}
+            "const_variables": "10 2.4 12 const 4 15",
+            "interpolation": "Trần Minh có 42 điểm\nthứ 1\n2 / 3\n[đúng] true, 2.5\n@{name}\nTrần? Nhập: chào"}
 
 unicode_output = (
     "hôm nay trời đẹp quá",
@@ -104,9 +105,10 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                     if not run_windows_arm64:
                         continue
                 runner = ["qemu-aarch64"] if target == "arm64" else []
+                input_data = {"unicode_case": unicode_input, "interpolation": "chào\n"}
                 result = subprocess.run(runner + [str(output)], cwd=tmp,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8",
-                                        input=unicode_input if case == "unicode_case" else None)
+                                        input=input_data.get(case))
                 print(result.stdout, end="", flush=True)
                 result.check_returncode()
                 lines = [s for s in result.stdout.splitlines() if s and not s.startswith("[Thava Native]")]
@@ -184,3 +186,14 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                                 cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert result.returncode != 0 and diagnostic in result.stdout.lower(), result.stdout
     print("Invalid const declarations and writes rejected", flush=True)
+
+    for source, diagnostic in [
+        ('<str> bad = "@{missing}"', "is not declared"),
+        ('<str> bad = "@{1 2}"', "unexpected token in string interpolation"),
+        ('<str> bad = "@{1"', "unterminated string interpolation"),
+    ]:
+        Path(tmp, "invalid_interpolation.thv").write_text(source + "\n", encoding="utf-8")
+        result = subprocess.run([str(compiler), "invalid_interpolation.thv", "-o", "invalid_interpolation"],
+                                cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        assert result.returncode != 0 and diagnostic in result.stdout.lower(), result.stdout
+    print("Invalid string interpolations rejected", flush=True)

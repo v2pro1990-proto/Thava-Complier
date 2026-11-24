@@ -1,0 +1,24 @@
+<int> calls = 0
+
+<int> func next() {
+    global <int> calls
+    calls += 1
+    return calls
+}
+
+<str> func label(<str> name, <int> amount) {
+    return "@{name} có @{amount} điểm"
+}
+
+<str> name = "Trần"
+<str> message = label("@{name} Minh", 40 + 2)
+<lst> messages = ["thứ @{next()}", "@{next()} / @{next()}"]
+<str> picked = "[@{\"key}\".replace(\"key}\", \"đúng\")}]"
+cons.out(message)
+cons.out(messages[0])
+cons.out(messages[1])
+cons.out(picked + " @{true}, @{2.5}")
+<str> literal = "\@{name}"
+cons.out(literal)
+<str> answer = key.input(<str>, "@{name}? ")
+cons.out("Nhập: @{answer}")

@@ -15,7 +15,6 @@
 #include <type_traits>
 
 // Forward declaration
-ASTPtr parseThavaExpression(const std::string& src);
 class OsMethodNode;
 class TimeMethodNode;
 class CLibMethodNode;
@@ -2229,6 +2228,7 @@ public:
 
     ThavaType getStaticExprType(ASTNode* n) {
         if (!n) return ThavaType::UNKNOWN;
+        if (dynamic_cast<InterpolatedStringNode*>(n)) return ThavaType::STRING;
         if (auto lit = dynamic_cast<LiteralNode*>(n)) return lit->getLitType();
         if (auto v = dynamic_cast<VarNode*>(n)) {
             VarInfo* vi = lookupVar(v->getName());
@@ -2271,8 +2271,108 @@ public:
     // ==========================================
     // EXPRESSION CODE GENERATION
     // ==========================================
+    ThavaType emitStringCast(ThavaType srcType) {
+        if (srcType == ThavaType::STRING) return ThavaType::STRING;
+        if (srcType == ThavaType::NONE) {
+            uint32_t offNone = pe.addStringLiteralOffset("none");
+            enc.lea_rip_rdata(x86::RAX, offNone);
+            return ThavaType::STRING;
+        }
+        currentFrameOffset -= 8;
+        if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+        int32_t valSlot = currentFrameOffset;
+
+        currentFrameOffset -= 8;
+        if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+        int32_t bufSlot = currentFrameOffset;
+
+        if (srcType == ThavaType::INT) {
+            enc.mov_mr_rbp(valSlot, x86::RAX);
+            enc.mov_ri64(x86::RCX, 64);
+            enc.call_iat_func("malloc");
+            enc.mov_mr_rbp(bufSlot, x86::RAX);
+
+            enc.mov_rr(x86::RCX, x86::RAX);
+            enc.lea_rip_rdata(x86::RDX, offFmtInt);
+            enc.mov_rm_rbp(x86::R8, valSlot);
+            enc.call_iat_func("sprintf");
+
+            enc.mov_rm_rbp(x86::RAX, bufSlot);
+            return ThavaType::STRING;
+        }
+        if (srcType == ThavaType::FLOAT || srcType == ThavaType::DOUBLE) {
+            enc.movsd_mr_rbp(valSlot, x86::XMM0);
+            enc.mov_ri64(x86::RCX, 64);
+            enc.call_iat_func("malloc");
+            enc.mov_mr_rbp(bufSlot, x86::RAX);
+
+            enc.mov_rr(x86::RCX, x86::RAX);
+            if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
+                // The zero-libc Linux runtime formats doubles itself.
+                enc.mov_rm_rbp(x86::R8, valSlot);
+                enc.call_iat_func("sprintf_d");
+            } else {
+                enc.lea_rip_rdata(x86::RDX, offFmtFloat6);
+                enc.movsd_rm_rbp(x86::XMM2, valSlot);
+                enc.mov_rm_rbp(x86::R8, valSlot);
+                enc.call_iat_func("sprintf");
+                enc.mov_rm_rbp(x86::RDI, bufSlot);
+                emitTrimTrailingZeros(x86::RDI);
+            }
+
+            enc.mov_rm_rbp(x86::RAX, bufSlot);
+            return ThavaType::STRING;
+        }
+        if (srcType == ThavaType::BOOL) {
+            size_t trueLbl = enc.createLabel();
+            size_t endLbl = enc.createLabel();
+            enc.test_rr(x86::RAX, x86::RAX);
+            enc.jne(trueLbl);
+            enc.lea_rip_rdata(x86::RAX, offStrFalse);
+            enc.jmp(endLbl);
+            enc.bindLabel(trueLbl);
+            enc.lea_rip_rdata(x86::RAX, offStrTrue);
+            enc.bindLabel(endLbl);
+            return ThavaType::STRING;
+        }
+        return ThavaType::STRING;
+    }
+
+    void emitInterpolationPart(ASTNode* part) {
+        const auto type = emitExpr(part);
+        if (type == ThavaType::CUSTOM) {
+            enc.lea_rip_rdata(x86::RAX, pe.addStringLiteralOffset("<struct object>"));
+        } else if (type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
+                   type == ThavaType::BOOL || type == ThavaType::STRING || type == ThavaType::NONE) {
+            const auto savedOffset = currentFrameOffset;
+            emitStringCast(type);
+            currentFrameOffset = savedOffset;
+        } else {
+            std::cerr << "[Native Codegen Error]: This value cannot be interpolated as a string on x86-64.\n";
+            exit(1);
+        }
+    }
+
     ThavaType emitExpr(ASTNode* node) {
         if (!node) return ThavaType::UNKNOWN;
+
+        if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
+            emitInterpolationPart(interpolation->parts.front().get());
+            if (interpolation->parts.size() == 1) return ThavaType::STRING;
+            const auto savedOffset = currentFrameOffset;
+            currentFrameOffset -= 8;
+            const auto prefixSlot = currentFrameOffset;
+            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+            for (size_t i = 1; i < interpolation->parts.size(); ++i) {
+                enc.mov_mr_rbp(prefixSlot, x86::RAX);
+                emitInterpolationPart(interpolation->parts[i].get());
+                enc.mov_rr(x86::RDX, x86::RAX);
+                enc.mov_rm_rbp(x86::RCX, prefixSlot);
+                enc.call_label(lblStrConcat);
+            }
+            currentFrameOffset = savedOffset;
+            return ThavaType::STRING;
+        }
 
         if (auto lit = dynamic_cast<LiteralNode*>(node)) {
             ThavaType t = lit->getLitType();
@@ -2381,71 +2481,7 @@ public:
             }
 
             // Target: STRING
-            if (cast->targetType == ThavaType::STRING) {
-                if (srcType == ThavaType::NONE) {
-                    uint32_t offNone = pe.addStringLiteralOffset("none");
-                    enc.lea_rip_rdata(x86::RAX, offNone);
-                    return ThavaType::STRING;
-                }
-                currentFrameOffset -= 8;
-                if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-                int32_t valSlot = currentFrameOffset;
-
-                currentFrameOffset -= 8;
-                if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-                int32_t bufSlot = currentFrameOffset;
-
-                if (srcType == ThavaType::INT) {
-                    enc.mov_mr_rbp(valSlot, x86::RAX);
-                    enc.mov_ri64(x86::RCX, 64);
-                    enc.call_iat_func("malloc");
-                    enc.mov_mr_rbp(bufSlot, x86::RAX);
-
-                    enc.mov_rr(x86::RCX, x86::RAX);
-                    enc.lea_rip_rdata(x86::RDX, offFmtInt);
-                    enc.mov_rm_rbp(x86::R8, valSlot);
-                    enc.call_iat_func("sprintf");
-
-                    enc.mov_rm_rbp(x86::RAX, bufSlot);
-                    return ThavaType::STRING;
-                }
-                if (srcType == ThavaType::FLOAT || srcType == ThavaType::DOUBLE) {
-                    enc.movsd_mr_rbp(valSlot, x86::XMM0);
-                    enc.mov_ri64(x86::RCX, 64);
-                    enc.call_iat_func("malloc");
-                    enc.mov_mr_rbp(bufSlot, x86::RAX);
-
-                    enc.mov_rr(x86::RCX, x86::RAX);
-                    if constexpr (std::is_same_v<TEmitter, ElfEmitter>) {
-                        // The zero-libc Linux runtime formats doubles itself.
-                        enc.mov_rm_rbp(x86::R8, valSlot);
-                        enc.call_iat_func("sprintf_d");
-                    } else {
-                        enc.lea_rip_rdata(x86::RDX, offFmtFloat6);
-                        enc.movsd_rm_rbp(x86::XMM2, valSlot);
-                        enc.mov_rm_rbp(x86::R8, valSlot);
-                        enc.call_iat_func("sprintf");
-                        enc.mov_rm_rbp(x86::RDI, bufSlot);
-                        emitTrimTrailingZeros(x86::RDI);
-                    }
-
-                    enc.mov_rm_rbp(x86::RAX, bufSlot);
-                    return ThavaType::STRING;
-                }
-                if (srcType == ThavaType::BOOL) {
-                    size_t trueLbl = enc.createLabel();
-                    size_t endLbl = enc.createLabel();
-                    enc.test_rr(x86::RAX, x86::RAX);
-                    enc.jne(trueLbl);
-                    enc.lea_rip_rdata(x86::RAX, offStrFalse);
-                    enc.jmp(endLbl);
-                    enc.bindLabel(trueLbl);
-                    enc.lea_rip_rdata(x86::RAX, offStrTrue);
-                    enc.bindLabel(endLbl);
-                    return ThavaType::STRING;
-                }
-                return ThavaType::STRING;
-            }
+            if (cast->targetType == ThavaType::STRING) return emitStringCast(srcType);
 
             // Target: BOOL
             if (cast->targetType == ThavaType::BOOL) {
@@ -3025,8 +3061,8 @@ public:
         }
 
         if (auto inpCase = dynamic_cast<InputCaseNode*>(node)) {
-            uint32_t promptOff = pe.addStringLiteralOffset(inpCase->prompt);
-            enc.lea_rip_rdata(x86::RCX, promptOff);
+            emitExpr(inpCase->prompt.get());
+            enc.mov_rr(x86::RCX, x86::RAX);
             enc.mov_ri64(x86::RDX, inpCase->mode == "lower" ? 1 : (inpCase->mode == "upper" ? 2 : 0));
             enc.call_label(lblInputLine);
             return ThavaType::STRING;
@@ -3890,25 +3926,11 @@ public:
         }
 
         if (auto inp = dynamic_cast<InputNode*>(node)) {
-            if (inp->inputType == ThavaType::STRING) {
-                uint32_t promptOff = pe.addStringLiteralOffset(inp->prompt);
-                enc.lea_rip_rdata(x86::RCX, promptOff);
-                enc.mov_ri64(x86::RDX, 0); // mode = 0 (none)
-                enc.call_label(lblInputLine);
-                return ThavaType::STRING;
-            }
-
-            // Read a whole line for every non-string type. Using scanf("%d")
-            // left invalid input (e.g. "abc") in the stream, which made the
-            // next key.input read the same garbage and never consume a line.
-            if (!inp->prompt.empty()) {
-                uint32_t off = pe.addStringLiteralOffset(inp->prompt);
-                enc.lea_rip_rdata(x86::RCX, off);
-            } else {
-                enc.xor_r32(x86::RCX, x86::RCX);
-            }
+            emitExpr(inp->prompt.get());
+            enc.mov_rr(x86::RCX, x86::RAX);
             enc.mov_ri64(x86::RDX, inp->inputType == ThavaType::BOOL ? 1 : 0);
             enc.call_label(lblInputLine);
+            if (inp->inputType == ThavaType::STRING) return ThavaType::STRING;
 
             currentFrameOffset -= 8;
             if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
@@ -6668,62 +6690,35 @@ public:
         }
 
         if (auto consOut = dynamic_cast<ConsOutNode*>(node)) {
-            auto lit = dynamic_cast<LiteralNode*>(consOut->getExpr());
-            if (lit && lit->getLitType() == ThavaType::STRING) {
-                const std::string& text = lit->getVal();
-                size_t pos = 0;
-                while (pos < text.length()) {
-                    size_t startPlaceholder = text.find("@{", pos);
-                    if (startPlaceholder == std::string::npos) {
-                        std::string part = text.substr(pos);
-                        if (!part.empty()) {
-                            uint32_t off = pe.addStringLiteralOffset(part);
-                            enc.lea_rip_rdata(x86::RDX, off);
-                            emitCallPrintf(offFmtStr, x86::RDX, true);
-                        }
-                        break;
-                    }
-                    std::string part = text.substr(pos, startPlaceholder - pos);
-                    if (!part.empty()) {
-                        uint32_t off = pe.addStringLiteralOffset(part);
+            if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(consOut->getExpr())) {
+                for (const auto& part : interpolation->parts) {
+                    const auto et = emitExpr(part.get());
+                    if (et == ThavaType::INT) {
+                        emitCallPrintf(offFmtInt, x86::RAX, true);
+                    } else if (et == ThavaType::BOOL) {
+                        size_t trueLbl = enc.createLabel();
+                        size_t endLbl = enc.createLabel();
+                        enc.test_rr(x86::RAX, x86::RAX);
+                        enc.jne(trueLbl);
+                        enc.lea_rip_rdata(x86::RDX, offStrFalse);
+                        enc.jmp(endLbl);
+                        enc.bindLabel(trueLbl);
+                        enc.lea_rip_rdata(x86::RDX, offStrTrue);
+                        enc.bindLabel(endLbl);
+                        emitCallPrintf(offFmtStr, x86::RDX, true);
+                    } else if (et == ThavaType::FLOAT || et == ThavaType::DOUBLE) {
+                        emitCallPrintfFloat(offFmtFloat, x86::XMM0);
+                    } else if (et == ThavaType::STRING) {
+                        emitCallPrintf(offFmtStr, x86::RAX, true);
+                    } else if (et == ThavaType::NONE) {
+                        uint32_t off = pe.addStringLiteralOffset("none");
+                        enc.lea_rip_rdata(x86::RDX, off);
+                        emitCallPrintf(offFmtStr, x86::RDX, true);
+                    } else if (et == ThavaType::CUSTOM) {
+                        uint32_t off = pe.addStringLiteralOffset("<struct object>");
                         enc.lea_rip_rdata(x86::RDX, off);
                         emitCallPrintf(offFmtStr, x86::RDX, true);
                     }
-                    size_t endPlaceholder = text.find('}', startPlaceholder);
-                    if (endPlaceholder == std::string::npos) break;
-                    std::string exprSrc = text.substr(startPlaceholder + 2, endPlaceholder - startPlaceholder - 2);
-
-                    try {
-                        auto exprAst = parseThavaExpression(exprSrc);
-                        ThavaType et = emitExpr(exprAst.get());
-                        if (et == ThavaType::INT) {
-                            emitCallPrintf(offFmtInt, x86::RAX, true);
-                        } else if (et == ThavaType::BOOL) {
-                            size_t trueLbl = enc.createLabel();
-                            size_t endLbl = enc.createLabel();
-                            enc.test_rr(x86::RAX, x86::RAX);
-                            enc.jne(trueLbl);
-                            enc.lea_rip_rdata(x86::RDX, offStrFalse);
-                            enc.jmp(endLbl);
-                            enc.bindLabel(trueLbl);
-                            enc.lea_rip_rdata(x86::RDX, offStrTrue);
-                            enc.bindLabel(endLbl);
-                            emitCallPrintf(offFmtStr, x86::RDX, true);
-                        } else if (et == ThavaType::FLOAT || et == ThavaType::DOUBLE) {
-                            emitCallPrintfFloat(offFmtFloat, x86::XMM0);
-                        } else if (et == ThavaType::STRING) {
-                            emitCallPrintf(offFmtStr, x86::RAX, true);
-                        } else if (et == ThavaType::NONE) {
-                            uint32_t off = pe.addStringLiteralOffset("none");
-                            enc.lea_rip_rdata(x86::RDX, off);
-                            emitCallPrintf(offFmtStr, x86::RDX, true);
-                        } else if (et == ThavaType::CUSTOM) {
-                            uint32_t off = pe.addStringLiteralOffset("<struct object>");
-                            enc.lea_rip_rdata(x86::RDX, off);
-                            emitCallPrintf(offFmtStr, x86::RDX, true);
-                        }
-                    } catch (...) {}
-                    pos = endPlaceholder + 1;
                 }
                 emitCallPrintf(offFmtNL);
             } else {

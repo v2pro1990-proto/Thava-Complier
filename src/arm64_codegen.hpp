@@ -254,6 +254,7 @@ public:
 
     // Static (compile-time) type inference for expressions
     ThavaType staticExprType(ASTNode* n) {
+        if (dynamic_cast<InterpolatedStringNode*>(n)) return ThavaType::STRING;
         if (!n) return ThavaType::UNKNOWN;
         if (auto lit = dynamic_cast<LiteralNode*>(n)) return lit->getLitType();
         if (auto v = dynamic_cast<VarNode*>(n)) {
@@ -781,7 +782,54 @@ public:
     // Evaluates expression and leaves result in X0 (integer/string/bool/ptr)
     // Returns the static ThavaType of the expression
     // ==========================================
+    void emitStringCast(ThavaType srcT) {
+        if (srcT == ThavaType::STRING) return;
+        // value -> heap string
+        if (srcT == ThavaType::DOUBLE || srcT == ThavaType::FLOAT) {
+            enc.bl(runtime.lblFileFmtDouble);
+        } else if (srcT == ThavaType::BOOL) {
+            size_t trueLbl = enc.createLabel();
+            size_t endLbl = enc.createLabel();
+            enc.cbnz(arm64::X0, trueLbl);
+            enc.adr_data(arm64::X0, runtime.offStrFalse);
+            enc.b(endLbl);
+            enc.bindLabel(trueLbl);
+            enc.adr_data(arm64::X0, runtime.offStrTrue);
+            enc.bindLabel(endLbl);
+        } else {
+            enc.bl(runtime.lblIntToStr);
+        }
+    }
+
+    void emitInterpolationPart(ASTNode* part) {
+        const auto type = compileExpression(part);
+        if (type == ThavaType::NONE) {
+            enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("none"));
+        } else if (type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
+                   type == ThavaType::BOOL || type == ThavaType::STRING) {
+            emitStringCast(type);
+        } else {
+            std::cerr << "[ARM64 Codegen Error]: This value cannot be interpolated as a string on ARM64.\n";
+            exit(1);
+        }
+    }
+
     ThavaType compileExpression(ASTNode* node) {
+        if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
+            emitInterpolationPart(interpolation->parts.front().get());
+            if (interpolation->parts.size() == 1) return ThavaType::STRING;
+            enc.sub_rri(arm64::SP, arm64::SP, 16);
+            for (size_t i = 1; i < interpolation->parts.size(); ++i) {
+                enc.str_imm(arm64::X0, arm64::SP, 0);
+                emitInterpolationPart(interpolation->parts[i].get());
+                enc.mov_rr(arm64::X1, arm64::X0);
+                enc.ldr_imm(arm64::X0, arm64::SP, 0);
+                enc.bl(runtime.lblStrConcat);
+            }
+            enc.add_rri(arm64::SP, arm64::SP, 16);
+            return ThavaType::STRING;
+        }
+
         if (!node) return ThavaType::UNKNOWN;
         checkUnsupported(node);
         checkRuntimeSupport(node);
@@ -1237,21 +1285,7 @@ public:
                 return ThavaType::INT;
             }
             if (dstT == ThavaType::STRING && srcT != ThavaType::STRING) {
-                // value -> heap string
-                if (srcT == ThavaType::DOUBLE || srcT == ThavaType::FLOAT) {
-                    enc.bl(runtime.lblFileFmtDouble);
-                } else if (srcT == ThavaType::BOOL) {
-                    size_t trueLbl = enc.createLabel();
-                    size_t endLbl = enc.createLabel();
-                    enc.cbnz(arm64::X0, trueLbl);
-                    enc.adr_data(arm64::X0, runtime.offStrFalse);
-                    enc.b(endLbl);
-                    enc.bindLabel(trueLbl);
-                    enc.adr_data(arm64::X0, runtime.offStrTrue);
-                    enc.bindLabel(endLbl);
-                } else {
-                    enc.bl(runtime.lblIntToStr);
-                }
+                emitStringCast(srcT);
                 return ThavaType::STRING;
             }
             // A cast to a collection type is only a type annotation (e.g. <lst>[...]);
@@ -1692,8 +1726,7 @@ public:
 
         // 14. Console input
         if (auto inp = dynamic_cast<InputNode*>(node)) {
-            uint32_t promptOff = emitter.addStringLiteralOffset(inp->prompt);
-            enc.adr_data(arm64::X0, promptOff);
+            compileExpression(inp->prompt.get());
             // mode 1 lowercases the line, which lets the bool parser below
             // match "true"/"yes" regardless of the input casing.
             enc.movz(arm64::X1, inp->inputType == ThavaType::BOOL ? 1 : 0, 0);
@@ -1731,8 +1764,7 @@ public:
         }
 
         if (auto ic = dynamic_cast<InputCaseNode*>(node)) {
-            uint32_t promptOff = emitter.addStringLiteralOffset(ic->prompt);
-            enc.adr_data(arm64::X0, promptOff);
+            compileExpression(ic->prompt.get());
             enc.movz(arm64::X1, ic->mode == "lower" ? 1 : (ic->mode == "upper" ? 2 : 0), 0);
             enc.bl(runtime.lblInputLine);
             return ThavaType::STRING;
@@ -2786,17 +2818,11 @@ public:
     // ==========================================
     // Print a literal piece of text (no newline)
     // ==========================================
-    void emitPrintLiteralText(const std::string& s) {
-        uint32_t off = emitter.addStringLiteralOffset(s);
-        enc.adr_data(arm64::X0, off);
-        enc.bl(runtime.lblPrintStr);
-    }
-
-    // ==========================================
-    // Print the value currently in X0 according to its static type (no newline)
-    // ==========================================
     void emitPrintValueRaw(ThavaType t) {
         if (t == ThavaType::STRING) {
+            enc.bl(runtime.lblPrintStr);
+        } else if (t == ThavaType::NONE) {
+            enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("none"));
             enc.bl(runtime.lblPrintStr);
         } else if (t == ThavaType::BOOL) {
             size_t falseLbl = enc.createLabel();
@@ -3461,35 +3487,10 @@ public:
 
         // 3. ConsOutNode (cons.out(expr))
         if (auto cout = dynamic_cast<ConsOutNode*>(node)) {
-            // --- String interpolation: cons.out("text @{expr} text") ---
-            if (auto lit = dynamic_cast<LiteralNode*>(cout->getExpr())) {
-                if (lit->getLitType() == ThavaType::STRING &&
-                    lit->getVal().find("@{") != std::string::npos) {
-                    const std::string& text = lit->getVal();
-                    size_t pos = 0;
-                    while (pos < text.size()) {
-                        size_t start = text.find("@{", pos);
-                        if (start == std::string::npos) {
-                            std::string part = text.substr(pos);
-                            if (!part.empty()) emitPrintLiteralText(part);
-                            break;
-                        }
-                        std::string part = text.substr(pos, start - pos);
-                        if (!part.empty()) emitPrintLiteralText(part);
-
-                        size_t endP = text.find('}', start);
-                        if (endP == std::string::npos) break;
-                        std::string exprSrc = text.substr(start + 2, endP - start - 2);
-                        try {
-                            auto exprAst = parseThavaExpression(exprSrc);
-                            ThavaType et = compileExpression(exprAst.get());
-                            emitPrintValueRaw(et);
-                        } catch (...) {}
-                        pos = endP + 1;
-                    }
-                    enc.bl(runtime.lblPrintNL);
-                    return;
-                }
+            if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(cout->getExpr())) {
+                for (const auto& part : interpolation->parts) emitPrintValueRaw(compileExpression(part.get()));
+                enc.bl(runtime.lblPrintNL);
+                return;
             }
 
             ThavaType t = compileExpression(cout->getExpr());

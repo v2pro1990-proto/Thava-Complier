@@ -212,15 +212,22 @@ Thava supports Pythonic inline conditional expressions:
 ```
 
 ### String Manipulation & Interpolation
-Strings support UTF-8-safe methods and string interpolation inside `cons.out`:
-```thava
-<str> s = "  hello world  "
-cons.out(s.strip().title()) # "Hello World" (Method chaining supported)
+Use `@{expression}` in a string literal to insert a value when the string is evaluated. Interpolated strings can initialize variables, be passed as arguments, be returned by functions, and appear in collections or input prompts. The expressions are evaluated once each, from left to right.
 
-# String Interpolation using @{...}
+```thava
+<str> player = "Trần Minh"
 <int> score = 95
-cons.out("Player score is: @{score} points (@{score + 5} next level)")
+<str> message = "@{player}: @{score} points"
+cons.out(message)
+
+<str> func summary(<str> name, <int> points) {
+    return "@{name}: @{points} points"
+}
+
+<str> answer = key.input(<str>, "@{player}, continue? ")
 ```
+
+Use `\@{` to write a literal `@{`, and escape quotes inside the enclosing string as `\"`. String, numeric, boolean, and `none` values can be interpolated in string expressions. Formatting collections in string expressions depends on the backend.
 
 ---
 

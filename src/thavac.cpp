@@ -681,8 +681,8 @@ class Lexer {
     char peekNext() { return (current + 1 >= source.length()) ? '\0' : source[current + 1]; }
 
 public:
-    Lexer(std::string src, std::string curPath = "")
-        : source(std::move(src)), currentFilePath(std::move(curPath)) {
+    Lexer(std::string src, std::string curPath = "", int startLine = 1)
+        : source(std::move(src)), currentFilePath(std::move(curPath)), line(startLine) {
         if (source.size() >= 3 &&
             static_cast<unsigned char>(source[0]) == 0xEF &&
             static_cast<unsigned char>(source[1]) == 0xBB &&
@@ -767,7 +767,8 @@ public:
                 }
             }
             else if (c == '"') {
-                std::string strVal = "";
+                const int stringLine = line;
+                std::string strVal;
                 while (!isAtEnd() && peek() != '"') {
                     if (peek() == '\n') line++;
                     if (peek() == '\\') {
@@ -786,7 +787,7 @@ public:
                 }
                 if (isAtEnd()) { std::cerr << "Lexer Error: Unterminated string literal at line " << line << "\n"; exit(1); }
                 advance(); // Skip closing '"'
-                tokens.push_back({TokenType::STR_LIT, strVal, line});
+                tokens.push_back({TokenType::STR_LIT, std::move(strVal), stringLine});
             }
             else if (isalpha(c) || c == '_') {
                 while (isalnum(peek()) || peek() == '_') advance(); // Dot '.' is no longer merged into variable names
@@ -1479,9 +1480,6 @@ inline std::string escapeCppString(const std::string& s) {
     return res;
 }
 
-// Forward declaration: parse a Thava snippet (e.g. inside @{...}) into an AST expression
-ASTPtr parseThavaExpression(const std::string& src);
-
 class LiteralNode : public ASTNode {
     std::string val;
     ThavaType type;
@@ -1500,6 +1498,23 @@ public:
         return val;
     }
     ThavaType getType(std::shared_ptr<Environment>) override { return type; }
+};
+
+class InterpolatedStringNode : public ASTNode {
+public:
+    std::vector<ASTPtr> parts;
+    explicit InterpolatedStringNode(std::vector<ASTPtr> p) : parts(std::move(p)) {}
+
+    std::string generateCode() override {
+        std::string code = "([&]() { std::ostringstream _thava_interpolation; _thava_interpolation << std::boolalpha";
+        for (const auto& part : parts) code += " << (" + part->generateCode() + ")";
+        return code + "; return _thava_interpolation.str(); }())";
+    }
+
+    ThavaType getType(std::shared_ptr<Environment> env) override {
+        for (const auto& part : parts) part->getType(env);
+        return ThavaType::STRING;
+    }
 };
 
 // Names declared at the top level of the program: the C++ backend emits them once
@@ -2171,58 +2186,7 @@ public:
     ASTNode* getExpr() const { return expr.get(); }
 
     std::string generateCode() override {
-        auto literal = dynamic_cast<LiteralNode*>(expr.get());
-        
-        if (literal && literal->getLitType() == ThavaType::STRING) {
-            std::string text = literal->getVal();
-            std::string code = "std::cout << ";
-            size_t pos = 0;
-            bool hasParts = false;
-
-            while (pos < text.length()) {
-                size_t startPlaceholder = text.find("@{", pos);
-                if (startPlaceholder == std::string::npos) {
-                    std::string part = text.substr(pos);
-                    if (!part.empty()) {
-                        if (hasParts) code += " << ";
-                        code += "std::string(\"" + escapeCppString(part) + "\")";
-                        hasParts = true;
-                    }
-                    break;
-                }
-
-                size_t endPlaceholder = text.find('}', startPlaceholder);
-                if (endPlaceholder == std::string::npos) {
-                    std::string part = text.substr(pos);
-                    if (hasParts) code += " << ";
-                    code += "std::string(\"" + escapeCppString(part) + "\")";
-                    hasParts = true;
-                    break;
-                }
-
-                std::string part = text.substr(pos, startPlaceholder - pos);
-                if (!part.empty()) {
-                    if (hasParts) code += " << ";
-                    code += "std::string(\"" + escapeCppString(part) + "\")";
-                    hasParts = true;
-                }
-
-                std::string exprSrc = text.substr(startPlaceholder + 2, endPlaceholder - startPlaceholder - 2);
-                if (hasParts) code += " << ";
-                code += parseThavaExpression(exprSrc)->generateCode();
-                hasParts = true;
-
-                pos = endPlaceholder + 1;
-            }
-
-            if (!hasParts) {
-                code += "\"\"";
-            }
-            code += " << std::endl;";
-            return code;
-        } else {
-            return "std::cout << " + expr->generateCode() + " << std::endl;";
-        }
+        return "std::cout << " + expr->generateCode() + " << std::endl;";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override {
@@ -2240,8 +2204,8 @@ inline std::string thavaCppReadLineStmt() {
 class InputNode : public ASTNode {
 public:
     ThavaType inputType;
-    std::string prompt;
-    InputNode(ThavaType t, std::string p) : inputType(t), prompt(std::move(p)) {}
+    ASTPtr prompt;
+    InputNode(ThavaType t, ASTPtr p) : inputType(t), prompt(std::move(p)) {}
 
     std::string generateCode() override {
         std::string cppType;
@@ -2265,8 +2229,8 @@ public:
             convert = "return _l;";
         }
 
-        return "[&]() -> " + cppType + " { std::cout << std::string(\"" + escapeCppString(prompt) +
-               "\") << std::flush; " + thavaCppReadLineStmt() + convert + " }()";
+        return "[&]() -> " + cppType + " { std::cout << " + prompt->generateCode() +
+               " << std::flush; " + thavaCppReadLineStmt() + convert + " }()";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override {
@@ -2277,14 +2241,14 @@ public:
 // AST node for key.input.upper / key.input.lower - specialized for <str>
 class InputCaseNode : public ASTNode {
 public:
-    std::string prompt;
+    ASTPtr prompt;
     std::string mode; // "upper" | "lower" | "title"
-    InputCaseNode(std::string p, std::string m) : prompt(std::move(p)), mode(std::move(m)) {}
+    InputCaseNode(ASTPtr p, std::string m) : prompt(std::move(p)), mode(std::move(m)) {}
 
     std::string generateCode() override {
         std::string helper = "_thava_str_" + mode;
-        return helper + "([&]() -> std::string { std::cout << std::string(\"" + escapeCppString(prompt) +
-               "\") << std::flush; " + thavaCppReadLineStmt() + "return _l; }())";
+        return helper + "([&]() -> std::string { std::cout << " + prompt->generateCode() +
+               " << std::flush; " + thavaCppReadLineStmt() + "return _l; }())";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::STRING; }
@@ -3795,6 +3759,21 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
                       const std::string& currentClassName = "",
                       const std::string& currentBaseClassName = "") {
     if (!expr) return;
+    if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(expr)) {
+        for (const auto& part : interpolation->parts) {
+            part->getType(env);
+            checkExpr(part.get(), env, currentClassName, currentBaseClassName);
+        }
+        return;
+    }
+    if (auto input = dynamic_cast<InputNode*>(expr)) {
+        checkExpr(input->prompt.get(), env, currentClassName, currentBaseClassName);
+        return;
+    }
+    if (auto input = dynamic_cast<InputCaseNode*>(expr)) {
+        checkExpr(input->prompt.get(), env, currentClassName, currentBaseClassName);
+        return;
+    }
 
     if (auto mem = dynamic_cast<MemberAccessNode*>(expr)) {
         checkExpr(mem->target.get(), env, currentClassName, currentBaseClassName);
@@ -4041,6 +4020,62 @@ class Parser {
         return ThavaType::UNKNOWN;
     }
 
+    ASTPtr parseStringLiteral(const Token& token) {
+        const auto& text = token.lexeme;
+        if (text.find("@{") == std::string::npos)
+            return std::make_unique<LiteralNode>(text, ThavaType::STRING);
+
+        std::vector<ASTPtr> parts;
+        std::string plain;
+        int line = token.line;
+        for (size_t pos = 0; pos < text.size();) {
+            if (text.compare(pos, 3, "\\@{") == 0) {
+                plain += "@{";
+                pos += 3;
+                continue;
+            }
+            if (text.compare(pos, 2, "@{") != 0) {
+                if (text[pos] == '\n') ++line;
+                plain += text[pos++];
+                continue;
+            }
+
+            if (!plain.empty()) {
+                parts.push_back(std::make_unique<LiteralNode>(std::move(plain), ThavaType::STRING));
+                plain.clear();
+            }
+            const size_t begin = pos + 2;
+            const int exprLine = line;
+            pos = begin;
+            size_t depth = 1;
+            bool quoted = false;
+            for (; pos < text.size(); ++pos) {
+                const char ch = text[pos];
+                if (ch == '\n') ++line;
+                if (quoted && ch == '\\' && pos + 1 < text.size()) {
+                    ++pos;
+                } else if (ch == '"') {
+                    quoted = !quoted;
+                } else if (!quoted && ch == '{') {
+                    ++depth;
+                } else if (!quoted && ch == '}' && --depth == 0) {
+                    break;
+                }
+            }
+            if (pos == text.size()) {
+                std::cerr << "Parser Error: Unterminated string interpolation at line " << exprLine << "\n";
+                exit(1);
+            }
+            Lexer lexer(text.substr(begin, pos - begin), "", exprLine);
+            Parser parser(lexer.scanTokens());
+            parts.push_back(parser.parseExpressionPublic(true));
+            ++pos;
+        }
+        if (parts.empty()) return std::make_unique<LiteralNode>(std::move(plain), ThavaType::STRING);
+        if (!plain.empty()) parts.push_back(std::make_unique<LiteralNode>(std::move(plain), ThavaType::STRING));
+        return std::make_unique<InterpolatedStringNode>(std::move(parts));
+    }
+
     ASTPtr primary() {
         if (check(TokenType::RAISE_ERROR)) return raiseErrorStatement();
 
@@ -4061,7 +4096,7 @@ class Parser {
         if (match(TokenType::INT_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::INT);
         if (match(TokenType::FLOAT_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::FLOAT);
         if (match(TokenType::BOOL_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::BOOL);
-        if (match(TokenType::STR_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::STRING);
+        if (match(TokenType::STR_LIT)) return parseStringLiteral(tokens[current - 1]);
         if (match(TokenType::NONE_LIT)) return std::make_unique<LiteralNode>("none", ThavaType::NONE);
         
         // C namespace syntax: c.<func_name>(...) or c.<const_name>
@@ -4163,12 +4198,12 @@ class Parser {
                     std::cerr << "Parser Error: " << name << " requires prompt string at line " << peek().line << "\n";
                     exit(1);
                 }
-                std::string prompt = advance().lexeme;
+                auto prompt = parseStringLiteral(advance());
                 if (!match(TokenType::RPAREN)) {
                     std::cerr << "Parser Error: Missing ')' after " << name << " at line " << peek().line << "\n";
                     exit(1);
                 }
-                return std::make_unique<InputCaseNode>(prompt, mode);
+                return std::make_unique<InputCaseNode>(std::move(prompt), mode);
             }
 
             // Struct instantiation: StructName(args...)
@@ -4280,11 +4315,11 @@ class Parser {
 
             match(TokenType::COMMA); // docs use key.input(<int>, "prompt")
             if (!check(TokenType::STR_LIT)) { std::cerr << "Parser Error: key.input requires prompt string at line " << peek().line << "\n"; exit(1); }
-            std::string prompt = advance().lexeme;
+            auto prompt = parseStringLiteral(advance());
 
             if (!match(TokenType::RPAREN)) { std::cerr << "Parser Error: Missing ')' after key.input at line " << peek().line << "\n"; exit(1); }
 
-            return std::make_unique<InputNode>(inputType, prompt);
+            return std::make_unique<InputNode>(inputType, std::move(prompt));
         }
 
         if (match(TokenType::LPAREN)) {
@@ -5944,8 +5979,14 @@ class Parser {
 public:
     Parser(std::vector<Token> t) : tokens(std::move(t)) {}
 
-    // Allow external contexts (e.g. interpolation @{...}) to parse a single expression
-    ASTPtr parseExpressionPublic() { return expression(); }
+    ASTPtr parseExpressionPublic(bool requireEnd = false) {
+        auto parsed = expression();
+        if (requireEnd && !check(TokenType::EOF_TOKEN)) {
+            std::cerr << "Parser Error: Unexpected token in string interpolation at line " << peek().line << "\n";
+            exit(1);
+        }
+        return parsed;
+    }
 
     std::vector<ASTPtr> parse() {
         std::vector<ASTPtr> statements;
@@ -5955,15 +5996,6 @@ public:
         return statements;
     }
 };
-
-// Parse text snippet into an AST expression using Lexer + Parser
-// (used for @{...} interpolation in cons.out, allowing methods like .strip(), index a[0], etc.)
-ASTPtr parseThavaExpression(const std::string& src) {
-    Lexer lex(src);
-    auto toks = lex.scanTokens();
-    Parser p(toks);
-    return p.parseExpressionPublic();
-}
 
 // ==========================================
 // 5. STATIC TYPE CHECKER (Type Verification)
@@ -6310,25 +6342,6 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
     else if (auto consOut = dynamic_cast<ConsOutNode*>(node)) {
         consOut->getExpr()->getType(env);
         checkExpr(consOut->getExpr(), env, currentClassName, currentBaseClassName);
-        auto literal = dynamic_cast<LiteralNode*>(consOut->getExpr());
-        if (literal && literal->getLitType() == ThavaType::STRING) {
-            const std::string& text = literal->getVal();
-            size_t pos = 0;
-            while (pos < text.length()) {
-                size_t startPlaceholder = text.find("@{", pos);
-                if (startPlaceholder == std::string::npos) break;
-                size_t endPlaceholder = text.find('}', startPlaceholder);
-                if (endPlaceholder == std::string::npos) break;
-                std::string exprSrc = text.substr(startPlaceholder + 2, endPlaceholder - startPlaceholder - 2);
-                try {
-                    auto interpolatedAst = parseThavaExpression(exprSrc);
-                    interpolatedAst->getType(env);
-                    checkExpr(interpolatedAst.get(), env, currentClassName, currentBaseClassName);
-                    checkTypes(interpolatedAst.get(), env, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
-                } catch (...) {}
-                pos = endPlaceholder + 1;
-            }
-        }
     }
     else if (auto exprStmt = dynamic_cast<ExpressionStatementNode*>(node)) {
         exprStmt->expr->getType(env);

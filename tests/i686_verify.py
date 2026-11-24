@@ -94,6 +94,10 @@ with tempfile.TemporaryDirectory() as tmp:
         for filename, expected, input_data in [
             ("gw.thv", ["4 3 AB new 9"], None),
             ("const_variables.thv", ["10 2.4 12 const 4 15"], None),
+            ("interpolation.thv", [
+                "Trần Minh có 42 điểm", "thứ 1", "2 / 3", "[đúng] true, 2.5",
+                "@{name}", "Trần? Nhập: chào",
+            ], "chào\n"),
             ("i686_class.thv", [
                 "true 5000000021 boxed 3.75 5000000003", "Cannot access a member of none",
                 "5000000012", "int string",

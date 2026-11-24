@@ -515,9 +515,9 @@ class Codegen {
         return ThavaType::STRING;
     }
 
-    void readString(const std::string& prompt) {
+    void readString(ASTNode* prompt) {
         readUsed = true;
-        printText(prompt);
+        print(expression(prompt));
         enc.call(readLineLabel);
         enc.alu(Xor, EDX, EDX);
     }
@@ -1394,6 +1394,15 @@ class Codegen {
     }
 
     ThavaType expression(ASTNode* node) {
+        if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
+            formatScalar(expression(interpolation->parts.front().get()));
+            for (size_t i = 1; i < interpolation->parts.size(); ++i) {
+                saveValue();
+                formatScalar(expression(interpolation->parts[i].get()));
+                emitBinary("+", ThavaType::STRING, ThavaType::STRING);
+            }
+            return ThavaType::STRING;
+        }
         if (auto lit = dynamic_cast<LiteralNode*>(node)) {
             const auto type = lit->getLitType();
             const auto value = lit->getVal();
@@ -1515,12 +1524,12 @@ class Codegen {
             return emitBinary(op->op, left, right);
         }
         if (auto input = dynamic_cast<InputNode*>(node)) {
-            readString(input->prompt);
+            readString(input->prompt.get());
             parseScalar(input->inputType);
             return input->inputType;
         }
         if (auto input = dynamic_cast<InputCaseNode*>(node)) {
-            readString(input->prompt);
+            readString(input->prompt.get());
             convertCase(input->mode);
             return ThavaType::STRING;
         }
@@ -1593,22 +1602,11 @@ class Codegen {
     }
 
     void printLine(ASTNode* node) {
-        if (auto literal = dynamic_cast<LiteralNode*>(node); literal && literal->getLitType() == ThavaType::STRING) {
-            const auto text = literal->getVal();
-            size_t cursor = 0;
-            while (cursor < text.size()) {
-                const auto open = text.find("@{", cursor);
-                const auto close = open == std::string::npos ? open : text.find('}', open + 2);
-                if (close == std::string::npos) {
-                    printText(text.substr(cursor));
-                    break;
-                }
-                printText(text.substr(cursor, open - cursor));
-                auto snippet = parseThavaExpression(text.substr(open + 2, close - open - 2));
-                print(expression(snippet.get()));
-                cursor = close + 1;
-            }
-        } else print(expression(node));
+        if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
+            for (const auto& part : interpolation->parts) print(expression(part.get()));
+        } else {
+            print(expression(node));
+        }
         printText("\n");
     }
 
