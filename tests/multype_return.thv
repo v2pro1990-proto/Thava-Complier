@@ -9,7 +9,32 @@
     return report(true)
 }
 
+<int> func total(<multype> packet) {
+    <int> count = packet[0]
+    return count + 8
+}
+
+<multype> func nested(<bl> use_values) {
+    if use_values {
+        return [1, ["nested", false], none]
+    }
+    return []
+}
+
 <multype> result = forward_report()
 cons.out(result)
-cons.out(<str>result[1])
+cons.out(result[1])
 cons.out(report(false))
+cons.out(total(result))
+<bl> ready = result[2]
+<dbl> weight = result[-1]
+cons.out("@{ready} @{weight} @{len(result)}")
+<multype> nested_result = nested(true)
+cons.out(nested_result)
+<multype> children = nested_result[1]
+cons.out(children[0])
+try {
+    cons.out(result[99])
+} except RuntimeError {
+    cons.out("out of range")
+}

@@ -20,6 +20,8 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
             "file_arm64": "[alpha][17]\n18\n4 [2.5][true]",
             "optimizer": "42\n19\n6\n9\n4",
             "const_variables": "10 2.4 12 const 4 15",
+            "multype_return": "[42, ok, true, 2.5]\nok\n[wait, 3]\n50\ntrue 2.5 4\n"
+                              "[1, [nested, false], none]\nnested\nout of range",
             "real_output": "1000000\n1000000.25\n999999999999.25\n-12345678.125\n"
                            "1000001 -12345678.125\n1000000 999999999999.25\n2.5",
             "interpolation": "Trần Minh có 42 điểm\nthứ 1\n2 / 3\n[đúng] true, 2.5\n@{name}\nTrần? Nhập: chào"}
@@ -73,8 +75,6 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
         expected["thdl_arm64_consumer"] = "42 43 44 5.5 thdl\n45 4.5 2 9"
     for target in targets:
         cases = dict(expected)
-        if target == "cpp":
-            cases["multype_return"] = "[42, ok, true, 2.5]\nok\n[wait, 3]"
         if target in ("arm64", "pe-arm64", "cpp"):
             cases["weighted_arm64"] = "pick 7 fallback"
         if target in ("arm64", "pe-arm64"):
@@ -96,8 +96,9 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 levels.append("-O2")
             for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
+                toolchain = ["--cxx", "missing-compiler"] if case == "multype_return" and target != "cpp" else []
                 subprocess.run([str(compiler), str(source), "--backend",
-                                target, opt, "-o", output.name], cwd=tmp, check=True)
+                                target, opt, *toolchain, "-o", output.name], cwd=tmp, check=True)
                 if case == "optimizer" and target != "cpp":
                     dead_branch = b"optimizer should eliminate this branch entirely"
                     assert (dead_branch in output.read_bytes()) == (opt in ("-O0", "-O1")), (target, opt)

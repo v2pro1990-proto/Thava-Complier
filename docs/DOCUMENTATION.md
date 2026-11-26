@@ -138,7 +138,7 @@ Decimal literals such as `1000000.25` start as `<dbl>`. When formatting finite r
 | Dictionary | `<dict>` | `<map>` | `{"id": 101, "role": "admin"}` |
 | Multi-type collection | `<multype>` | | A list or tuple value, such as `[1, "two"]`. |
 
-Lists and tuples are ordered and indexed from zero. Use a list for portable element updates because tuple mutation depends on the backend. `{}` creates an empty dictionary. `<multype>` accepts list or tuple values and has limited support on native x86-64 and ARM64. Use `<lst>` or `<tple>` for portable code.
+Lists and tuples are ordered and indexed from zero. Use a list for portable element updates because tuple mutation depends on the backend. `{}` creates an empty dictionary. Declare a mixed collection as `<multype>` when creating it so native targets keep a type tag on every element.
 
 ### First-Class Function Type (`<func>`)
 Thava treats functions as first-class citizens without the cryptic syntax of C function pointers. The `<func>` type (aliases: `<fn>`, `<callback>`) stores references to functions with arbitrary signatures:
@@ -518,7 +518,7 @@ A `<multype>` function can return a list or tuple with elements of different typ
 cons.out(result[1]) # ok
 ```
 
-This feature uses tagged values on native i686 and the C++ backend. Use `--cpp` for ARM64, cross-target builds, and libraries on 64-bit targets. A plain x86-64 executable build for the compiler's host OS selects C++ automatically if it encounters a `<multype>` return.
+Native x86-64, ARM64, and i686 preserve element types when building, returning, and indexing `<multype>` values. On x86-64 and ARM64, declare stored collections as `<multype>` before returning or passing them as mixed values. A literal in a `<multype>` declaration, argument, or return gets its tags automatically. Use a type annotation or explicit cast when doing arithmetic with an indexed element. Native x86-64 and ARM64 support rebinding the collection variable, while indexed mutation and list mutation methods on `<multype>` currently require native i686 or the C++ backend.
 
 ### Default Arguments
 Trailing parameters can specify default values:

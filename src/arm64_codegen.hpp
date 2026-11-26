@@ -32,7 +32,7 @@ public:
     };
 
     static bool isCollectionType(ThavaType t) {
-        return t == ThavaType::LIST || t == ThavaType::TUPLE || t == ThavaType::DICT;
+        return t == ThavaType::LIST || t == ThavaType::TUPLE || t == ThavaType::DICT || t == ThavaType::MULTYPE;
     }
 
     struct FuncInfo {
@@ -397,6 +397,9 @@ public:
     std::string currentClassName;
     std::string currentBaseClassName;
     size_t lblThrow = 0;
+    size_t lblBoxedToString = 0;
+    size_t lblMultypeToString = 0;
+    bool usesMultypeFormatting = false;
 
     size_t findMethodLabel(const std::string& cls, const std::string& method, ThavaType* outRet) {
         std::string c = cls;
@@ -604,8 +607,8 @@ public:
         const uint32_t frame = outgoing + alignedStackBytes(count);
         if (frame) enc.sub_rri(SP, SP, frame);
         for (size_t i = 0; i < count; ++i) {
-            const auto actual = compileExpression(args[i].get());
             const auto formal = parameterType(i);
+            const auto actual = compileExpression(args[i].get(), formal);
             if ((formal == ThavaType::DOUBLE || formal == ThavaType::FLOAT) && actual == ThavaType::INT)
                 intToDoubleBits();
             else if (formal == ThavaType::INT && (actual == ThavaType::DOUBLE || actual == ThavaType::FLOAT))
@@ -661,7 +664,8 @@ public:
         }
 
         for (size_t i = 0; i < n; ++i) {
-            compileExpression(args[i].get());
+            const auto expected = formal && i < formal->size() ? (*formal)[i].first : ThavaType::UNKNOWN;
+            compileExpression(args[i].get(), expected);
             enc.str_imm(arm64::X0, arm64::SP, (int32_t)(16 * (n - 1 - i)));
         }
 
@@ -803,7 +807,11 @@ public:
 
     void emitInterpolationPart(ASTNode* part) {
         const auto type = compileExpression(part);
-        if (type == ThavaType::NONE) {
+        if (type == ThavaType::BOXED) {
+            emitBoxedString();
+        } else if (type == ThavaType::MULTYPE) {
+            emitMultypeString();
+        } else if (type == ThavaType::NONE) {
             enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("none"));
         } else if (type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
                    type == ThavaType::BOOL || type == ThavaType::STRING) {
@@ -814,7 +822,230 @@ public:
         }
     }
 
-    ThavaType compileExpression(ASTNode* node) {
+    void emitBoxedString() {
+        usesMultypeFormatting = true;
+        enc.bl(lblBoxedToString);
+    }
+
+    void emitMultypeString() {
+        usesMultypeFormatting = true;
+        enc.bl(lblMultypeToString);
+    }
+
+    void emitMultypeHelpers() {
+        if (!usesMultypeFormatting) return;
+        using namespace arm64;
+        using namespace native_multype;
+        const auto done = enc.createLabel();
+        const auto text = enc.createLabel();
+        const auto whole = enc.createLabel();
+        const auto real = enc.createLabel();
+        const auto boolean = enc.createLabel();
+        const auto sequence = enc.createLabel();
+        const auto dictionary = enc.createLabel();
+        const auto function = enc.createLabel();
+        const auto object = enc.createLabel();
+        auto literal = [&](const char* value) { enc.adr_data(X0, emitter.addStringLiteralOffset(value)); };
+
+        enc.bindLabel(lblBoxedToString);
+        enc.stp_pre(FP, LR, SP, -16);
+        enc.mov_rr(FP, SP);
+        enc.ldr_imm(X10, X0, tagOffset);
+        for (const auto& [tag, label] : {
+                 std::pair<Tag, size_t>{String, text}, {Integer, whole}, {Real, real},
+                 {Boolean, boolean}, {Sequence, sequence}, {Dictionary, dictionary},
+                 {Function, function}, {Object, object}}) {
+            enc.cmp_ri(X10, tag);
+            enc.b_cond(EQ, label);
+        }
+        literal("none");
+        enc.b(done);
+        enc.bindLabel(dictionary);
+        literal("<dict>");
+        enc.b(done);
+        enc.bindLabel(function);
+        literal("<func>");
+        enc.b(done);
+        enc.bindLabel(object);
+        literal("<object>");
+        enc.b(done);
+        enc.bindLabel(text);
+        enc.ldr_imm(X0, X0, 0);
+        enc.b(done);
+        enc.bindLabel(whole);
+        enc.ldr_imm(X0, X0, 0);
+        emitStringCast(ThavaType::INT);
+        enc.b(done);
+        enc.bindLabel(real);
+        const auto finite = enc.createLabel();
+        const auto infinity = enc.createLabel();
+        const auto negativeInfinity = enc.createLabel();
+        enc.ldr_imm(X0, X0, 0);
+        enc.mov_ri64(X10, 0x7FFFFFFFFFFFFFFFLL);
+        enc.and_rrr(X10, X0, X10);
+        enc.mov_ri64(X11, 0x7FF0000000000000LL);
+        enc.cmp_rr(X10, X11);
+        enc.b_cond(CC, finite);
+        enc.b_cond(EQ, infinity);
+        literal("nan");
+        enc.b(done);
+        enc.bindLabel(infinity);
+        enc.cmp_ri(X0, 0);
+        enc.b_cond(LT, negativeInfinity);
+        literal("inf");
+        enc.b(done);
+        enc.bindLabel(negativeInfinity);
+        literal("-inf");
+        enc.b(done);
+        enc.bindLabel(finite);
+        emitStringCast(ThavaType::DOUBLE);
+        enc.b(done);
+        enc.bindLabel(boolean);
+        enc.ldr_imm(X0, X0, 0);
+        emitStringCast(ThavaType::BOOL);
+        enc.b(done);
+        enc.bindLabel(sequence);
+        enc.ldr_imm(X0, X0, 0);
+        enc.bl(lblMultypeToString);
+        enc.bindLabel(done);
+        enc.ldp_post(FP, LR, SP, 16);
+        enc.ret();
+
+        enc.bindLabel(lblMultypeToString);
+        enc.stp_pre(FP, LR, SP, -48);
+        enc.mov_rr(FP, SP);
+        enc.str_imm(X0, FP, 16); // source
+        const auto loop = enc.createLabel();
+        const auto append = enc.createLabel();
+        const auto close = enc.createLabel();
+        const auto empty = enc.createLabel();
+        const auto finish = enc.createLabel();
+        enc.cbz(X0, empty);
+        enc.str_imm(XZR, FP, 24); // index
+        literal("[");
+        enc.str_imm(X0, FP, 32); // output
+        enc.bindLabel(loop);
+        enc.ldr_imm(X10, FP, 16);
+        enc.ldr_imm(X11, X10, 0);
+        enc.ldr_imm(X0, FP, 24);
+        enc.cmp_rr(X0, X11);
+        enc.b_cond(GE, close);
+        enc.cbz(X0, append);
+        enc.ldr_imm(X0, FP, 32);
+        enc.adr_data(X1, emitter.addStringLiteralOffset(", "));
+        enc.bl(runtime.lblStrConcat);
+        enc.str_imm(X0, FP, 32);
+        enc.bindLabel(append);
+        enc.ldr_imm(X0, FP, 24);
+        enc.movz(X11, entrySize, 0);
+        enc.mul_rrr(X0, X0, X11);
+        enc.ldr_imm(X10, FP, 16);
+        enc.add_rrr(X0, X0, X10);
+        enc.add_rri(X0, X0, countSize);
+        enc.bl(lblBoxedToString);
+        enc.mov_rr(X1, X0);
+        enc.ldr_imm(X0, FP, 32);
+        enc.bl(runtime.lblStrConcat);
+        enc.str_imm(X0, FP, 32);
+        enc.ldr_imm(X0, FP, 24);
+        enc.add_rri(X0, X0, 1);
+        enc.str_imm(X0, FP, 24);
+        enc.b(loop);
+        enc.bindLabel(close);
+        enc.ldr_imm(X0, FP, 32);
+        enc.adr_data(X1, emitter.addStringLiteralOffset("]"));
+        enc.bl(runtime.lblStrConcat);
+        enc.b(finish);
+        enc.bindLabel(empty);
+        literal("[]");
+        enc.bindLabel(finish);
+        enc.ldp_post(FP, LR, SP, 48);
+        enc.ret();
+    }
+
+    [[noreturn]] static void rejectMixedOperand() {
+        std::cerr << "[ARM64 Codegen Error]: Cast a <multype> element before using it in this operation.\n";
+        exit(1);
+    }
+
+    ThavaType emitUnbox(ThavaType expected) {
+        using namespace arm64;
+        using namespace native_multype;
+        if (expected == ThavaType::STRING) {
+            emitBoxedString();
+            return expected;
+        }
+        const auto payload = enc.createLabel();
+        const auto failure = enc.createLabel();
+        const auto done = enc.createLabel();
+        enc.ldr_imm(X10, X0, tagOffset);
+        enc.cmp_ri(X10, tagFor(expected));
+        enc.b_cond(EQ, payload);
+        if (expected == ThavaType::FLOAT || expected == ThavaType::DOUBLE || expected == ThavaType::INT) {
+            enc.cmp_ri(X10, expected == ThavaType::INT ? Real : Integer);
+            enc.b_cond(NE, failure);
+            enc.ldr_imm(X0, X0, 0);
+            if (expected == ThavaType::INT) doubleBitsToInt();
+            else intToDoubleBits();
+            enc.b(done);
+        } else {
+            enc.b(failure);
+        }
+        enc.bindLabel(failure);
+        emitThrowCall(nullptr, nullptr, "Incompatible <multype> element type");
+        enc.bindLabel(payload);
+        enc.ldr_imm(X0, X0, 0);
+        enc.bindLabel(done);
+        return expected;
+    }
+
+    ThavaType emitMultypeLiteral(CollectionNode& collection) {
+        using namespace arm64;
+        using namespace native_multype;
+        const auto& elements = collection.getElements();
+        enc.mov_ri64(X0, countSize + elements.size() * entrySize);
+        enc.bl(runtime.lblMalloc);
+        enc.sub_rri(SP, SP, 16);
+        enc.str_imm(X0, SP, 0);
+        enc.mov_ri64(X10, elements.size());
+        enc.str_imm(X10, X0, 0);
+        for (size_t i = 0; i < elements.size(); ++i) {
+            const auto type = compileExpression(elements[i].get(),
+                dynamic_cast<CollectionNode*>(elements[i].get()) ? ThavaType::MULTYPE : ThavaType::UNKNOWN);
+            const auto offset = static_cast<int32_t>(countSize + i * entrySize);
+            enc.ldr_imm(X11, SP, 0);
+            if (type == ThavaType::BOXED) {
+                enc.ldr_imm(X10, X0, 0);
+                enc.str_imm(X10, X11, offset);
+                enc.ldr_imm(X10, X0, tagOffset);
+            } else {
+                if (type == ThavaType::UNKNOWN || type == ThavaType::VOID ||
+                    type == ThavaType::LIST || type == ThavaType::TUPLE) {
+                    std::cerr << "[ARM64 Codegen Error]: Use a <multype> value or literal for a nested collection.\n";
+                    exit(1);
+                }
+                enc.str_imm(X0, X11, offset);
+                enc.movz(X10, tagFor(type), 0);
+            }
+            enc.str_imm(X10, X11, offset + tagOffset);
+        }
+        enc.ldr_imm(X0, SP, 0);
+        enc.add_rri(SP, SP, 16);
+        return ThavaType::MULTYPE;
+    }
+
+    ThavaType compileExpression(ASTNode* node, ThavaType expected = ThavaType::UNKNOWN) {
+        const auto actual = compileExpressionRaw(node, expected);
+        if (actual == ThavaType::BOXED && expected != ThavaType::UNKNOWN) return emitUnbox(expected);
+        if ((expected == ThavaType::MULTYPE && actual != ThavaType::MULTYPE) ||
+            (actual == ThavaType::MULTYPE && (expected == ThavaType::LIST || expected == ThavaType::TUPLE))) {
+            std::cerr << "[ARM64 Codegen Error]: Keep mixed collections declared as <multype>.\n";
+            exit(1);
+        }
+        return actual;
+    }
+
+    ThavaType compileExpressionRaw(ASTNode* node, ThavaType expected) {
         if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
             emitInterpolationPart(interpolation->parts.front().get());
             if (interpolation->parts.size() == 1) return ThavaType::STRING;
@@ -897,6 +1128,7 @@ public:
         if (auto bin = dynamic_cast<BinaryOpNode*>(node)) {
             // Evaluate left -> X0
             ThavaType lt = compileExpression(bin->left.get());
+            if (lt == ThavaType::BOXED || lt == ThavaType::MULTYPE) rejectMixedOperand();
 
             // Save X0 on temporary stack slot (below SP)
             enc.str_imm(arm64::X0, arm64::SP, -16);
@@ -904,6 +1136,7 @@ public:
 
             // Evaluate right -> X0
             ThavaType rt = compileExpression(bin->right.get());
+            if (rt == ThavaType::BOXED || rt == ThavaType::MULTYPE) rejectMixedOperand();
 
             // Restore left -> X1
             enc.ldr_imm(arm64::X1, arm64::SP, 0);
@@ -1127,10 +1360,10 @@ public:
             bool anyDouble = (tType == ThavaType::DOUBLE || tType == ThavaType::FLOAT ||
                               fType == ThavaType::DOUBLE || fType == ThavaType::FLOAT);
 
-            compileExpression(cond->condition.get());
+            compileExpression(cond->condition.get(), ThavaType::BOOL);
             enc.cbz(arm64::X0, elseLbl);
 
-            ThavaType t = compileExpression(cond->trueExpr.get());
+            ThavaType t = compileExpression(cond->trueExpr.get(), expected);
             if (anyDouble && t == ThavaType::INT) {
                 intToDoubleBits();
                 t = ThavaType::DOUBLE;
@@ -1138,7 +1371,7 @@ public:
             enc.b(endLbl);
 
             enc.bindLabel(elseLbl);
-            ThavaType f = compileExpression(cond->falseExpr.get());
+            ThavaType f = compileExpression(cond->falseExpr.get(), expected);
             if (anyDouble && f == ThavaType::INT) {
                 intToDoubleBits();
                 f = ThavaType::DOUBLE;
@@ -1261,7 +1494,18 @@ public:
 
         // 8. CastNode (<int>(x), <str>(x), etc.)
         if (auto c = dynamic_cast<CastNode*>(node)) {
+            if (c->targetType == ThavaType::MULTYPE)
+                return compileExpression(c->expr.get(), ThavaType::MULTYPE);
             ThavaType srcT = compileExpression(c->expr.get());
+            if (c->targetType == ThavaType::STRING && srcT == ThavaType::MULTYPE) {
+                emitMultypeString();
+                return ThavaType::STRING;
+            }
+            if (srcT == ThavaType::BOXED) {
+                auto type = emitUnbox(c->targetType);
+                if (type == ThavaType::INT) narrowIntX0(c->customTarget);
+                return type;
+            }
             ThavaType dstT = c->targetType;
 
             if ((dstT == ThavaType::DOUBLE || dstT == ThavaType::FLOAT) &&
@@ -1301,6 +1545,7 @@ public:
 
         // 9. CollectionNode (list/tuple literal: [a, b, c])
         if (auto coll = dynamic_cast<CollectionNode*>(node)) {
+            if (expected == ThavaType::MULTYPE) return emitMultypeLiteral(*coll);
             size_t n = coll->getElements().size();
 
             // malloc((n + 1) * 8) -> X0
@@ -1358,7 +1603,39 @@ public:
 
         // 10. IndexNode (list[i])
         if (auto idxn = dynamic_cast<IndexNode*>(node)) {
+            using namespace arm64;
+            using namespace native_multype;
             ThavaType baseT = compileExpression(idxn->base.get());
+            if (baseT == ThavaType::BOXED) baseT = emitUnbox(ThavaType::MULTYPE);
+            if (baseT == ThavaType::MULTYPE) {
+                enc.sub_rri(SP, SP, 16);
+                enc.str_imm(X0, SP, 0);
+                if (compileExpression(idxn->indexExpr.get(), ThavaType::INT) != ThavaType::INT) {
+                    std::cerr << "[ARM64 Codegen Error]: A <multype> index must be an integer.\n";
+                    exit(1);
+                }
+                enc.ldr_imm(X10, SP, 0);
+                enc.add_rri(SP, SP, 16);
+                const auto valid = enc.createLabel();
+                const auto nonnegative = enc.createLabel();
+                const auto outOfRange = enc.createLabel();
+                enc.cbz(X10, outOfRange);
+                enc.ldr_imm(X11, X10, 0);
+                enc.cmp_ri(X0, 0);
+                enc.b_cond(GE, nonnegative);
+                enc.add_rrr(X0, X0, X11);
+                enc.bindLabel(nonnegative);
+                enc.cmp_rr(X0, X11);
+                enc.b_cond(CC, valid);
+                enc.bindLabel(outOfRange);
+                emitThrowCall(nullptr, nullptr, "<multype> index out of range");
+                enc.bindLabel(valid);
+                enc.movz(X11, entrySize, 0);
+                enc.mul_rrr(X0, X0, X11);
+                enc.add_rrr(X0, X0, X10);
+                enc.add_rri(X0, X0, countSize);
+                return ThavaType::BOXED;
+            }
             if (baseT == ThavaType::STRING) {
                 // s[i] -> 1-character string (x86 passes 1-based i+1 .. i+1)
                 enc.sub_rri(arm64::SP, arm64::SP, 16);
@@ -1420,11 +1697,19 @@ public:
         // 11. LenNode (len(list) / len(str) / s.len())
         if (auto lenN = dynamic_cast<LenNode*>(node)) {
             ThavaType at = compileExpression(lenN->arg.get());
+            if (at == ThavaType::BOXED) at = emitUnbox(ThavaType::MULTYPE);
             if (at == ThavaType::STRING) {
                 enc.bl(runtime.lblStrLen);
                 return ThavaType::INT;
             }
-            if (at == ThavaType::LIST || at == ThavaType::TUPLE || at == ThavaType::DICT) {
+            if (at == ThavaType::MULTYPE) {
+                const auto zero = enc.createLabel();
+                enc.cbz(arm64::X0, zero);
+                enc.ldr_imm(arm64::X0, arm64::X0, 0);
+                enc.bindLabel(zero);
+                return ThavaType::INT;
+            }
+            if (isCollectionType(at)) {
                 enc.ldr_imm(arm64::X0, arm64::X0, 0); // count at offset 0
                 return ThavaType::INT;
             }
@@ -1433,6 +1718,12 @@ public:
 
         // 12. ListMethodNode (list.len(), list.addval(x))
         if (auto lm = dynamic_cast<ListMethodNode*>(node)) {
+            const auto* local = lookupVar(lm->varName);
+            const auto type = local ? local->type : globalEnv->get(lm->varName);
+            if (type == ThavaType::MULTYPE && lm->method != "len" && lm->method != "size") {
+                std::cerr << "[ARM64 Codegen Error]: List mutation is not supported for <multype>.\n";
+                exit(1);
+            }
             if (!lookupVar(lm->varName) && isGlobalName(lm->varName) &&
                 (lm->method != "addval" || lm->args.size() != 1)) {
                 std::cerr << "[Codegen Error]: Unsupported native global list operation: " << lm->method << "\n";
@@ -2819,7 +3110,11 @@ public:
     // Print a literal piece of text (no newline)
     // ==========================================
     void emitPrintValueRaw(ThavaType t) {
-        if (t == ThavaType::STRING) {
+        if (t == ThavaType::BOXED || t == ThavaType::MULTYPE) {
+            if (t == ThavaType::BOXED) emitBoxedString();
+            else emitMultypeString();
+            enc.bl(runtime.lblPrintStr);
+        } else if (t == ThavaType::STRING) {
             enc.bl(runtime.lblPrintStr);
         } else if (t == ThavaType::NONE) {
             enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("none"));
@@ -3181,7 +3476,7 @@ public:
             ThavaType dt = vdecl->varType;
             ThavaType t = dt;
             if (vdecl->initExpr) {
-                t = compileExpression(vdecl->initExpr.get());
+                t = compileExpression(vdecl->initExpr.get(), dt);
                 if ((dt == ThavaType::DOUBLE || dt == ThavaType::FLOAT) && t == ThavaType::INT) {
                     intToDoubleBits();
                     t = ThavaType::DOUBLE;
@@ -3228,7 +3523,7 @@ public:
             VarInfo* v = lookupVar(assign->name);
             if (!v && isGlobalName(assign->name)) {
                 ThavaType gt = globalEnv->get(assign->name);
-                ThavaType t = compileExpression(assign->expr.get());
+                ThavaType t = compileExpression(assign->expr.get(), gt);
                 if ((gt == ThavaType::DOUBLE || gt == ThavaType::FLOAT) && (t == ThavaType::INT || t == ThavaType::BOOL))
                     intToDoubleBits();
                 if (gt == ThavaType::INT) {
@@ -3244,7 +3539,7 @@ public:
                 std::cerr << "[ARM64 Codegen Error]: Assigning to undeclared variable '" << assign->name << "'\n";
                 return;
             }
-            ThavaType vt = compileExpression(assign->expr.get());
+            ThavaType vt = compileExpression(assign->expr.get(), v->type);
             if (dynamic_cast<CollectionNode*>(assign->expr.get())) {
                 listElemTypes[assign->name] = lastCollectionElemType;
             } else if (dynamic_cast<FileMethodNode*>(assign->expr.get()) || isListDir(assign->expr.get())) {
@@ -3343,6 +3638,10 @@ public:
                 std::cerr << "[ARM64 Codegen Error]: Assigning to undeclared list '"
                           << ia->varName << "'\n";
                 return;
+            }
+            if ((vi ? vi->type : globalEnv->get(ia->varName)) == ThavaType::MULTYPE) {
+                std::cerr << "[ARM64 Codegen Error]: Indexed mutation of <multype> is not supported.\n";
+                exit(1);
             }
             if ((vi ? vi->type : globalEnv->get(ia->varName)) == ThavaType::DICT) {
                 ThavaType kt = compileExpression(ia->indexExpr.get());
@@ -3494,7 +3793,11 @@ public:
             }
 
             ThavaType t = compileExpression(cout->getExpr());
-            if (t == ThavaType::STRING) {
+            if (t == ThavaType::BOXED || t == ThavaType::MULTYPE) {
+                if (t == ThavaType::BOXED) emitBoxedString();
+                else emitMultypeString();
+                enc.bl(runtime.lblPrintStrNL);
+            } else if (t == ThavaType::STRING) {
                 enc.bl(runtime.lblPrintStrNL);
             } else if (t == ThavaType::BOOL) {
                 enc.bl(runtime.lblPrintBoolNL);
@@ -3537,7 +3840,7 @@ public:
             size_t elseLbl = enc.createLabel();
             size_t endLbl  = enc.createLabel();
 
-            compileExpression(ifn->cond.get());
+            compileExpression(ifn->cond.get(), ThavaType::BOOL);
             enc.cbz(arm64::X0, elseLbl);
 
             compileStatement(ifn->thenBranch.get());
@@ -3561,7 +3864,7 @@ public:
             continueLabels.push_back(loopLbl);
 
             enc.bindLabel(loopLbl);
-            compileExpression(wh->cond.get());
+            compileExpression(wh->cond.get(), ThavaType::BOOL);
             enc.cbz(arm64::X0, breakLbl);
 
             compileStatement(wh->body.get());
@@ -3639,7 +3942,7 @@ public:
 
             enc.bindLabel(startLbl);
             if (forNode->cond) {
-                compileExpression(forNode->cond.get());
+                compileExpression(forNode->cond.get(), ThavaType::BOOL);
                 enc.cbz(arm64::X0, endLbl);
             }
 
@@ -3793,7 +4096,7 @@ public:
         // 9. ReturnNode (return expr)
         if (auto ret = dynamic_cast<ReturnNode*>(node)) {
             if (ret->expr) {
-                ThavaType rt = compileExpression(ret->expr.get());
+                ThavaType rt = compileExpression(ret->expr.get(), currentFuncRetType);
                 if ((currentFuncRetType == ThavaType::DOUBLE || currentFuncRetType == ThavaType::FLOAT) &&
                     rt == ThavaType::INT) {
                     intToDoubleBits();
@@ -4132,6 +4435,9 @@ public:
         // and it sets up (and tears down) the module frame itself.
         if (g_isLibraryMode) libInitLabel = entryLabel;
 
+        lblBoxedToString = enc.createLabel();
+        lblMultypeToString = enc.createLabel();
+
         // 1.1. Exception runtime helper (must exist before any body is emitted)
         emitThrowHelper();
 
@@ -4338,6 +4644,7 @@ public:
             if (peLibrary) enc.add_rrr(arm64::X0, arm64::X9, arm64::X0);
             enc.ret();
         }
+        emitMultypeHelpers();
         runtime.emitHelpers();
         if constexpr (peTarget) emitPELibraryThunks();
 

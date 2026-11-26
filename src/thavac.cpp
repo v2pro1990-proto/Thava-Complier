@@ -75,7 +75,32 @@ inline bool detectCNameVariable(const std::vector<Token>& toks) {
 // ==========================================
 // 1.5. TYPE SYSTEM & DYNAMIC LIBRARIES (Thava Types & Dynamic Libraries)
 // ==========================================
-enum class ThavaType { INT, FLOAT, DOUBLE, BOOL, STRING, LIST, TUPLE, MULTYPE, DICT, VOID, FUNC, FILE, CUSTOM, NONE, UNKNOWN };
+enum class ThavaType { INT, FLOAT, DOUBLE, BOOL, STRING, LIST, TUPLE, MULTYPE, DICT, VOID, FUNC, FILE, CUSTOM, NONE, UNKNOWN, BOXED };
+// Native x86-64/ARM64 <multype> ABI. The count is followed by 16-byte
+// entries containing a 64-bit payload and a 64-bit tag.
+namespace native_multype {
+constexpr int countSize = 8;
+constexpr int entrySize = 16;
+constexpr int tagOffset = 8;
+
+enum Tag { None, Integer, Real, Boolean, String, Sequence, Dictionary, Function, Object };
+
+inline Tag tagFor(ThavaType type) {
+    switch (type) {
+        case ThavaType::INT: return Integer;
+        case ThavaType::FLOAT:
+        case ThavaType::DOUBLE: return Real;
+        case ThavaType::BOOL: return Boolean;
+        case ThavaType::STRING: return String;
+        case ThavaType::MULTYPE: return Sequence;
+        case ThavaType::DICT: return Dictionary;
+        case ThavaType::FUNC: return Function;
+        case ThavaType::CUSTOM: return Object;
+        default: return None;
+    }
+}
+}
+
 
 inline std::string typeToString(ThavaType type) {
     switch (type) {
@@ -139,7 +164,6 @@ inline std::unordered_map<std::string, StructInfo> g_structs;
 // (classes, try/except) so that backend can fail loudly instead of
 // silently generating a program that ignores them.
 inline bool g_usesNativeUnsupportedFeature = false;
-inline bool g_hasMultypeReturn = false;
 
 inline std::string cppIntName(const std::string& width) {
     if (width == "int64") return "long long";
@@ -6223,7 +6247,6 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         checkTypes(whileNode->body.get(), env, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
     }
     else if (auto funcDecl = dynamic_cast<FunctionDeclNode*>(node)) {
-        if (funcDecl->returnType == ThavaType::MULTYPE) g_hasMultypeReturn = true;
         // A function sees its own parameters/locals plus the program's globals.
         auto funcEnv = std::make_shared<Environment>(g_programEnv);
         funcEnv->functionName = funcDecl->name;
@@ -6487,7 +6510,6 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
 
         for (const auto& m : clsDecl->methods) {
-            if (m.returnType == ThavaType::MULTYPE) g_hasMultypeReturn = true;
             auto methodEnv = std::make_shared<Environment>(classEnv);
             methodEnv->functionName = m.name;
             auto meit = g_funcListParamElem.find(clsDecl->className + "::" + m.name);
@@ -6880,20 +6902,6 @@ int main(int argc, char* argv[]) {
         if (before == g_funcListParamElem) break;
     }
 
-    if (g_hasMultypeReturn && !isI686Mode && !useCppBackend) {
-#ifdef _WIN32
-        const bool hostOS = !isElfMode;
-#else
-        const bool hostOS = isElfMode;
-#endif
-        if (explicitNative || isArm64Mode || !hostOS || g_isLibraryMode) {
-            std::cerr << "[Thava Compiler Error]: <multype> returns require --cpp on x86-64 and ARM64.\n";
-            return 1;
-        }
-        std::cout << "[Thava Compiler] Using the C++ backend for <multype> returns.\n";
-        useCppBackend = true;
-    }
-
     // 3.5. Optimization Pipeline (AST transformations for -O1, -O2, -O3)
     if (g_optLevel > 0) {
         std::cout << "[Thava Optimizer] Activating optimization level: -O" << g_optLevel;
@@ -7231,7 +7239,6 @@ int main(int argc, char* argv[]) {
               << "    operator bool() const { return false; }\n"
               << "    operator std::string() const { return \"\"; }\n"
               << "    operator std::vector<ThavaValue>() const { return {}; }\n"
-              << "    operator ThavaValue() const { return ThavaValue(); }\n"
               << "    operator ThavaDict() const;\n"
               << "    template<typename T> operator T*() const { return nullptr; }\n"
               << "};\n"

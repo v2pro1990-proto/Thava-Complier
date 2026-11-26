@@ -37,7 +37,7 @@ public:
     };
 
     static bool isCollectionType(ThavaType t) {
-        return t == ThavaType::LIST || t == ThavaType::TUPLE || t == ThavaType::DICT;
+        return t == ThavaType::LIST || t == ThavaType::TUPLE || t == ThavaType::DICT || t == ThavaType::MULTYPE;
     }
 
     struct FuncInfo {
@@ -103,6 +103,9 @@ public:
     size_t lblFileReadLine = 0;
     size_t lblFileReadLines = 0;
     size_t lblThrow = 0;
+    size_t lblBoxedToString = 0;
+    size_t lblMultypeToString = 0;
+    bool usesMultypeFormatting = false;
 
     std::map<std::string, ThavaType> listElemTypes;
     ThavaType lastCollectionElemType = ThavaType::UNKNOWN;
@@ -2323,7 +2326,7 @@ public:
         }
         if (srcType == ThavaType::FLOAT || srcType == ThavaType::DOUBLE) {
             enc.movsd_mr_rbp(valSlot, x86::XMM0);
-            enc.mov_ri64(x86::RCX, 64);
+            enc.mov_ri64(x86::RCX, 384);
             enc.call_iat_func("malloc");
             enc.mov_mr_rbp(bufSlot, x86::RAX);
 
@@ -2361,7 +2364,11 @@ public:
 
     void emitInterpolationPart(ASTNode* part) {
         const auto type = emitExpr(part);
-        if (type == ThavaType::CUSTOM) {
+        if (type == ThavaType::BOXED) {
+            emitBoxedString();
+        } else if (type == ThavaType::MULTYPE) {
+            emitMultypeString();
+        } else if (type == ThavaType::CUSTOM) {
             enc.lea_rip_rdata(x86::RAX, pe.addStringLiteralOffset("<struct object>"));
         } else if (type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
                    type == ThavaType::BOOL || type == ThavaType::STRING || type == ThavaType::NONE) {
@@ -2374,7 +2381,261 @@ public:
         }
     }
 
-    ThavaType emitExpr(ASTNode* node) {
+    void emitMultypeError(const char* message) {
+        emitThrowCall(nullptr, nullptr, message);
+    }
+
+    void emitBoxedString() {
+        usesMultypeFormatting = true;
+        enc.call_label(lblBoxedToString);
+    }
+
+    void emitMultypeString() {
+        usesMultypeFormatting = true;
+        enc.call_label(lblMultypeToString);
+    }
+
+    void emitMultypeHelpers() {
+        if (!usesMultypeFormatting) return;
+        using namespace x86;
+        using namespace native_multype;
+        const auto savedOffset = currentFrameOffset;
+        const auto savedMax = maxFrameOffset;
+        const auto done = enc.createLabel();
+        const auto text = enc.createLabel();
+        const auto whole = enc.createLabel();
+        const auto real = enc.createLabel();
+        const auto boolean = enc.createLabel();
+        const auto sequence = enc.createLabel();
+        const auto dictionary = enc.createLabel();
+        const auto function = enc.createLabel();
+        const auto object = enc.createLabel();
+
+        enc.bindLabel(lblBoxedToString);
+        enc.push(RBP);
+        enc.mov_rr(RBP, RSP);
+        enc.sub_rsp(96);
+        enc.mov_mr_rbp(-8, RDI);
+        currentFrameOffset = -32;
+        maxFrameOffset = -32;
+        enc.mov_rm(R10, RAX, tagOffset);
+        for (const auto& [tag, label] : {
+                 std::pair<Tag, size_t>{String, text}, {Integer, whole}, {Real, real},
+                 {Boolean, boolean}, {Sequence, sequence}, {Dictionary, dictionary},
+                 {Function, function}, {Object, object}}) {
+            enc.cmp_ri32(R10, tag);
+            enc.je(label);
+        }
+        auto literal = [&](const char* value) { enc.lea_rip_rdata(RAX, pe.addStringLiteralOffset(value)); };
+        literal("none");
+        enc.jmp(done);
+        enc.bindLabel(dictionary);
+        literal("<dict>");
+        enc.jmp(done);
+        enc.bindLabel(function);
+        literal("<func>");
+        enc.jmp(done);
+        enc.bindLabel(object);
+        literal("<object>");
+        enc.jmp(done);
+        enc.bindLabel(text);
+        enc.mov_rm(RAX, RAX, 0);
+        enc.jmp(done);
+        enc.bindLabel(whole);
+        enc.mov_rm(RAX, RAX, 0);
+        emitStringCast(ThavaType::INT);
+        enc.jmp(done);
+        enc.bindLabel(real);
+        const auto finite = enc.createLabel();
+        const auto infinity = enc.createLabel();
+        const auto positiveInfinity = enc.createLabel();
+        enc.mov_rm(R10, RAX, 0);
+        enc.mov_rr(R11, R10);
+        enc.mov_ri64(RDX, 0x7FFFFFFFFFFFFFFFLL);
+        enc.and_rr(R11, RDX);
+        enc.mov_ri64(RDX, 0x7FF0000000000000LL);
+        enc.cmp_rr(R11, RDX);
+        enc.jcc(Cond::B, finite);
+        enc.je(infinity);
+        literal("nan");
+        enc.jmp(done);
+        enc.bindLabel(infinity);
+        enc.test_rr(R10, R10);
+        enc.jns(positiveInfinity);
+        literal("-inf");
+        enc.jmp(done);
+        enc.bindLabel(positiveInfinity);
+        literal("inf");
+        enc.jmp(done);
+        enc.bindLabel(finite);
+        enc.movsd_rm(XMM0, RAX, 0);
+        emitStringCast(ThavaType::DOUBLE);
+        enc.jmp(done);
+        enc.bindLabel(boolean);
+        enc.mov_rm(RAX, RAX, 0);
+        emitStringCast(ThavaType::BOOL);
+        enc.jmp(done);
+        enc.bindLabel(sequence);
+        enc.mov_rm(RAX, RAX, 0);
+        enc.call_label(lblMultypeToString);
+        enc.bindLabel(done);
+        enc.mov_rm_rbp(RDI, -8);
+        enc.add_rsp(96);
+        enc.pop(RBP);
+        enc.ret();
+
+        // Locals survive calls to the scalar formatters and nested sequences.
+        enc.bindLabel(lblMultypeToString);
+        enc.push(RBP);
+        enc.mov_rr(RBP, RSP);
+        enc.sub_rsp(80);
+        enc.mov_mr_rbp(-8, RAX); // source
+        const auto loop = enc.createLabel();
+        const auto append = enc.createLabel();
+        const auto close = enc.createLabel();
+        const auto empty = enc.createLabel();
+        const auto finish = enc.createLabel();
+        enc.test_rr(RAX, RAX);
+        enc.je(empty);
+        enc.xor_r32(R10, R10);
+        enc.mov_mr_rbp(-16, R10); // index
+        literal("[");
+        enc.mov_mr_rbp(-24, RAX); // output
+        enc.bindLabel(loop);
+        enc.mov_rm_rbp(R10, -8);
+        enc.mov_rm(R11, R10, 0);
+        enc.mov_rm_rbp(RAX, -16);
+        enc.cmp_rr(RAX, R11);
+        enc.jge(close);
+        enc.test_rr(RAX, RAX);
+        enc.je(append);
+        enc.mov_rm_rbp(RCX, -24);
+        enc.lea_rip_rdata(RDX, offListComma);
+        enc.call_label(lblStrConcat);
+        enc.mov_mr_rbp(-24, RAX);
+        enc.bindLabel(append);
+        enc.mov_rm_rbp(RAX, -16);
+        enc.mov_ri64(R11, entrySize);
+        enc.imul_rr(RAX, R11);
+        enc.mov_rm_rbp(R10, -8);
+        enc.add_rr(RAX, R10);
+        enc.add_ri32(RAX, countSize);
+        enc.call_label(lblBoxedToString);
+        enc.mov_rr(RDX, RAX);
+        enc.mov_rm_rbp(RCX, -24);
+        enc.call_label(lblStrConcat);
+        enc.mov_mr_rbp(-24, RAX);
+        enc.mov_rm_rbp(RAX, -16);
+        enc.inc_r(RAX);
+        enc.mov_mr_rbp(-16, RAX);
+        enc.jmp(loop);
+        enc.bindLabel(close);
+        enc.mov_rm_rbp(RCX, -24);
+        enc.lea_rip_rdata(RDX, pe.addStringLiteralOffset("]"));
+        enc.call_label(lblStrConcat);
+        enc.jmp(finish);
+        enc.bindLabel(empty);
+        literal("[]");
+        enc.bindLabel(finish);
+        enc.add_rsp(80);
+        enc.pop(RBP);
+        enc.ret();
+        currentFrameOffset = savedOffset;
+        maxFrameOffset = savedMax;
+    }
+
+    [[noreturn]] static void rejectMixedOperand() {
+        std::cerr << "[Native Codegen Error]: Cast a <multype> element before using it in this operation.\n";
+        exit(1);
+    }
+
+    ThavaType emitUnbox(ThavaType expected) {
+        using namespace x86;
+        using namespace native_multype;
+        if (expected == ThavaType::STRING) {
+            emitBoxedString();
+            return expected;
+        }
+        const auto payload = enc.createLabel();
+        const auto failure = enc.createLabel();
+        const auto done = enc.createLabel();
+        enc.mov_rm(R10, RAX, tagOffset);
+        enc.cmp_ri32(R10, tagFor(expected));
+        enc.je(payload);
+        if (expected == ThavaType::FLOAT || expected == ThavaType::DOUBLE || expected == ThavaType::INT) {
+            enc.cmp_ri32(R10, expected == ThavaType::INT ? Real : Integer);
+            enc.jne(failure);
+            if (expected == ThavaType::INT) {
+                enc.movsd_rm(XMM0, RAX, 0);
+                enc.cvttsd2si(RAX, XMM0);
+            } else {
+                enc.mov_rm(RAX, RAX, 0);
+                enc.cvtsi2sd(XMM0, RAX);
+            }
+            enc.jmp(done);
+        } else {
+            enc.jmp(failure);
+        }
+        enc.bindLabel(failure);
+        emitMultypeError("Incompatible <multype> element type");
+        enc.bindLabel(payload);
+        if (expected == ThavaType::FLOAT || expected == ThavaType::DOUBLE) enc.movsd_rm(XMM0, RAX, 0);
+        else enc.mov_rm(RAX, RAX, 0);
+        enc.bindLabel(done);
+        return expected;
+    }
+
+    ThavaType emitMultypeLiteral(CollectionNode& collection) {
+        using namespace x86;
+        using namespace native_multype;
+        const auto& elements = collection.getElements();
+        const auto savedOffset = currentFrameOffset;
+        currentFrameOffset -= 8;
+        const auto slot = currentFrameOffset;
+        if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+        enc.mov_ri64(RCX, countSize + elements.size() * entrySize);
+        enc.call_iat_func("malloc");
+        enc.mov_mr_rbp(slot, RAX);
+        enc.mov_ri64(R10, elements.size());
+        enc.mov_mr(RAX, 0, R10);
+        for (size_t i = 0; i < elements.size(); ++i) {
+            const auto type = emitExpr(elements[i].get(),
+                dynamic_cast<CollectionNode*>(elements[i].get()) ? ThavaType::MULTYPE : ThavaType::UNKNOWN);
+            const auto offset = static_cast<int32_t>(countSize + i * entrySize);
+            enc.mov_rm_rbp(R11, slot);
+            if (type == ThavaType::BOXED) {
+                enc.mov_rm(R10, RAX, 0);
+                enc.mov_mr(R11, offset, R10);
+                enc.mov_rm(R10, RAX, tagOffset);
+            } else {
+                if (type == ThavaType::UNKNOWN || type == ThavaType::VOID ||
+                    type == ThavaType::LIST || type == ThavaType::TUPLE) {
+                    std::cerr << "[Native Codegen Error]: Use a <multype> value or literal for a nested collection.\n";
+                    exit(1);
+                }
+                if (type == ThavaType::DOUBLE || type == ThavaType::FLOAT) enc.movsd_mr(R11, offset, XMM0);
+                else enc.mov_mr(R11, offset, RAX);
+                enc.mov_ri64(R10, tagFor(type));
+            }
+            enc.mov_mr(R11, offset + tagOffset, R10);
+        }
+        enc.mov_rm_rbp(RAX, slot);
+        currentFrameOffset = savedOffset;
+        return ThavaType::MULTYPE;
+    }
+
+    ThavaType emitExpr(ASTNode* node, ThavaType expected = ThavaType::UNKNOWN) {
+        const auto actual = emitExprRaw(node, expected);
+        if (actual == ThavaType::BOXED && expected != ThavaType::UNKNOWN) return emitUnbox(expected);
+        if ((expected == ThavaType::MULTYPE && actual != ThavaType::MULTYPE) ||
+            (actual == ThavaType::MULTYPE && (expected == ThavaType::LIST || expected == ThavaType::TUPLE))) {
+            std::cerr << "[Native Codegen Error]: Keep mixed collections declared as <multype>.\n";
+            exit(1);
+        }
+        return actual;
+    }
+
+    ThavaType emitExprRaw(ASTNode* node, ThavaType expected) {
         if (!node) return ThavaType::UNKNOWN;
 
         if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
@@ -2441,7 +2702,18 @@ public:
         }
 
         if (auto cast = dynamic_cast<CastNode*>(node)) {
+            if (cast->targetType == ThavaType::MULTYPE)
+                return emitExpr(cast->expr.get(), ThavaType::MULTYPE);
             ThavaType srcType = emitExpr(cast->expr.get());
+            if (cast->targetType == ThavaType::STRING && srcType == ThavaType::MULTYPE) {
+                emitMultypeString();
+                return ThavaType::STRING;
+            }
+            if (srcType == ThavaType::BOXED) {
+                auto type = emitUnbox(cast->targetType);
+                if (type == ThavaType::INT) narrowIntReg(x86::RAX, cast->customTarget);
+                return type;
+            }
             if (cast->targetType == srcType) return srcType;
 
             // A cast to a collection type is only a type annotation (e.g. <lst>[...]);
@@ -2566,6 +2838,7 @@ public:
         }
 
         if (auto coll = dynamic_cast<CollectionNode*>(node)) {
+            if (expected == ThavaType::MULTYPE) return emitMultypeLiteral(*coll);
             size_t n = coll->getElements().size();
             enc.mov_ri64(x86::RCX, (n + 1) * 8);
             enc.call_iat_func("malloc");
@@ -3289,18 +3562,18 @@ public:
             bool isDouble = (tType == ThavaType::DOUBLE || tType == ThavaType::FLOAT ||
                              fType == ThavaType::DOUBLE || fType == ThavaType::FLOAT);
 
-            emitExpr(condExpr->condition.get());
+            emitExpr(condExpr->condition.get(), ThavaType::BOOL);
             enc.test_rr(x86::RAX, x86::RAX);
             enc.je(falseLbl);
 
-            ThavaType tt = emitExpr(condExpr->trueExpr.get());
+            ThavaType tt = emitExpr(condExpr->trueExpr.get(), expected);
             if (isDouble && tt == ThavaType::INT) {
                 enc.cvtsi2sd(x86::XMM0, x86::RAX);
             }
             enc.jmp(endLbl);
 
             enc.bindLabel(falseLbl);
-            ThavaType ft = emitExpr(condExpr->falseExpr.get());
+            ThavaType ft = emitExpr(condExpr->falseExpr.get(), expected);
             if (isDouble && ft == ThavaType::INT) {
                 enc.cvtsi2sd(x86::XMM0, x86::RAX);
             }
@@ -3323,6 +3596,7 @@ public:
                         if (op == "+" || op == "-" || op == "*" || op == "/" || op == "//" || op == "%" ||
                             op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
                             ThavaType lt = emitExpr(bin->left.get());
+                            if (lt == ThavaType::BOXED || lt == ThavaType::MULTYPE) rejectMixedOperand();
                             if (lt == ThavaType::INT) {
                                 if (op == "+") {
                                     if (imm == 1) enc.inc_r(x86::RAX);
@@ -3394,6 +3668,7 @@ public:
                     if (viR && viR->type == ThavaType::INT) {
                         if (op == "+" || op == "-" || op == "*") {
                             ThavaType lt = emitExpr(bin->left.get());
+                            if (lt == ThavaType::BOXED || lt == ThavaType::MULTYPE) rejectMixedOperand();
                             if (lt == ThavaType::INT) {
                                 enc.mov_rm_rbp(x86::R10, viR->offset);
                                 if (op == "+") enc.add_rr(x86::RAX, x86::R10);
@@ -3412,6 +3687,7 @@ public:
                         int64_t imm = 0;
                         try { imm = std::stoll(litL->getVal()); } catch (...) {}
                         ThavaType rt = emitExpr(bin->right.get());
+                        if (rt == ThavaType::BOXED || rt == ThavaType::MULTYPE) rejectMixedOperand();
                         if (rt == ThavaType::INT) {
                             if (op == "+") {
                                 if (imm == 1) enc.inc_r(x86::RAX);
@@ -3438,6 +3714,7 @@ public:
 
             int32_t savedOffset = currentFrameOffset;
             ThavaType lt = emitExpr(bin->left.get());
+            if (lt == ThavaType::BOXED || lt == ThavaType::MULTYPE) rejectMixedOperand();
 
             currentFrameOffset -= 8;
             if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
@@ -3450,6 +3727,7 @@ public:
             }
 
             ThavaType rt = emitExpr(bin->right.get());
+            if (rt == ThavaType::BOXED || rt == ThavaType::MULTYPE) rejectMixedOperand();
 
             // String concat
             if (op == "+" && lt == ThavaType::STRING && rt == ThavaType::STRING) {
@@ -3769,8 +4047,8 @@ public:
                     const auto& dlinfo = dlit->second;
                     std::vector<int32_t> argSlots;
                     for (size_t i = 0; i < call->args.size(); ++i) {
-                        ThavaType argType = emitExpr(call->args[i].get());
                         ThavaType pt = (i < dlinfo.paramTypes.size()) ? dlinfo.paramTypes[i] : ThavaType::INT;
+                        ThavaType argType = emitExpr(call->args[i].get(), pt);
                         if ((pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) && argType == ThavaType::INT) {
                             enc.cvtsi2sd(x86::XMM0, x86::RAX);
                             argType = ThavaType::DOUBLE;
@@ -3879,8 +4157,8 @@ public:
             int32_t savedOffset = currentFrameOffset;
             std::vector<int32_t> argSlots;
             for (size_t i = 0; i < call->args.size(); ++i) {
-                ThavaType argType = emitExpr(call->args[i].get());
                 ThavaType pt = (i < fi.params.size()) ? fi.params[i].first : ThavaType::UNKNOWN;
+                ThavaType argType = emitExpr(call->args[i].get(), pt);
                 if ((pt == ThavaType::FLOAT || pt == ThavaType::DOUBLE) && argType == ThavaType::INT) {
                     enc.cvtsi2sd(x86::XMM0, x86::RAX);
                     argType = ThavaType::DOUBLE;
@@ -3996,7 +4274,43 @@ public:
         }
 
         if (auto idxNode = dynamic_cast<IndexNode*>(node)) {
+            using namespace x86;
+            using namespace native_multype;
             ThavaType baseT = emitExpr(idxNode->base.get());
+            if (baseT == ThavaType::BOXED) baseT = emitUnbox(ThavaType::MULTYPE);
+            if (baseT == ThavaType::MULTYPE) {
+                const auto saved = currentFrameOffset;
+                currentFrameOffset -= 8;
+                const auto slot = currentFrameOffset;
+                if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+                enc.mov_mr_rbp(slot, RAX);
+                if (emitExpr(idxNode->indexExpr.get(), ThavaType::INT) != ThavaType::INT) {
+                    std::cerr << "[Native Codegen Error]: A <multype> index must be an integer.\n";
+                    exit(1);
+                }
+                const auto valid = enc.createLabel();
+                const auto nonnegative = enc.createLabel();
+                const auto outOfRange = enc.createLabel();
+                enc.mov_rm_rbp(R10, slot);
+                enc.test_rr(R10, R10);
+                enc.je(outOfRange);
+                enc.mov_rm(R11, R10, 0);
+                enc.test_rr(RAX, RAX);
+                enc.jns(nonnegative);
+                enc.add_rr(RAX, R11);
+                enc.bindLabel(nonnegative);
+                enc.cmp_rr(RAX, R11);
+                enc.jcc(Cond::B, valid); // unsigned, so a remaining negative index fails too
+                enc.bindLabel(outOfRange);
+                emitMultypeError("<multype> index out of range");
+                enc.bindLabel(valid);
+                enc.mov_ri64(R11, entrySize);
+                enc.imul_rr(RAX, R11);
+                enc.add_rr(RAX, R10);
+                enc.add_ri32(RAX, countSize);
+                currentFrameOffset = saved;
+                return ThavaType::BOXED;
+            }
             currentFrameOffset -= 8;
             if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
             int32_t baseSlot = currentFrameOffset;
@@ -4094,9 +4408,16 @@ public:
 
         if (auto lenNode = dynamic_cast<LenNode*>(node)) {
             ThavaType argT = emitExpr(lenNode->arg.get());
+            if (argT == ThavaType::BOXED) argT = emitUnbox(ThavaType::MULTYPE);
             if (argT == ThavaType::STRING) {
                 enc.mov_rr(x86::RCX, x86::RAX);
                 enc.call_iat_func("strlen");
+            } else if (argT == ThavaType::MULTYPE) {
+                const auto zero = enc.createLabel();
+                enc.test_rr(x86::RAX, x86::RAX);
+                enc.je(zero);
+                enc.mov_rm(x86::RAX, x86::RAX, 0);
+                enc.bindLabel(zero);
             } else {
                 enc.mov_rm(x86::RAX, x86::RAX, 0); // count is at offset 0
             }
@@ -4539,6 +4860,12 @@ public:
     }
 
     ThavaType emitListMethod(ListMethodNode* lm) {
+        const auto* local = lookupVar(lm->varName);
+        const auto type = local ? local->type : globalEnv->get(lm->varName);
+        if (type == ThavaType::MULTYPE && lm->method != "len" && lm->method != "size") {
+            std::cerr << "[Native Codegen Error]: List mutation is not supported for <multype>.\n";
+            exit(1);
+        }
         if (!lookupVar(lm->varName) && isGlobalName(lm->varName) &&
             (lm->method != "addval" || lm->args.size() != 1)) {
             std::cerr << "[Codegen Error]: Unsupported native global list operation: " << lm->method << "\n";
@@ -5947,7 +6274,7 @@ public:
             enc.mov_mr_rbp(targetSlot, x86::RAX);
 
             // 2. Evaluate right-hand side expression
-            ThavaType exprType = emitExpr(massign->expr.get());
+            ThavaType exprType = emitExpr(massign->expr.get(), fld.type);
 
             // 3. Reload target pointer back into RCX
             enc.mov_rm_rbp(x86::RCX, targetSlot);
@@ -6018,7 +6345,7 @@ public:
                         listElemTypes[vdecl->varName] = ThavaType::STRING;
                     }
                 }
-                ThavaType t = emitExpr(vdecl->initExpr.get());
+                ThavaType t = emitExpr(vdecl->initExpr.get(), vdecl->varType);
                 if (vdecl->varType == ThavaType::LIST || vdecl->varType == ThavaType::TUPLE) {
                     if (lastCollectionElemType != ThavaType::UNKNOWN) {
                         listElemTypes[vdecl->varName] = lastCollectionElemType;
@@ -6060,7 +6387,7 @@ public:
             if (!vi && isGlobalName(assign->name)) {
                 ThavaType gt = globalEnv->get(assign->name);
                 std::string gct = globalEnv->getCustomType(assign->name);
-                ThavaType t = emitExpr(assign->expr.get());
+                ThavaType t = emitExpr(assign->expr.get(), gt);
                 emitGlobalBase(x86::R11, globalVarSlots.at(assign->name));
                 if (gt == ThavaType::FLOAT || gt == ThavaType::DOUBLE) {
                     if (t == ThavaType::INT || t == ThavaType::BOOL) enc.cvtsi2sd(x86::XMM0, x86::RAX);
@@ -6088,7 +6415,7 @@ public:
                     listElemTypes[assign->name] = ThavaType::STRING;
                 }
             }
-            ThavaType t = emitExpr(assign->expr.get());
+            ThavaType t = emitExpr(assign->expr.get(), vi->type);
             if (vi && (vi->type == ThavaType::LIST || vi->type == ThavaType::TUPLE)) {
                 if (lastCollectionElemType != ThavaType::UNKNOWN) {
                     listElemTypes[assign->name] = lastCollectionElemType;
@@ -6272,6 +6599,10 @@ public:
             VarInfo* vi = lookupVar(idxAssign->varName);
             if (!vi && !isGlobalName(idxAssign->varName)) {
                 std::cerr << "[Native Codegen Error]: Variable '" << idxAssign->varName << "' is not declared!\n";
+                exit(1);
+            }
+            if ((vi ? vi->type : globalEnv->get(idxAssign->varName)) == ThavaType::MULTYPE) {
+                std::cerr << "[Native Codegen Error]: Indexed mutation of <multype> is not supported.\n";
                 exit(1);
             }
             if ((vi ? vi->type : globalEnv->get(idxAssign->varName)) == ThavaType::DICT) {
@@ -6460,7 +6791,7 @@ public:
             size_t elseLbl = enc.createLabel();
             size_t endLbl = enc.createLabel();
 
-            emitExpr(ifNode->cond.get());
+            emitExpr(ifNode->cond.get(), ThavaType::BOOL);
             enc.test_rr(x86::RAX, x86::RAX);
             enc.je(elseLbl);
 
@@ -6483,7 +6814,7 @@ public:
             continueLabels.push_back(startLbl);
 
             enc.bindLabel(startLbl);
-            emitExpr(whileNode->cond.get());
+            emitExpr(whileNode->cond.get(), ThavaType::BOOL);
             enc.test_rr(x86::RAX, x86::RAX);
             enc.je(endLbl);
 
@@ -6509,7 +6840,7 @@ public:
 
             enc.bindLabel(startLbl);
             if (forNode->cond) {
-                emitExpr(forNode->cond.get());
+                emitExpr(forNode->cond.get(), ThavaType::BOOL);
                 enc.test_rr(x86::RAX, x86::RAX);
                 enc.je(endLbl);
             }
@@ -6714,7 +7045,11 @@ public:
             if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(consOut->getExpr())) {
                 for (const auto& part : interpolation->parts) {
                     const auto et = emitExpr(part.get());
-                    if (et == ThavaType::INT) {
+                    if (et == ThavaType::BOXED || et == ThavaType::MULTYPE) {
+                        if (et == ThavaType::BOXED) emitBoxedString();
+                        else emitMultypeString();
+                        emitCallPrintf(offFmtStr, x86::RAX, true);
+                    } else if (et == ThavaType::INT) {
                         emitCallPrintf(offFmtInt, x86::RAX, true);
                     } else if (et == ThavaType::BOOL) {
                         size_t trueLbl = enc.createLabel();
@@ -6744,7 +7079,11 @@ public:
                 emitCallPrintf(offFmtNL);
             } else {
                 ThavaType et = emitExpr(consOut->getExpr());
-                if (et == ThavaType::INT) {
+                if (et == ThavaType::BOXED || et == ThavaType::MULTYPE) {
+                    if (et == ThavaType::BOXED) emitBoxedString();
+                    else emitMultypeString();
+                    emitCallPrintf(offFmtStrNL, x86::RAX, true);
+                } else if (et == ThavaType::INT) {
                     emitCallPrintf(offFmtIntNL, x86::RAX, true);
                 } else if (et == ThavaType::BOOL) {
                     size_t trueLbl = enc.createLabel();
@@ -6950,7 +7289,7 @@ public:
 
         if (auto retNode = dynamic_cast<ReturnNode*>(node)) {
             if (retNode->expr) {
-                ThavaType t = emitExpr(retNode->expr.get());
+                ThavaType t = emitExpr(retNode->expr.get(), currentFuncRetType);
                 if ((currentFuncRetType == ThavaType::FLOAT || currentFuncRetType == ThavaType::DOUBLE) && t == ThavaType::INT) {
                     enc.cvtsi2sd(x86::XMM0, x86::RAX);
                 } else if (currentFuncRetType == ThavaType::INT && (t == ThavaType::FLOAT || t == ThavaType::DOUBLE)) {
@@ -7400,6 +7739,9 @@ public:
             linuxRt.emitAndRegister();
         }
 
+        lblBoxedToString = enc.createLabel();
+        lblMultypeToString = enc.createLabel();
+
         // 2. Emit runtime string & collection helpers
         emitRuntimeHelpers();
         emitThrowHelper();
@@ -7596,6 +7938,8 @@ public:
             exitFunctionScope();
         }
         }
+
+        emitMultypeHelpers();
 
         // 5.5. Dynamic Library Export & Metadata registration
         // The metadata carries image offsets of the exported functions, so it can

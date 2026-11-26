@@ -2010,7 +2010,7 @@ private:
         size_t trimLoop = enc.createLabel();
         size_t finLbl = enc.createLabel();
 
-        enc.mov_ri64(arm64::X0, 64);
+        enc.mov_ri64(arm64::X0, 384);
         enc.bl(lblMalloc);
         enc.str_imm(arm64::X0, arm64::FP, 24); // out
         enc.movz(arm64::X0, 0, 0);
