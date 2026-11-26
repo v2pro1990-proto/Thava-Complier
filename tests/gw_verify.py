@@ -207,3 +207,24 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
     result = subprocess.run([str(compiler), "invalid_return.thv", "-o", "invalid_return"],
                             cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert result.returncode != 0 and "requires a <multype> function" in result.stdout, result.stdout
+
+    # Check that a consumer decodes the same tags across a native module boundary.
+    Path(tmp, "mixed_library.thv").write_text(
+        '<multype> func export_mix() { return 42, "library", true }\n', encoding="utf-8")
+    Path(tmp, "mixed_consumer.thv").write_text(
+        '@dlattach "mixed_library"\n<multype> value = export_mix()\ncons.out(value)\ncons.out(value[1])\n',
+        encoding="utf-8")
+    for target in targets:
+        if target == "cpp" or (target == "pe-arm64" and not run_windows_arm64):
+            continue
+        switches = ["--backend", target, "--cxx", "missing-compiler"]
+        library = "mixed_library.thdl" if windows else "mixed_library.so"
+        binary = Path(tmp) / ("mixed_consumer.exe" if windows else "mixed_consumer")
+        subprocess.run([str(compiler), "mixed_library.thv", *switches, "--lib", "-o", library],
+                       cwd=tmp, check=True)
+        subprocess.run([str(compiler), "mixed_consumer.thv", *switches, "-o", binary.name],
+                       cwd=tmp, check=True)
+        runner = ["qemu-aarch64"] if target == "arm64" else []
+        result = subprocess.run(runner + [str(binary)], cwd=tmp, check=True,
+                                capture_output=True, encoding="utf-8", timeout=15)
+        assert result.stdout.splitlines()[:2] == ["[42, library, true]", "library"], (target, result.stdout)

@@ -969,6 +969,15 @@ public:
     }
 
     ThavaType emitUnbox(ThavaType expected) {
+        // A pointer tag alone cannot establish a class/struct's nominal type
+        // or turn tagged entries into the plain list/tuple representation.
+        if (expected == ThavaType::CUSTOM || expected == ThavaType::LIST ||
+            expected == ThavaType::TUPLE || expected == ThavaType::FILE ||
+            expected == ThavaType::VOID) {
+            std::cerr << "Codegen Error: Cannot extract <" << typeToString(expected)
+                      << "> directly from a <multype> element.\n";
+            exit(1);
+        }
         using namespace arm64;
         using namespace native_multype;
         if (expected == ThavaType::STRING) {
