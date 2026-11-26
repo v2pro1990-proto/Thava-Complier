@@ -18,8 +18,8 @@ public:
     uint32_t offStrTrue  = 0;
     uint32_t offStrFalse = 0;
     uint32_t offStrNL    = 0;
-    uint32_t offFmtFloatNL = 0; // "%g\n"
     uint32_t offFmtFloat   = 0; // "%g"
+    uint32_t offFmtFloatFixed = 0; // "%.6f"
     uint32_t offFmtScanLine = 0; // " %1023[^\n]" (one console line)
     uint32_t offStrListOpen  = 0; // "["
     uint32_t offStrListComma = 0; // ", "
@@ -248,8 +248,8 @@ public:
         offStrTrue  = pe.addStringLiteralOffset("true");
         offStrFalse = pe.addStringLiteralOffset("false");
         offStrNL    = pe.addStringLiteralOffset("\n");
-        offFmtFloatNL   = pe.addStringLiteralOffset("%g\n");
         offFmtFloat     = pe.addStringLiteralOffset("%g");
+        offFmtFloatFixed = pe.addStringLiteralOffset("%.6f");
         offFmtScanLine  = pe.addStringLiteralOffset(" %1023[^\n]");
         offStrListOpen  = pe.addStringLiteralOffset("[");
         offStrListComma = pe.addStringLiteralOffset(", ");
@@ -392,40 +392,8 @@ public:
         // ==========================================
         // 7. print_double(double in D0) - no newline
         // ==========================================
-        enc.bindLabel(lblPrintDouble);
-        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
-        enc.mov_rr(arm64::FP, arm64::SP);
-        enc.sub_rri(arm64::SP, arm64::SP, 16);
-
-        // Windows ARM64 passes variadic floating-point arguments in integer registers.
-        enc.fmov_xd(arm64::X1, arm64::D0);
-        enc.adr_data(arm64::X0, offFmtFloat);
-        enc.adr_data(arm64::X16, iatPrintf);
-        enc.ldr_imm(arm64::X16, arm64::X16, 0);
-        enc.blr(arm64::X16);
-
-        enc.mov_rr(arm64::SP, arm64::FP);
-        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 16);
-        enc.ret();
-
-        // ==========================================
-        // 8. print_double_nl(double in D0)
-        // ==========================================
-        enc.bindLabel(lblPrintDoubleNL);
-        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
-        enc.mov_rr(arm64::FP, arm64::SP);
-        enc.sub_rri(arm64::SP, arm64::SP, 16);
-
-        // Windows ARM64 passes variadic floating-point arguments in integer registers.
-        enc.fmov_xd(arm64::X1, arm64::D0);
-        enc.adr_data(arm64::X0, offFmtFloatNL);
-        enc.adr_data(arm64::X16, iatPrintf);
-        enc.ldr_imm(arm64::X16, arm64::X16, 0);
-        enc.blr(arm64::X16);
-
-        enc.mov_rr(arm64::SP, arm64::FP);
-        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 16);
-        enc.ret();
+        emitPrintReal(lblPrintDouble, lblPrintStr);
+        emitPrintReal(lblPrintDoubleNL, lblPrintStrNL);
 
         // ==========================================
         // 9. malloc(size in X0) -> X0  (msvcrt malloc)
@@ -1233,19 +1201,77 @@ private:
     }
 
     // Convert the bits in X0 using the Windows ARM64 variadic calling convention.
-    void emitNumberToString(size_t label, uint32_t format) {
+    void emitPrintReal(size_t label, size_t printer) {
         enc.bindLabel(label);
         enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -32);
         enc.mov_rr(arm64::FP, arm64::SP);
+        enc.fmov_xd(arm64::X0, arm64::D0);
+        enc.bl(lblFileFmtDouble);
+        enc.str_imm(arm64::X0, arm64::FP, 16);
+        enc.bl(printer);
+        enc.ldr_imm(arm64::X0, arm64::FP, 16);
+        callCrt("free");
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 32);
+        enc.ret();
+    }
+
+    void emitNumberToString(size_t label, uint32_t format, bool real = false) {
+        enc.bindLabel(label);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -48);
+        enc.mov_rr(arm64::FP, arm64::SP);
+
         enc.str_imm(arm64::X0, arm64::FP, 16);
         enc.movz(arm64::X0, 64, 0);
         enc.bl(lblMalloc);
         enc.str_imm(arm64::X0, arm64::FP, 24);
         enc.adr_data(arm64::X1, format);
         enc.ldr_imm(arm64::X2, arm64::FP, 16);
+        if (real) {
+            const auto ready = enc.createLabel();
+            enc.movz(arm64::X3, 0, 0);
+            enc.mov_ri64(arm64::X4, 0x7FFFFFFFFFFFFFFFLL);
+            enc.and_rrr(arm64::X4, arm64::X2, arm64::X4);
+            enc.mov_ri64(arm64::X5, 0x412E848000000000LL); // 1e6
+            enc.cmp_rr(arm64::X4, arm64::X5);
+            enc.b_cond(arm64::CC, ready);
+            enc.mov_ri64(arm64::X5, 0x426D1A94A2000000LL); // 1e12
+            enc.cmp_rr(arm64::X4, arm64::X5);
+            enc.b_cond(arm64::CS, ready);
+            enc.adr_data(arm64::X1, offFmtFloatFixed);
+            enc.movz(arm64::X3, 1, 0);
+            enc.bindLabel(ready);
+            enc.str_imm(arm64::X3, arm64::FP, 32);
+        }
         callCrt("sprintf");
+        if (real) {
+            const auto done = enc.createLabel();
+            const auto trim = enc.createLabel();
+            const auto period = enc.createLabel();
+            enc.ldr_imm(arm64::X3, arm64::FP, 32);
+            enc.cbz(arm64::X3, done);
+            enc.ldr_imm(arm64::X4, arm64::FP, 24);
+            enc.add_rrr(arm64::X4, arm64::X4, arm64::X0);
+            enc.bindLabel(trim);
+            enc.sub_rri(arm64::X5, arm64::X4, 1);
+            enc.ldrb_imm(arm64::X6, arm64::X5, 0);
+            enc.cmp_ri(arm64::X6, '0');
+            enc.b_cond(arm64::NE, period);
+            enc.mov_rr(arm64::X4, arm64::X5);
+            enc.b(trim);
+            enc.bindLabel(period);
+            enc.cmp_ri(arm64::X6, '.');
+            enc.b_cond(arm64::NE, done);
+            enc.mov_rr(arm64::X4, arm64::X5);
+            enc.bindLabel(done);
+            // General formatting already terminated its buffer via sprintf.
+            const auto terminated = enc.createLabel();
+            enc.cbz(arm64::X3, terminated);
+            enc.movz(arm64::X5, 0, 0);
+            enc.strb_imm(arm64::X5, arm64::X4, 0);
+            enc.bindLabel(terminated);
+        }
         enc.ldr_imm(arm64::X0, arm64::FP, 24);
-        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 32);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 48);
         enc.ret();
     }
 
@@ -1289,7 +1315,7 @@ private:
         tailCallImport("fwrite");
 
         emitNumberToString(lblIntToStr, offFmtIntString);
-        emitNumberToString(lblFileFmtDouble, offFmtFloat);
+        emitNumberToString(lblFileFmtDouble, offFmtFloat, true);
         emitFileWriteNumber(lblFileWriteInt, lblIntToStr);
         emitFileWriteNumber(lblFileWriteDouble, lblFileFmtDouble);
 

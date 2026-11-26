@@ -128,6 +128,8 @@ Integer widths apply to declared values. Use `<int64>` to keep a value such as `
 
 Native i686 and the C++ backend round values stored as `<fl>` to single precision. Native x86-64 and ARM64 can keep double precision in `<fl>` computations or storage. Code that depends on exact single-precision rounding should account for the target backend.
 
+Decimal literals such as `1000000.25` start as `<dbl>`. When formatting finite real values with absolute magnitudes from `1000000` to below `1000000000000`, `cons.out` and string interpolation display ordinary decimal notation and trim trailing fractional zeros. For example, `1000000.0` displays as `1000000` and `-12345678.125` keeps its fraction.
+
 ### Collection Types
 | Type | Keyword | Alias | Literal example |
 | :--- | :--- | :--- | :--- |
@@ -502,6 +504,21 @@ func compute_arrow(<int> a, <int> b) -> <int> {
     cons.out("[LOG]: " + msg)
 }
 ```
+
+#### Returning mixed values with `<multype>`
+
+A `<multype>` function can return a list or tuple with elements of different types. Use `return a, b, c` as shorthand for `return [a, b, c]`. The caller receives one collection and can index its elements from zero.
+
+```thava
+<multype> func report() {
+    return 42, "ok", true
+}
+
+<multype> result = report()
+cons.out(result[1]) # ok
+```
+
+This feature uses tagged values on native i686 and the C++ backend. Use `--cpp` for ARM64, cross-target builds, and libraries on 64-bit targets. A plain x86-64 executable build for the compiler's host OS selects C++ automatically if it encounters a `<multype>` return.
 
 ### Default Arguments
 Trailing parameters can specify default values:

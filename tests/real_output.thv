@@ -1,0 +1,12 @@
+<dbl> one_million = 1000000
+<fl> single = 1000000.25
+<dbl> large = 999999999999.25
+<dbl> negative = -12345678.125
+cons.out(one_million)
+cons.out(single)
+cons.out(large)
+cons.out(negative)
+cons.out("@{one_million + 1} @{negative}")
+<str> stored = "@{one_million} @{large}"
+cons.out(stored)
+cons.out(2.5)

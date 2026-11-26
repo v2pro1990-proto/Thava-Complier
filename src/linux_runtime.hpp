@@ -1410,41 +1410,25 @@ public:
         enc.test_rr(x86::R9, x86::R9);
         enc.je(dtNoFrac);
 
-        // XMM1 = 10^N
-        enc.mov_ri64(x86::R10, 0x3FF0000000000000LL); // 1.0
-        enc.mov_mr_rbp(-64, x86::R10);
-        enc.movsd_rm_rbp(x86::XMM1, -64);
-        enc.mov_rm_rbp(x86::R11, -24);
-        size_t dtPowD = enc.createLabel();
-        enc.bindLabel(dtPowD);
-        enc.mov_ri64(x86::R10, 0x4024000000000000LL); // 10.0
-        enc.mov_mr_rbp(-64, x86::R10);
-        enc.movsd_rm_rbp(x86::XMM2, -64);
-        enc.mulsd_rr(x86::XMM1, x86::XMM2);
-        enc.dec_r(x86::R11);
-        enc.jne(dtPowD);
-
-        // scaled = trunc(|v| * 10^N + 0.5)
+        // Scale the fractional part separately so large integer parts do not
+        // consume the precision needed for the decimal digits.
+        enc.cvtsi2sd(x86::XMM2, x86::RAX);
+        enc.subsd_rr(x86::XMM0, x86::XMM2);
+        enc.lea_rip_rdata(x86::R10, offDoubleMillion);
+        enc.movsd_rm(x86::XMM1, x86::R10, 0);
         enc.mulsd_rr(x86::XMM0, x86::XMM1);
-        enc.mov_ri64(x86::R10, 0x3FE0000000000000LL); // 0.5
-        enc.mov_mr_rbp(-64, x86::R10);
-        enc.movsd_rm_rbp(x86::XMM2, -64);
+        enc.lea_rip_rdata(x86::R10, offDoubleHalf);
+        enc.movsd_rm(x86::XMM2, x86::R10, 0);
         enc.addsd_rr(x86::XMM0, x86::XMM2);
-        enc.cvttsd2si(x86::RAX, x86::XMM0);
-
-        // pow10 = 10^N as an integer, then split scaled into int part / fraction.
-        enc.mov_ri64(x86::R10, 1);
-        enc.mov_ri64(x86::R11, 10);
-        enc.mov_rm_rbp(x86::R9, -24);
-        size_t dtPowI = enc.createLabel();
-        enc.bindLabel(dtPowI);
-        enc.imul_rr(x86::R10, x86::R11);
-        enc.dec_r(x86::R9);
-        enc.jne(dtPowI);
+        enc.cvttsd2si(x86::RDX, x86::XMM0);
+        const auto dtNoCarry = enc.createLabel();
+        enc.cmp_ri32(x86::RDX, 1000000);
+        enc.jne(dtNoCarry);
         enc.xor_r32(x86::RDX, x86::RDX);
-        enc.div_r(x86::R10);
-        enc.mov_mr_rbp(-40, x86::RDX); // fraction
-        enc.mov_mr_rbp(-32, x86::RAX); // integer part (rounded)
+        enc.inc_r(x86::RAX);
+        enc.mov_mr_rbp(-32, x86::RAX);
+        enc.bindLabel(dtNoCarry);
+        enc.mov_mr_rbp(-40, x86::RDX);
         enc.bindLabel(dtNoFrac);
 
         // Emit the integer part.

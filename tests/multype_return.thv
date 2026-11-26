@@ -1,0 +1,15 @@
+<multype> func report(<bl> ready) {
+    if ready {
+        return 42, "ok", true, 2.5
+    }
+    return ["wait", 3]
+}
+
+<multype> func forward_report() {
+    return report(true)
+}
+
+<multype> result = forward_report()
+cons.out(result)
+cons.out(<str>result[1])
+cons.out(report(false))

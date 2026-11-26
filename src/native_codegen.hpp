@@ -259,11 +259,32 @@ public:
 
     void emitCallPrintfFloat(uint32_t fmtOffsetInRdata, x86::Xmm argXmm) {
         if (argXmm != x86::XMM1) enc.movsd_rr(x86::XMM1, argXmm);
-        enc.movsd_mr_rbp(-8, x86::XMM1);
-        enc.mov_rm_rbp(x86::RDX, -8);
+        const auto savedOffset = currentFrameOffset;
+        currentFrameOffset -= 8;
+        if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
+        enc.movsd_mr_rbp(currentFrameOffset, x86::XMM1);
+        enc.mov_rm_rbp(x86::RDX, currentFrameOffset);
+        const auto general = enc.createLabel();
+        const auto done = enc.createLabel();
+        enc.mov_rr(x86::RAX, x86::RDX);
+        enc.mov_ri64(x86::R10, 0x7FFFFFFFFFFFFFFFLL);
+        enc.and_rr(x86::RAX, x86::R10);
+        enc.mov_ri64(x86::R10, 0x412E848000000000LL); // 1e6
+        enc.cmp_rr(x86::RAX, x86::R10);
+        enc.jcc(x86::Cond::B, general);
+        enc.mov_ri64(x86::R10, 0x426D1A94A2000000LL); // 1e12
+        enc.cmp_rr(x86::RAX, x86::R10);
+        enc.jcc(x86::Cond::AE, general);
+        enc.movsd_rr(x86::XMM0, x86::XMM1);
+        emitStringCast(ThavaType::DOUBLE);
+        emitCallPrintf(fmtOffsetInRdata == offFmtFloatNL ? offFmtStrNL : offFmtStr, x86::RAX, true);
+        enc.jmp(done);
 
+        enc.bindLabel(general);
         enc.lea_rip_rdata(x86::RCX, fmtOffsetInRdata);
         enc.call_iat_func("printf");
+        enc.bindLabel(done);
+        currentFrameOffset = savedOffset;
     }
 
     void emitUnicodeCaseHelpers() {

@@ -94,6 +94,11 @@ with tempfile.TemporaryDirectory() as tmp:
         for filename, expected, input_data in [
             ("gw.thv", ["4 3 AB new 9"], None),
             ("const_variables.thv", ["10 2.4 12 const 4 15"], None),
+            ("multype_return.thv", ["[42, ok, true, 2.5]", "ok", "[wait, 3]"], None),
+            ("real_output.thv", [
+                "1000000", "1000000.25", "999999999999.25", "-12345678.125",
+                "1000001 -12345678.125", "1000000 999999999999.25", "2.5",
+            ], None),
             ("interpolation.thv", [
                 "Trần Minh có 42 điểm", "thứ 1", "2 / 3", "[đúng] true, 2.5",
                 "@{name}", "Trần? Nhập: chào",

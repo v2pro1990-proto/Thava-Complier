@@ -139,6 +139,7 @@ inline std::unordered_map<std::string, StructInfo> g_structs;
 // (classes, try/except) so that backend can fail loudly instead of
 // silently generating a program that ignores them.
 inline bool g_usesNativeUnsupportedFeature = false;
+inline bool g_hasMultypeReturn = false;
 
 inline std::string cppIntName(const std::string& width) {
     if (width == "int64") return "long long";
@@ -1507,7 +1508,7 @@ public:
 
     std::string generateCode() override {
         std::string code = "([&]() { std::ostringstream _thava_interpolation; _thava_interpolation << std::boolalpha";
-        for (const auto& part : parts) code += " << (" + part->generateCode() + ")";
+        for (const auto& part : parts) code += " << _thava_console_value(" + part->generateCode() + ")";
         return code + "; return _thava_interpolation.str(); }())";
     }
 
@@ -2186,7 +2187,7 @@ public:
     ASTNode* getExpr() const { return expr.get(); }
 
     std::string generateCode() override {
-        return "std::cout << " + expr->generateCode() + " << std::endl;";
+        return "std::cout << _thava_console_value(" + expr->generateCode() + ") << std::endl;";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override {
@@ -3050,7 +3051,8 @@ public:
 class ReturnNode : public ASTNode {
 public:
     ASTPtr expr;
-    ReturnNode(ASTPtr e) : expr(std::move(e)) {}
+    bool multipleValues;
+    ReturnNode(ASTPtr e, bool multiple = false) : expr(std::move(e)), multipleValues(multiple) {}
     std::string generateCode() override {
         if (expr) return "return " + expr->generateCode() + ";";
         return "return;";
@@ -4094,7 +4096,7 @@ class Parser {
         }
 
         if (match(TokenType::INT_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::INT);
-        if (match(TokenType::FLOAT_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::FLOAT);
+        if (match(TokenType::FLOAT_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::DOUBLE);
         if (match(TokenType::BOOL_LIT)) return std::make_unique<LiteralNode>(tokens[current-1].lexeme, ThavaType::BOOL);
         if (match(TokenType::STR_LIT)) return parseStringLiteral(tokens[current - 1]);
         if (match(TokenType::NONE_LIT)) return std::make_unique<LiteralNode>("none", ThavaType::NONE);
@@ -5259,6 +5261,13 @@ class Parser {
             ASTPtr e = nullptr;
             if (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN) && peek().line == retLine) {
                 e = expression();
+                if (match(TokenType::COMMA)) {
+                    std::vector<ASTPtr> values;
+                    values.push_back(std::move(e));
+                    do { values.push_back(expression()); } while (match(TokenType::COMMA));
+                    return std::make_unique<ReturnNode>(
+                        std::make_unique<CollectionNode>(std::move(values), false), true);
+                }
             }
             return std::make_unique<ReturnNode>(std::move(e));
         }
@@ -6214,6 +6223,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         checkTypes(whileNode->body.get(), env, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
     }
     else if (auto funcDecl = dynamic_cast<FunctionDeclNode*>(node)) {
+        if (funcDecl->returnType == ThavaType::MULTYPE) g_hasMultypeReturn = true;
         // A function sees its own parameters/locals plus the program's globals.
         auto funcEnv = std::make_shared<Environment>(g_programEnv);
         funcEnv->functionName = funcDecl->name;
@@ -6235,6 +6245,10 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
     }
     else if (auto ret = dynamic_cast<ReturnNode*>(node)) {
+        if (ret->multipleValues && currentFuncRetType != ThavaType::MULTYPE) {
+            std::cerr << "[Static Type Error]: A comma-separated return requires a <multype> function.\n";
+            exit(1);
+        }
         if (ret->expr) {
             ThavaType retType = ret->expr->getType(env);
             if (currentFuncRetType == ThavaType::VOID) {
@@ -6473,6 +6487,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
 
         for (const auto& m : clsDecl->methods) {
+            if (m.returnType == ThavaType::MULTYPE) g_hasMultypeReturn = true;
             auto methodEnv = std::make_shared<Environment>(classEnv);
             methodEnv->functionName = m.name;
             auto meit = g_funcListParamElem.find(clsDecl->className + "::" + m.name);
@@ -6865,6 +6880,20 @@ int main(int argc, char* argv[]) {
         if (before == g_funcListParamElem) break;
     }
 
+    if (g_hasMultypeReturn && !isI686Mode && !useCppBackend) {
+#ifdef _WIN32
+        const bool hostOS = !isElfMode;
+#else
+        const bool hostOS = isElfMode;
+#endif
+        if (explicitNative || isArm64Mode || !hostOS || g_isLibraryMode) {
+            std::cerr << "[Thava Compiler Error]: <multype> returns require --cpp on x86-64 and ARM64.\n";
+            return 1;
+        }
+        std::cout << "[Thava Compiler] Using the C++ backend for <multype> returns.\n";
+        useCppBackend = true;
+    }
+
     // 3.5. Optimization Pipeline (AST transformations for -O1, -O2, -O3)
     if (g_optLevel > 0) {
         std::cout << "[Thava Optimizer] Activating optimization level: -O" << g_optLevel;
@@ -7132,6 +7161,12 @@ int main(int argc, char* argv[]) {
               << "inline std::string _thava_to_string(short v) { return std::to_string((int)v); }\n"
               << "inline std::string _thava_to_string(double v) { std::string s = std::to_string(v); if (s.find('.') != std::string::npos) { while (s.back() == '0') s.pop_back(); if (s.back() == '.') s.pop_back(); } return s; }\n"
               << "inline std::string _thava_to_string(float v) { return _thava_to_string((double)v); }\n"
+              << "template<class T> const T& _thava_console_value(const T& v) { return v; }\n"
+              << "inline std::string _thava_console_value(double v) {\n"
+              << "    if (std::fabs(v) >= 1000000.0 && std::fabs(v) < 1e12) return _thava_to_string(v);\n"
+              << "    std::ostringstream out; out << v; return out.str();\n"
+              << "}\n"
+              << "inline std::string _thava_console_value(float v) { return _thava_console_value((double)v); }\n"
               << "inline std::string _thava_to_string(bool v) { return v ? \"true\" : \"false\"; }\n\n"
               << "inline long long _thava_to_int(const ThavaNoneType&) { return 0LL; }\n"
               << "inline float _thava_to_float(const ThavaNoneType&) { return 0.0f; }\n"
@@ -7319,7 +7354,7 @@ int main(int argc, char* argv[]) {
               << "std::ostream& operator<<(std::ostream& os, const ThavaValue& val) {\n"
               << "    if (val.type == 0) os << \"none\";\n"
               << "    else if (val.type == 1) os << val.iVal;\n"
-              << "    else if (val.type == 2) os << val.fVal;\n"
+              << "    else if (val.type == 2) os << _thava_console_value(val.fVal);\n"
               << "    else if (val.type == 3) os << (val.bVal ? \"true\" : \"false\");\n"
               << "    else if (val.type == 4) os << val.sVal;\n"
               << "    else if (val.type == 5) os << val.lVal;\n"

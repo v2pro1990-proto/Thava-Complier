@@ -533,6 +533,22 @@ private:
     // ==========================================
     void emitPrintDouble() {
         enc.bindLabel(lblPrintDouble);
+        const auto general = enc.createLabel();
+        enc.fmov_xd(arm64::X0, arm64::D0);
+        enc.mov_ri64(arm64::X1, 0x7FFFFFFFFFFFFFFFLL);
+        enc.and_rrr(arm64::X2, arm64::X0, arm64::X1);
+        enc.mov_ri64(arm64::X1, 0x412E848000000000LL); // 1e6
+        enc.cmp_rr(arm64::X2, arm64::X1);
+        enc.b_cond(arm64::CC, general);
+        enc.mov_ri64(arm64::X1, 0x426D1A94A2000000LL); // 1e12
+        enc.cmp_rr(arm64::X2, arm64::X1);
+        enc.b_cond(arm64::CS, general);
+        enc.stp_pre(arm64::FP, arm64::LR, arm64::SP, -16);
+        enc.bl(lblFileFmtDouble);
+        enc.ldp_post(arm64::FP, arm64::LR, arm64::SP, 16);
+        enc.b(lblPrintStr);
+
+        enc.bindLabel(general);
         enc.stp_pre(arm64::X29, arm64::X30, arm64::SP, -80);
         enc.mov_rr(arm64::X29, arm64::SP);
         enc.fstr_imm(arm64::D0, arm64::X29, 16);
@@ -1990,11 +2006,6 @@ private:
 
         size_t noSign = enc.createLabel();
         size_t bigCase = enc.createLabel();
-        size_t zeroCase = enc.createLabel();
-        size_t powLoop = enc.createLabel();
-        size_t powDone = enc.createLabel();
-        size_t hasDec = enc.createLabel();
-        size_t scaledOk = enc.createLabel();
         size_t digLoop = enc.createLabel();
         size_t trimLoop = enc.createLabel();
         size_t finLbl = enc.createLabel();
@@ -2031,50 +2042,26 @@ private:
         enc.fcmp_dd(arm64::D0, arm64::D1);
         enc.b_cond(arm64::GE, bigCase);
 
+        // Keep the whole part outside the scaling operation.
+        enc.movz(arm64::X8, 6, 0);
+        enc.str_imm(arm64::X8, arm64::FP, 40);
+        enc.fcvtzs_rd(arm64::X6, arm64::D0);
+        enc.scvtf_dr(arm64::D2, arm64::X6);
+        enc.fsub_ddd(arm64::D0, arm64::D0, arm64::D2);
         enc.adr_data(arm64::X16, offDoubleMillion);
         enc.fldr_imm(arm64::D1, arm64::X16, 0);
-        enc.fmul_ddd(arm64::D1, arm64::D0, arm64::D1);
+        enc.fmul_ddd(arm64::D0, arm64::D0, arm64::D1);
         enc.adr_data(arm64::X16, offDoubleHalf);
         enc.fldr_imm(arm64::D2, arm64::X16, 0);
-        enc.fadd_ddd(arm64::D1, arm64::D1, arm64::D2);
-        enc.fcvtzs_rd(arm64::X3, arm64::D1);
-        enc.cbz(arm64::X3, zeroCase);
-
-        // Fixed six decimal places (trailing zeros are trimmed below), the same
-        // rule the x86-64 PE/ELF and --cpp backends use for <str>(double).
-        enc.mov_ri64(arm64::X12, 6);
-        enc.str_imm(arm64::X12, arm64::FP, 40); // d
-
-        enc.mov_ri64(arm64::X11, 1);
-        enc.mov_ri64(arm64::X13, 10);
-        enc.mov_rr(arm64::X14, arm64::X12);
-        enc.cbz(arm64::X14, powDone);
-        enc.bindLabel(powLoop);
-        enc.mul_rrr(arm64::X11, arm64::X11, arm64::X13);
-        enc.sub_rri(arm64::X14, arm64::X14, 1);
-        enc.cbnz(arm64::X14, powLoop);
-        enc.bindLabel(powDone);
-        enc.str_imm(arm64::X11, arm64::FP, 48); // pow10
-
-        enc.cbnz(arm64::X12, hasDec);
-        enc.mov_ri64(arm64::X13, 1000000);
-        enc.udiv_rrr(arm64::X5, arm64::X3, arm64::X13);
-        enc.b(scaledOk);
-        enc.bindLabel(hasDec);
-        enc.ldr_imm(arm64::X11, arm64::FP, 48);
-        enc.scvtf_dr(arm64::D1, arm64::X11);
-        enc.fldr_imm(arm64::D2, arm64::FP, 16);
-        enc.fmul_ddd(arm64::D1, arm64::D2, arm64::D1);
-        enc.adr_data(arm64::X16, offDoubleHalf);
-        enc.fldr_imm(arm64::D2, arm64::X16, 0);
-        enc.fadd_ddd(arm64::D1, arm64::D1, arm64::D2);
-        enc.fcvtzs_rd(arm64::X5, arm64::D1);
-
-        enc.bindLabel(scaledOk);
-        enc.ldr_imm(arm64::X11, arm64::FP, 48);
-        enc.udiv_rrr(arm64::X6, arm64::X5, arm64::X11);
-        enc.mul_rrr(arm64::X7, arm64::X6, arm64::X11);
-        enc.sub_rrr(arm64::X7, arm64::X5, arm64::X7);
+        enc.fadd_ddd(arm64::D0, arm64::D0, arm64::D2);
+        enc.fcvtzs_rd(arm64::X7, arm64::D0);
+        enc.mov_ri64(arm64::X11, 1000000);
+        enc.cmp_rr(arm64::X7, arm64::X11);
+        const auto noCarry = enc.createLabel();
+        enc.b_cond(arm64::NE, noCarry);
+        enc.movz(arm64::X7, 0, 0);
+        enc.add_rri(arm64::X6, arm64::X6, 1);
+        enc.bindLabel(noCarry);
         enc.str_imm(arm64::X7, arm64::FP, 56); // frac
 
         enc.ldr_imm(arm64::X0, arm64::FP, 24);
@@ -2143,16 +2130,6 @@ private:
         enc.str_imm(arm64::X2, arm64::FP, 32);
         enc.b(trimLoop);
 
-        enc.bindLabel(zeroCase);
-        enc.ldr_imm(arm64::X0, arm64::FP, 24);
-        enc.ldr_imm(arm64::X1, arm64::FP, 32);
-        enc.add_rrr(arm64::X0, arm64::X0, arm64::X1);
-        enc.movz(arm64::X2, '0', 0);
-        enc.strb_imm(arm64::X2, arm64::X0, 0);
-        enc.add_rri(arm64::X0, arm64::X0, 1);
-        enc.movz(arm64::X2, 0, 0);
-        enc.strb_imm(arm64::X2, arm64::X0, 0);
-        enc.b(finLbl);
 
         enc.bindLabel(bigCase);
         enc.fldr_imm(arm64::D0, arm64::FP, 16);

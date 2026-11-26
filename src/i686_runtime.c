@@ -247,6 +247,29 @@ char *rt_format_float(u64 bits, Allocate allocate, u32 image) {
     }
 
     long double value = raw.number;
+    if (value >= 1000000.0L && value < 1000000000000.0L) {
+        u64 whole = (i64)value;
+        int fraction = (int)((value - (long double)(i64)whole) * 1000000.0L + 0.5L);
+        if (fraction == 1000000) {
+            ++whole;
+            fraction = 0;
+        }
+        char integer[24], *end = integer + sizeof(integer), *cursor = end;
+        do { *--cursor = '0' + digit(&whole); } while (whole);
+        out = copy(out, cursor, end - cursor);
+        if (fraction) {
+            *out++ = '.';
+            char decimals[6];
+            for (int i = 5; i >= 0; --i) {
+                decimals[i] = '0' + fraction % 10;
+                fraction /= 10;
+            }
+            int count = 6;
+            while (decimals[count - 1] == '0') --count;
+            out = copy(out, decimals, count);
+        }
+        return slice(buffer, out - buffer, allocate, image);
+    }
     int exp = 0;
     while (value >= 10.0L) value /= 10.0L, ++exp;
     while (value < 1.0L) value *= 10.0L, --exp;
