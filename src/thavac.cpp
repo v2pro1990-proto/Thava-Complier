@@ -1,4 +1,5 @@
 #include <iostream>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <memory>
@@ -30,10 +31,21 @@ enum class TokenType {
     IF, ELIF, ELSE, WHILE, FOR, IN, FUNC, FDFUNC, CFUNC, CLASS, ENUM, STRUCT, LOCVAR, PARVAR, RETURN, BREAK, CONTINUE, CONS_OUT, CONS_CLEAR, KEY_INPUT, AS, FILE_OPEN, TRY, EXCEPT, THROW, RAISE_ERROR, INLINE, DEFER, PUBLIC, PRIVATE, PROTECTED, EOF_TOKEN
 };
 
+struct SourceSpan {
+    size_t file = 0;
+    size_t offset = 0;
+    size_t length = 0;
+
+    SourceSpan end() const { return {file, offset + length, 0}; }
+};
+
 struct Token {
     TokenType type;
     std::string lexeme;
     int line;
+    SourceSpan span{};
+    // For interpolated strings, maps each decoded byte to the source byte.
+    std::shared_ptr<const std::vector<size_t>> decodedOffsets{};
 };
 
 inline std::set<std::string> g_attachedFiles;
@@ -702,12 +714,50 @@ inline void inspectLibrary(const std::string& rawPath) {
     std::cout << "Total: " << count << " functions.\n";
 }
 
+namespace diag {
+    struct Source {
+        std::string path;
+        std::string text;
+        std::vector<size_t> lineStarts{0};
+    };
+
+    inline std::vector<Source> sources;
+    inline SourceSpan active;
+
+    inline size_t addSource(const std::string& path, const std::string& text) {
+        Source source{path, text};
+        for (size_t i = 0; i < text.size(); ++i)
+            if (text[i] == '\n') source.lineStarts.push_back(i + 1);
+        sources.push_back(std::move(source));
+        return sources.size();
+    }
+
+    class Scope {
+        SourceSpan saved = active;
+    public:
+        explicit Scope(SourceSpan span = {}) { if (span.file) active = span; }
+        ~Scope() { active = saved; }
+    };
+
+    [[noreturn]] inline void fail(const std::string& message, SourceSpan span);
+}
+
 class Lexer {
     std::string source;
     std::string currentFilePath;
     size_t start = 0;
     size_t current = 0;
     int line = 1;
+    size_t file = 0;
+    const size_t* sourceOffsets = nullptr;
+
+    size_t sourceOffset(size_t offset) const {
+        return sourceOffsets ? sourceOffsets[offset] : offset;
+    }
+
+    SourceSpan span(size_t first, size_t end) const {
+        return {file, sourceOffset(first), sourceOffset(end) - sourceOffset(first)};
+    }
 
     bool isAtEnd() { return current >= source.length(); }
     char advance() { return source[current++]; }
@@ -715,23 +765,35 @@ class Lexer {
     char peekNext() { return (current + 1 >= source.length()) ? '\0' : source[current + 1]; }
 
 public:
-    Lexer(std::string src, std::string curPath = "", int startLine = 1)
-        : source(std::move(src)), currentFilePath(std::move(curPath)), line(startLine) {
-        if (source.size() >= 3 &&
+    Lexer(std::string src, std::string curPath, int startLine = 1,
+          size_t sourceId = 0, const size_t* offsets = nullptr, const std::string& displayPath = {})
+        : source(std::move(src)), currentFilePath(std::move(curPath)), line(startLine),
+          file(sourceId), sourceOffsets(offsets) {
+        if (!sourceOffsets && source.size() >= 3 &&
             static_cast<unsigned char>(source[0]) == 0xEF &&
             static_cast<unsigned char>(source[1]) == 0xBB &&
             static_cast<unsigned char>(source[2]) == 0xBF) {
             source.erase(0, 3);
         }
+        if (!file) file = diag::addSource(displayPath.empty() ? currentFilePath : displayPath, source);
     }
 
     std::vector<Token> scanTokens() {
+        diag::Scope location;
         std::vector<Token> tokens;
         while (!isAtEnd()) {
+            const auto tokenCount = tokens.size();
             start = current;
             char c = advance();
+            size_t characterEnd = current;
+            if (static_cast<unsigned char>(c) >= 0xc0) {
+                while (characterEnd < source.size() &&
+                       (static_cast<unsigned char>(source[characterEnd]) & 0xc0) == 0x80)
+                    ++characterEnd;
+            }
+            diag::active = span(start, characterEnd);
             
-            if (isspace(c)) {
+            if (std::isspace(static_cast<unsigned char>(c))) {
                 if (c == '\n') line++;
                 continue;
             }
@@ -791,7 +853,7 @@ public:
                 if (peek() == '=') { advance(); tokens.push_back({TokenType::GREATER_EQ, ">=", line}); }
                 else tokens.push_back({TokenType::GREATER, ">", line});
             }
-            else if (isdigit(c)) {
+            else if (std::isdigit(static_cast<unsigned char>(c))) {
                 while (isdigit(peek())) advance();
                 if (peek() == '.' && isdigit(peekNext())) {
                     advance();
@@ -804,12 +866,16 @@ public:
             else if (c == '"') {
                 const int stringLine = line;
                 std::string strVal;
+                std::vector<size_t> offsets;
                 while (!isAtEnd() && peek() != '"') {
+                    const size_t before = strVal.size();
+                    const size_t rawStart = current;
                     if (peek() == '\n') line++;
                     if (peek() == '\\') {
                         advance(); // Skip '\'
                         if (isAtEnd()) break;
                         char esc = advance();
+                        if (esc == '\n') ++line;
                         if (esc == 'n') strVal += '\n';
                         else if (esc == 't') strVal += '\t';
                         else if (esc == 'r') strVal += '\r';
@@ -819,12 +885,17 @@ public:
                     } else {
                         strVal += advance();
                     }
+                    for (size_t i = before; i < strVal.size(); ++i)
+                        offsets.push_back(sourceOffset(rawStart + i - before));
                 }
-                if (isAtEnd()) { std::cerr << "Lexer Error: Unterminated string literal at line " << line << "\n"; exit(1); }
+                if (isAtEnd()) diag::fail("Unterminated string literal", span(start, start + 1));
+                offsets.push_back(sourceOffset(current));
                 advance(); // Skip closing '"'
-                tokens.push_back({TokenType::STR_LIT, std::move(strVal), stringLine});
+                auto& token = tokens.emplace_back(Token{TokenType::STR_LIT, std::move(strVal), stringLine});
+                if (token.lexeme.find("@{") != std::string::npos)
+                    token.decodedOffsets = std::make_shared<std::vector<size_t>>(std::move(offsets));
             }
-            else if (isalpha(c) || c == '_') {
+            else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
                 while (isalnum(peek()) || peek() == '_') advance(); // Dot '.' is no longer merged into variable names
                 std::string text = source.substr(start, current - start);
 
@@ -1099,6 +1170,7 @@ public:
 
                             std::error_code ec;
                             std::string normPath = std::filesystem::weakly_canonical(target, ec).string();
+                            if (normPath.empty()) normPath = target.lexically_normal().string();
                             if (!std::filesystem::exists(target)) {
                                 std::cerr << "@attach Error: File not found '" << attachPath << "' at line " << line << "\n";
                                 exit(1);
@@ -1118,7 +1190,7 @@ public:
                                     exit(1);
                                 }
                                 std::string childSrc((std::istreambuf_iterator<char>(childFile)), std::istreambuf_iterator<char>());
-                                Lexer childLexer(childSrc, normPath);
+                                Lexer childLexer(std::move(childSrc), normPath, 1, 0, nullptr, target.string());
                                 std::vector<Token> childTokens = childLexer.scanTokens();
                                 while (!childTokens.empty() && childTokens.back().type == TokenType::EOF_TOKEN) {
                                     childTokens.pop_back();
@@ -1131,12 +1203,13 @@ public:
                         }
                         break;
                     default:
-                        std::cerr << "Lexer Error: Unknown character '" << c << "' at line " << line << "\n";
-                        exit(1);
+                        diag::fail("Unknown character '" + source.substr(start, characterEnd - start) + "'", diag::active);
                 }
             }
+            if (tokens.size() > tokenCount && !tokens.back().span.file)
+                tokens.back().span = span(start, current);
         }
-        tokens.push_back({TokenType::EOF_TOKEN, "", line});
+        tokens.push_back({TokenType::EOF_TOKEN, "", line, span(current, current)});
         return tokens;
     }
 };
@@ -1316,36 +1389,18 @@ struct Environment {
 // ------------------------------------------------------------
 // Errors are reported as:
 //   error: <message>
-//     --> file.thv:12
+//     --> file.thv:12:4
 //    12 | <the source line>
-//       |    ^
+//       |    ^~~~
 //     hint: what to check
 // ============================================================
 namespace diag {
-
-    inline std::string& primaryFile()  { static std::string f; return f; }
-    inline std::vector<std::string>& primaryLines() { static std::vector<std::string> l; return l; }
-    inline int& tokenLine() { static int n = 0; return n; }
-    inline std::string& tokenText() { static std::string t; return t; }
-    inline int& prevTokenLine() { static int n = 0; return n; }
-    inline std::string& prevTokenText() { static std::string t; return t; }
-
-    inline void loadSource(const std::string& path, const std::string& src) {
-        primaryFile() = path;
-        primaryLines().clear();
-        std::string cur;
-        for (char c : src) {
-            if (c == '\n') { primaryLines().push_back(cur); cur.clear(); }
-            else if (c != '\r') cur += c;
-        }
-        if (!cur.empty()) primaryLines().push_back(cur);
-    }
 
     inline std::string hintFor(const std::string& msg) {
         auto has = [&](const char* s) { return msg.find(s) != std::string::npos; };
         if (has("Unterminated string"))
             return "Close the string literal with a closing quote.";
-        if (has("Missing ')'") || has("Missing closing ')'") || has("Missing ')'"))
+        if (has("Missing ')'") || has("Missing closing ')'"))
             return "A ')' is missing: count the '(' and ')' of this expression.";
         if (has("Missing '('"))
             return "A '(' is missing right after the function or keyword name.";
@@ -1359,17 +1414,46 @@ namespace diag {
             return "for loops look like: for <int> i = 0; i < n; i = i + 1 { ... }  (or: for i in 0..n { ... })";
         if (has("not declared") || has("Not declared") || has("undeclared") || has("Undeclared"))
             return "Declare the name before using it, e.g. <int> x = 0";
-        if (has("Unknown type") || has("unknown type"))
-            return "Valid type tags: <int> <fl> <dbl> <str> <lst> <dict> <bl> <void>";
-        if (has("type") || has("Type"))
-            return "The value type does not match the declared type; use an explicit cast such as <dbl>value or to_int(value).";
-        if (has("Unexpected") || has("unexpected"))
-            return "Check the previous line: a bracket, ')' or keyword is probably missing.";
         if (has("cons.clear"))
             return "cons.clear() takes no argument: write cons.clear()";
-        if (has("min") || has("max"))
+        if (has("min()") || has("max()"))
             return "min()/max() need exactly two arguments of the same numeric type: min(a, b)";
         return "";
+    }
+
+    inline size_t displayWidth(const std::string& text, size_t first, size_t end) {
+        size_t width = 0;
+        for (size_t i = first; i < end; ++i)
+            if ((static_cast<unsigned char>(text[i]) & 0xc0) != 0x80) ++width;
+        return width;
+    }
+
+    inline void render(const std::string& message, SourceSpan span) {
+        std::string out = "error: " + message + "\n";
+        if (span.file && span.file <= sources.size()) {
+            const auto& source = sources[span.file - 1];
+            const auto offset = std::min(span.offset, source.text.size());
+            const auto line = std::upper_bound(source.lineStarts.begin(), source.lineStarts.end(), offset);
+            const size_t lineStart = *(line - 1);
+            size_t lineEnd = line == source.lineStarts.end() ? source.text.size() : *line - 1;
+            if (lineEnd > lineStart && source.text[lineEnd - 1] == '\r') --lineEnd;
+            const auto columnEnd = std::min(offset, lineEnd);
+            const auto column = displayWidth(source.text, lineStart, columnEnd) + 1;
+            const auto lineNo = std::to_string(line - source.lineStarts.begin());
+            out += "  --> " + (source.path.empty() ? "<input>" : source.path) + ":" + lineNo + ":" + std::to_string(column) + "\n";
+            out += "  " + lineNo + " | " + source.text.substr(lineStart, lineEnd - lineStart) + "\n";
+            out += "  " + std::string(lineNo.size(), ' ') + " | ";
+            for (size_t i = lineStart; i < columnEnd; ++i) {
+                const char byte = source.text[i];
+                if ((static_cast<unsigned char>(byte) & 0xc0) != 0x80) out += byte == '\t' ? '\t' : ' ';
+            }
+            const size_t width = displayWidth(source.text, columnEnd, std::min(lineEnd, offset + span.length));
+            out += "^" + std::string(width > 0 ? width - 1 : 0, '~') + "\n";
+            const auto hint = hintFor(message);
+            if (!hint.empty()) out += "  hint: " + hint + "\n";
+        }
+        out += "\n";
+        std::fputs(out.c_str(), stderr);
     }
 
     inline void emitErrorLine(const std::string& raw);
@@ -1401,105 +1485,37 @@ namespace diag {
             return;
         }
 
-        // Split "Prefix: message" and "[Prefix]: message"
-        std::string prefix = "error";
-        std::string msg = raw;
-        size_t bracket = raw.find("]: ");
-        size_t colon = raw.find(": ");
-        if (bracket != std::string::npos && (colon == std::string::npos || bracket < colon)) {
-            prefix = raw.substr(0, bracket + 1);
-            msg = raw.substr(bracket + 2);
-        } else if (colon != std::string::npos) {
-            prefix = raw.substr(0, colon);
-            msg = raw.substr(colon + 2);
+        const size_t separator = raw.find(": ");
+        std::string message = separator == std::string::npos ? raw : raw.substr(separator + 2);
+        const size_t legacyLine = message.rfind(" at line ");
+        if (active.file && legacyLine != std::string::npos) {
+            const size_t first = legacyLine + 9;
+            const auto last = message.find_first_not_of("0123456789", first);
+            if (first < message.size() && last == std::string::npos) message.erase(legacyLine);
         }
-
-        // Extract the reported line number
-        int lineNo = 0;
-        size_t where = msg.find("at line ");
-        if (where == std::string::npos) where = msg.find("line ");
-        if (where != std::string::npos) {
-            size_t p = msg.find_first_of("0123456789", where);
-            if (p != std::string::npos) {
-                size_t e = msg.find_first_not_of("0123456789", p);
-                try { lineNo = std::stoi(msg.substr(p, e - p)); } catch (...) { lineNo = 0; }
-            }
-        }
-
-        std::string clean = msg;
-        while (!clean.empty() && (clean.front() == ' ' || clean.front() == '\t')) clean.erase(clean.begin());
-        size_t tail = clean.find(" at line ");
-        if (tail != std::string::npos && lineNo > 0) clean = clean.substr(0, tail);
-        while (!clean.empty() && (clean.back() == '\n' || clean.back() == '\r')) clean.pop_back();
-
-        // A "Missing ..." error points at where parsing stopped; the real culprit is
-        // usually the token before it, so prefer the previous token in that case.
-        std::string caretToken = tokenText();
-        if (lineNo > 0 && prevTokenLine() > 0 && clean.find("Missing") != std::string::npos) {
-            lineNo = prevTokenLine();
-            caretToken = prevTokenText();
-        }
-
-        // Codegen errors carry no line number: locate the quoted identifier from the
-        // message in the source so the user still gets file:line context.
-        if (lineNo == 0 && !primaryLines().empty()) {
-            std::string quoted;
-            size_t q1 = clean.find('\'');
-            if (q1 != std::string::npos) {
-                size_t q2 = clean.find('\'', q1 + 1);
-                if (q2 != std::string::npos && q2 > q1 + 1) quoted = clean.substr(q1 + 1, q2 - q1 - 1);
-            }
-            if (quoted.empty()) {
-                size_t d1 = clean.find('"');
-                if (d1 != std::string::npos) {
-                    size_t d2 = clean.find('"', d1 + 1);
-                    if (d2 != std::string::npos && d2 > d1 + 1) quoted = clean.substr(d1 + 1, d2 - d1 - 1);
-                }
-            }
-            if (!quoted.empty()) {
-                for (size_t i = 0; i < primaryLines().size(); ++i) {
-                    if (primaryLines()[i].find(quoted) != std::string::npos) {
-                        lineNo = (int)i + 1;
-                        caretToken = quoted;
-                        break;
-                    }
-                }
-            }
-        }
-
-        std::string out;
-        out += "error: " + clean + "\n";
-        if (lineNo > 0) {
-            std::string file = primaryFile().empty() ? std::string("<input>") : primaryFile();
-            out += "  --> " + file + ":" + std::to_string(lineNo) + "\n";
-        }
-        if (lineNo > 0 && lineNo <= (int)primaryLines().size()) {
-            const std::string& src = primaryLines()[lineNo - 1];
-            std::string num = std::to_string(lineNo);
-            std::string pad(num.size(), ' ');
-            out += "  " + num + " | " + src + "\n";
-            size_t col = std::string::npos;
-            if (!caretToken.empty()) col = src.find(caretToken);
-            if (col == std::string::npos) col = src.find_first_not_of(" \t");
-            if (col == std::string::npos) col = 0;
-            out += "  " + pad + " | " + std::string(col, ' ') + "^\n";
-        }
-        if (lineNo > 0) {
-            std::string hint = hintFor(clean);
-            if (!hint.empty()) out += "  hint: " + hint + "\n";
-        }
-        out += "\n";
-        std::fputs(out.c_str(), stderr);
+        render(message, active);
     }
+
+    [[noreturn]] inline void fail(const std::string& message, SourceSpan span) {
+        render(message, span);
+        std::exit(1);
+    }
+
 }
 
 struct ASTNode {
+    SourceSpan span;
     virtual ~ASTNode() = default;
     virtual std::string generateCode() = 0;
     virtual ThavaType getType(std::shared_ptr<Environment> env) = 0;
 };
 
 using ASTPtr = std::unique_ptr<ASTNode>;
+
+static ASTPtr located(SourceSpan span, ASTPtr node) {
+    if (node && !node->span.file) node->span = span;
+    return node;
+}
 
 // Helper function to safely escape string literals in generated C++ code
 inline std::string escapeCppString(const std::string& s) {
@@ -1578,6 +1594,7 @@ public:
         return cppVarRef(name);
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         if (env->count(name)) return env->get(name);
         if (g_funcReturnTypes.count(name)) return ThavaType::FUNC;
         std::cerr << "Error: Variable '" << name << "' is not declared!\n";
@@ -1628,6 +1645,7 @@ public:
         return "(-(" + expr->generateCode() + "))";
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         ThavaType t = expr->getType(env);
         if (t == ThavaType::DECIMAL) {
             decimalArithmetic = true;
@@ -1651,6 +1669,7 @@ public:
         return "(!(" + expr->generateCode() + "))";
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         ThavaType t = expr->getType(env);
         if (t != ThavaType::BOOL && t != ThavaType::UNKNOWN) {
             std::cerr << "[Static Type Error]: 'not' operator only applies to boolean <bl>!\n";
@@ -1669,6 +1688,7 @@ public:
         return "(~(" + expr->generateCode() + "))";
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         ThavaType t = expr->getType(env);
         if (t != ThavaType::INT && t != ThavaType::UNKNOWN) {
             std::cerr << "[Static Type Error]: 'bnot' operator only applies to integer <int>!\n";
@@ -1693,6 +1713,7 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         ThavaType ct = condition->getType(env);
         if (ct != ThavaType::BOOL && ct != ThavaType::INT && ct != ThavaType::UNKNOWN) {
             std::cerr << "[Static Type Error]: Ternary condition must be of type <bl>!\n";
@@ -1747,6 +1768,7 @@ public:
         return "(" + left->generateCode() + " " + actualOp + " " + right->generateCode() + ")";
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         ThavaType lt = left->getType(env);
         ThavaType rt = right->getType(env);
         if (lt == ThavaType::DECIMAL || rt == ThavaType::DECIMAL) {
@@ -1780,8 +1802,8 @@ public:
             if (lt == ThavaType::STRING && rt == ThavaType::STRING) return ThavaType::STRING;
             if (lt == ThavaType::STRING || rt == ThavaType::STRING) {
                 if (lt != ThavaType::UNKNOWN && rt != ThavaType::UNKNOWN) {
-                    std::cerr << "[Static Type Error]: Operator '+' cannot be applied between <str> and non-string type!\n"
-                              << "Hint: Cast to <str> before concatenating.\n";
+                    std::cerr << "[Static Type Error]: Operator '+' cannot concatenate <" << typeToString(lt)
+                              << "> and <" << typeToString(rt) << ">.\n";
                     exit(1);
                 }
                 return ThavaType::STRING;
@@ -2609,6 +2631,7 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         if (!env->count(varName) || env->get(varName) != ThavaType::FILE) {
             std::cerr << "[Static Type Error]: Variable '" << varName << "' is not a valid file handle!\n";
             exit(1);
@@ -3219,6 +3242,7 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         if (g_funcParamTypes.count(name)) {
             const auto& expectedTypes = g_funcParamTypes[name];
             if (args.size() == expectedTypes.size()) {
@@ -3226,6 +3250,7 @@ public:
                     if (expectedTypes[i] == ThavaType::DECIMAL) coerceDecimal(args[i], env);
                     ThavaType actual = args[i]->getType(env);
                     if (!isCompatible(expectedTypes[i], actual) && actual != ThavaType::UNKNOWN) {
+                        diag::Scope argument(args[i]->span);
                         std::cerr << "[Static Type Error]: Argument #" << (i + 1)
                                   << " of function '" << name << "' expects type <" << typeToString(expectedTypes[i])
                                   << "> but received type <" << typeToString(actual) << ">!\n";
@@ -3261,6 +3286,7 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
+        diag::Scope location(span);
         if (targetType == ThavaType::DECIMAL) {
             coerceDecimal(expr, env, true);
         } else if (expr && expr->getType(env) == ThavaType::DECIMAL && targetType != ThavaType::STRING) {
@@ -3272,6 +3298,7 @@ public:
 };
 
 static void coerceDecimal(ASTPtr& expr, const std::shared_ptr<Environment>& env, bool text) {
+    diag::Scope location(expr->span);
     if (auto literal = dynamic_cast<LiteralNode*>(expr.get())) {
         const auto type = literal->getLitType();
         if (type == ThavaType::INT || type == ThavaType::DOUBLE || type == ThavaType::FLOAT) {
@@ -3909,6 +3936,7 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
                       const std::string& currentClassName = "",
                       const std::string& currentBaseClassName = "") {
     if (!expr) return;
+    diag::Scope location(expr->span);
     if (auto decimal = dynamic_cast<DecimalParseNode*>(expr)) {
         checkExpr(decimal->text.get(), env, currentClassName, currentBaseClassName);
         return;
@@ -4081,28 +4109,24 @@ class Parser {
     bool isAtEnd() const { return current >= tokens.size() || tokens[current].type == TokenType::EOF_TOKEN; }
     Token peek() const {
         if (current >= tokens.size()) {
-            return {TokenType::EOF_TOKEN, "", tokens.empty() ? 1 : tokens.back().line};
+            return tokens.empty() ? Token{TokenType::EOF_TOKEN, "", 1} : tokens.back();
         }
-        diag::tokenLine() = tokens[current].line;
-        diag::tokenText() = tokens[current].lexeme;
+        diag::active = tokens[current].span;
         return tokens[current];
     }
     Token peekAt(size_t offset) const {
         size_t idx = current + offset;
         if (idx >= tokens.size()) {
-            return {TokenType::EOF_TOKEN, "", tokens.empty() ? 1 : tokens.back().line};
+            return tokens.empty() ? Token{TokenType::EOF_TOKEN, "", 1} : tokens.back();
         }
         return tokens[idx];
     }
     Token advance() {
         if (current < tokens.size()) {
-            diag::tokenLine() = tokens[current].line;
-            diag::tokenText() = tokens[current].lexeme;
-            diag::prevTokenLine() = tokens[current].line;
-            diag::prevTokenText() = tokens[current].lexeme;
+            diag::active = tokens[current].span;
             return tokens[current++];
         }
-        return {TokenType::EOF_TOKEN, "", tokens.empty() ? 1 : tokens.back().line};
+        return tokens.empty() ? Token{TokenType::EOF_TOKEN, "", 1} : tokens.back();
     }
     bool check(TokenType type) { return peek().type == type; }
     bool match(TokenType type) {
@@ -4177,8 +4201,9 @@ class Parser {
 
     ASTPtr parseStringLiteral(const Token& token) {
         const auto& text = token.lexeme;
-        if (text.find("@{") == std::string::npos)
-            return std::make_unique<LiteralNode>(text, ThavaType::STRING);
+        if (!token.decodedOffsets)
+            return located(token.span, std::make_unique<LiteralNode>(text, ThavaType::STRING));
+        const auto& offsets = *token.decodedOffsets;
 
         std::vector<ASTPtr> parts;
         std::string plain;
@@ -4218,20 +4243,25 @@ class Parser {
                 }
             }
             if (pos == text.size()) {
-                std::cerr << "Parser Error: Unterminated string interpolation at line " << exprLine << "\n";
-                exit(1);
+                diag::fail("Unterminated string interpolation", {token.span.file, offsets[begin - 2], 2});
             }
-            Lexer lexer(text.substr(begin, pos - begin), "", exprLine);
+            Lexer lexer(text.substr(begin, pos - begin), "", exprLine,
+                        token.span.file, offsets.data() + begin);
             Parser parser(lexer.scanTokens());
             parts.push_back(parser.parseExpressionPublic(true));
             ++pos;
         }
         if (parts.empty()) return std::make_unique<LiteralNode>(std::move(plain), ThavaType::STRING);
         if (!plain.empty()) parts.push_back(std::make_unique<LiteralNode>(std::move(plain), ThavaType::STRING));
-        return std::make_unique<InterpolatedStringNode>(std::move(parts));
+        return located(token.span, std::make_unique<InterpolatedStringNode>(std::move(parts)));
     }
 
     ASTPtr primary() {
+        const auto token = peek();
+        return located(token.span, primaryImpl());
+    }
+
+    ASTPtr primaryImpl() {
         if (check(TokenType::RAISE_ERROR)) return raiseErrorStatement();
 
         // locvar keyword (current object reference)
@@ -4266,8 +4296,7 @@ class Parser {
                     do { args.push_back(expression()); } while (match(TokenType::COMMA));
                 }
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' after c." << cItem << " at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' after c." + cItem, previous().span.end());
                 }
                 return std::make_unique<CCallNode>(cItem, std::move(args));
             } else {
@@ -4286,8 +4315,7 @@ class Parser {
                 }
                 ASTPtr arg = expression();
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' after len(...) expression at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' after len(...) expression", previous().span.end());
                 }
                 return std::make_unique<LenNode>(std::move(arg));
             }
@@ -4299,8 +4327,7 @@ class Parser {
                 }
                 ASTPtr arg = expression();
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' after expression " << name << "(...) at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' after expression " + name + "(...)", previous().span.end());
                 }
                 ThavaType targetType = ThavaType::INT;
                 if (name == "to_str") targetType = ThavaType::STRING;
@@ -4355,8 +4382,7 @@ class Parser {
                 }
                 auto prompt = parseStringLiteral(advance());
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' after " << name << " at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' after " + name, previous().span.end());
                 }
                 return std::make_unique<InputCaseNode>(std::move(prompt), mode);
             }
@@ -4371,8 +4397,7 @@ class Parser {
                     do { args.push_back(expression()); } while (match(TokenType::COMMA));
                 }
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' in struct instantiation '" << name << "' at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' in struct instantiation '" + name + "'", previous().span.end());
                 }
                 return std::make_unique<StructInstantiateNode>(name, std::move(args), ctorLine);
             }
@@ -4387,8 +4412,7 @@ class Parser {
                     do { args.push_back(expression()); } while (match(TokenType::COMMA));
                 }
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' in class instantiation '" << name << "' at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' in class instantiation '" + name + "'", previous().span.end());
                 }
                 return std::make_unique<ClassInstantiateNode>(name, std::move(args), ctorLine);
             }
@@ -4402,8 +4426,7 @@ class Parser {
                     do { args.push_back(expression()); } while (match(TokenType::COMMA));
                 }
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' after function call " << name << " at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' after function call " + name, previous().span.end());
                 }
                 if (g_funcReturnTypes.count(name)) {
                     size_t totalExpected = g_funcParamTypes[name].size();
@@ -4473,7 +4496,7 @@ class Parser {
             if (!check(TokenType::STR_LIT)) { std::cerr << "Parser Error: key.input requires prompt string at line " << peek().line << "\n"; exit(1); }
             auto prompt = parseStringLiteral(advance());
 
-            if (!match(TokenType::RPAREN)) { std::cerr << "Parser Error: Missing ')' after key.input at line " << peek().line << "\n"; exit(1); }
+            if (!match(TokenType::RPAREN)) { diag::fail("Missing ')' after key.input", previous().span.end()); }
 
             if (inputType == ThavaType::DECIMAL)
                 return std::make_unique<DecimalParseNode>(std::make_unique<InputNode>(ThavaType::STRING, std::move(prompt)));
@@ -4483,8 +4506,7 @@ class Parser {
         if (match(TokenType::LPAREN)) {
             ASTPtr expr = expression();
             if (!match(TokenType::RPAREN)) {
-                std::cerr << "Parser Error: Missing closing ')'!\n";
-                exit(1);
+                diag::fail("Missing closing ')'", previous().span.end());
             }
             return expr;
         }
@@ -4494,7 +4516,7 @@ class Parser {
             if (!check(TokenType::RBRACKET)) {
                 do { elements.push_back(expression()); } while (match(TokenType::COMMA));
             }
-            if (!match(TokenType::RBRACKET)) { std::cerr << "Parser Error: Missing ']'\n"; exit(1); }
+            if (!match(TokenType::RBRACKET)) { diag::fail("Missing ']'", previous().span.end()); }
             return std::make_unique<CollectionNode>(std::move(elements), false);
         }
 
@@ -4540,21 +4562,22 @@ class Parser {
             }
         }
 
-        std::cerr << "Parser Error: Invalid syntax near token '" << peek().lexeme << "'\n";
-        exit(1);
+        const auto token = peek();
+        const auto found = token.type == TokenType::EOF_TOKEN ? "end of file" : "'" + token.lexeme + "'";
+        diag::fail("Expected an expression, found " + found, token.span);
     }
 
     ASTPtr postfix() {
         ASTPtr expr = primary();
         while (true) {
+            const auto expressionSpan = expr->span;
             if (check(TokenType::LBRACKET)) {
                 advance(); // Skip '['
                 ASTPtr idx = expression();
                 if (!match(TokenType::RBRACKET)) {
-                    std::cerr << "Parser Error: Missing ']' in index access at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ']' in index access", previous().span.end());
                 }
-                expr = std::make_unique<IndexNode>(std::move(expr), std::move(idx));
+                expr = located(expressionSpan, std::make_unique<IndexNode>(std::move(expr), std::move(idx)));
             } else if (check(TokenType::DOT)) {
                 advance(); // Skip '.'
                 int memberLine = peek().line;
@@ -4571,29 +4594,28 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after os." << memberName << " at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after os." + memberName, previous().span.end());
                         }
-                        expr = std::make_unique<OsMethodNode>(memberName, std::move(args), memberLine);
+                        expr = located(expressionSpan, std::make_unique<OsMethodNode>(memberName, std::move(args), memberLine));
                     } else {
-                        if (memberName == "IDOK") expr = std::make_unique<LiteralNode>("1", ThavaType::INT);
-                        else if (memberName == "IDCANCEL") expr = std::make_unique<LiteralNode>("2", ThavaType::INT);
-                        else if (memberName == "IDABORT") expr = std::make_unique<LiteralNode>("3", ThavaType::INT);
-                        else if (memberName == "IDRETRY") expr = std::make_unique<LiteralNode>("4", ThavaType::INT);
-                        else if (memberName == "IDIGNORE") expr = std::make_unique<LiteralNode>("5", ThavaType::INT);
-                        else if (memberName == "IDYES") expr = std::make_unique<LiteralNode>("6", ThavaType::INT);
-                        else if (memberName == "IDNO") expr = std::make_unique<LiteralNode>("7", ThavaType::INT);
-                        else if (memberName == "Warning") expr = std::make_unique<LiteralNode>("48", ThavaType::INT);
-                        else if (memberName == "Information" || memberName == "Infomation") expr = std::make_unique<LiteralNode>("64", ThavaType::INT);
-                        else if (memberName == "Question") expr = std::make_unique<LiteralNode>("32", ThavaType::INT);
-                        else if (memberName == "Error") expr = std::make_unique<LiteralNode>("16", ThavaType::INT);
-                        else if (memberName == "None") expr = std::make_unique<LiteralNode>("0", ThavaType::INT);
-                        else if (memberName == "OK") expr = std::make_unique<LiteralNode>("0", ThavaType::INT);
-                        else if (memberName == "OKCancel") expr = std::make_unique<LiteralNode>("1", ThavaType::INT);
-                        else if (memberName == "YesNoCancel") expr = std::make_unique<LiteralNode>("3", ThavaType::INT);
-                        else if (memberName == "YesNo") expr = std::make_unique<LiteralNode>("4", ThavaType::INT);
-                        else if (memberName == "RetryCancel") expr = std::make_unique<LiteralNode>("5", ThavaType::INT);
-                        else if (memberName == "name") expr = std::make_unique<OsMethodNode>("name", std::vector<ASTPtr>{}, memberLine);
+                        if (memberName == "IDOK") expr = located(expressionSpan, std::make_unique<LiteralNode>("1", ThavaType::INT));
+                        else if (memberName == "IDCANCEL") expr = located(expressionSpan, std::make_unique<LiteralNode>("2", ThavaType::INT));
+                        else if (memberName == "IDABORT") expr = located(expressionSpan, std::make_unique<LiteralNode>("3", ThavaType::INT));
+                        else if (memberName == "IDRETRY") expr = located(expressionSpan, std::make_unique<LiteralNode>("4", ThavaType::INT));
+                        else if (memberName == "IDIGNORE") expr = located(expressionSpan, std::make_unique<LiteralNode>("5", ThavaType::INT));
+                        else if (memberName == "IDYES") expr = located(expressionSpan, std::make_unique<LiteralNode>("6", ThavaType::INT));
+                        else if (memberName == "IDNO") expr = located(expressionSpan, std::make_unique<LiteralNode>("7", ThavaType::INT));
+                        else if (memberName == "Warning") expr = located(expressionSpan, std::make_unique<LiteralNode>("48", ThavaType::INT));
+                        else if (memberName == "Information" || memberName == "Infomation") expr = located(expressionSpan, std::make_unique<LiteralNode>("64", ThavaType::INT));
+                        else if (memberName == "Question") expr = located(expressionSpan, std::make_unique<LiteralNode>("32", ThavaType::INT));
+                        else if (memberName == "Error") expr = located(expressionSpan, std::make_unique<LiteralNode>("16", ThavaType::INT));
+                        else if (memberName == "None") expr = located(expressionSpan, std::make_unique<LiteralNode>("0", ThavaType::INT));
+                        else if (memberName == "OK") expr = located(expressionSpan, std::make_unique<LiteralNode>("0", ThavaType::INT));
+                        else if (memberName == "OKCancel") expr = located(expressionSpan, std::make_unique<LiteralNode>("1", ThavaType::INT));
+                        else if (memberName == "YesNoCancel") expr = located(expressionSpan, std::make_unique<LiteralNode>("3", ThavaType::INT));
+                        else if (memberName == "YesNo") expr = located(expressionSpan, std::make_unique<LiteralNode>("4", ThavaType::INT));
+                        else if (memberName == "RetryCancel") expr = located(expressionSpan, std::make_unique<LiteralNode>("5", ThavaType::INT));
+                        else if (memberName == "name") expr = located(expressionSpan, std::make_unique<OsMethodNode>("name", std::vector<ASTPtr>{}, memberLine));
                         else {
                             std::cerr << "Parser Error: Property or constant 'os." << memberName << "' is unknown at line " << memberLine << "\n";
                             exit(1);
@@ -4610,11 +4632,10 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after time." << memberName << " at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after time." + memberName, previous().span.end());
                         }
                     }
-                    expr = std::make_unique<TimeMethodNode>(memberName, std::move(args), memberLine);
+                    expr = located(expressionSpan, std::make_unique<TimeMethodNode>(memberName, std::move(args), memberLine));
                     continue;
                 }
 
@@ -4626,12 +4647,11 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after clib." << memberName << " at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after clib." + memberName, previous().span.end());
                         }
                     }
                     g_hasCLib = true;
-                    expr = std::make_unique<CLibMethodNode>(memberName, nullptr, std::move(args), memberLine);
+                    expr = located(expressionSpan, std::make_unique<CLibMethodNode>(memberName, nullptr, std::move(args), memberLine));
                     continue;
                 }
 
@@ -4643,11 +4663,10 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after ." << memberName << "() at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after ." + memberName + "()", previous().span.end());
                         }
                         g_hasCLib = true;
-                        expr = std::make_unique<CLibMethodNode>(memberName, std::move(expr), std::move(args), memberLine);
+                        expr = located(expressionSpan, std::make_unique<CLibMethodNode>(memberName, std::move(expr), std::move(args), memberLine));
                     }
                     else if (memberName == "to_int" || memberName == "to_str" || memberName == "to_float" || memberName == "to_double") {
                         if (!match(TokenType::RPAREN)) {
@@ -4658,21 +4677,21 @@ class Parser {
                         if (memberName == "to_str") targetType = ThavaType::STRING;
                         else if (memberName == "to_float") targetType = ThavaType::FLOAT;
                         else if (memberName == "to_double") targetType = ThavaType::DOUBLE;
-                        expr = std::make_unique<CastNode>(targetType, std::move(expr));
+                        expr = located(expressionSpan, std::make_unique<CastNode>(targetType, std::move(expr)));
                     }
                     else if (memberName == "lower" || memberName == "upper" || memberName == "title" || memberName == "strip") {
                         if (!match(TokenType::RPAREN)) {
                             std::cerr << "Parser Error: '." << memberName << "()' khong nhan arguments, at line " << peek().line << "\n";
                             exit(1);
                         }
-                        expr = std::make_unique<StrMethodNode>(std::move(expr), memberName);
+                        expr = located(expressionSpan, std::make_unique<StrMethodNode>(std::move(expr), memberName));
                     }
                     else if (memberName == "len" || memberName == "size") {
                         if (!match(TokenType::RPAREN)) {
                             std::cerr << "Parser Error: '." << memberName << "()' khong nhan arguments, at line " << peek().line << "\n";
                             exit(1);
                         }
-                        expr = std::make_unique<LenNode>(std::move(expr));
+                        expr = located(expressionSpan, std::make_unique<LenNode>(std::move(expr)));
                     }
                     else if (memberName == "keys" || memberName == "values" || memberName == "items" ||
                              memberName == "clear" || memberName == "get" || memberName == "has" ||
@@ -4682,11 +4701,10 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after ." << memberName << "() at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after ." + memberName + "()", previous().span.end());
                         }
                         g_hasDict = true;
-                        expr = std::make_unique<DictMethodNode>(std::move(expr), memberName, std::move(args), memberLine);
+                        expr = located(expressionSpan, std::make_unique<DictMethodNode>(std::move(expr), memberName, std::move(args), memberLine));
                     }
                     else if (memberName == "replace" || memberName == "find" || memberName == "index" ||
                              memberName == "startswith" || memberName == "endswith" ||
@@ -4696,10 +4714,9 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after ." << memberName << "() at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after ." + memberName + "()", previous().span.end());
                         }
-                        expr = std::make_unique<StrAdvMethodNode>(std::move(expr), memberName, std::move(args), memberLine);
+                        expr = located(expressionSpan, std::make_unique<StrAdvMethodNode>(std::move(expr), memberName, std::move(args), memberLine));
                     }
                     else if (memberName == "split") {
                         std::vector<ASTPtr> args;
@@ -4708,8 +4725,7 @@ class Parser {
                             if (match(TokenType::COMMA)) {
                                 ASTPtr idxArg = expression();
                                 if (!match(TokenType::RPAREN)) {
-                                    std::cerr << "Parser Error: Missing ')' after .split() at line " << peek().line << "\n";
-                                    exit(1);
+                                    diag::fail("Missing ')' after .split()", previous().span.end());
                                 }
                                 auto coll = dynamic_cast<CollectionNode*>(idxArg.get());
                                 if (!coll || coll->getIsTuple() || coll->getElements().empty() || coll->getElements().size() > 2) {
@@ -4718,20 +4734,19 @@ class Parser {
                                 }
                                 std::string aCode = coll->getElements()[0]->generateCode();
                                 std::string bCode = coll->getElements().size() == 2 ? coll->getElements()[1]->generateCode() : aCode;
-                                expr = std::make_unique<StrSplitNode>(std::move(expr), std::move(firstArg), aCode, bCode);
+                                expr = located(expressionSpan, std::make_unique<StrSplitNode>(std::move(expr), std::move(firstArg), aCode, bCode));
                                 continue;
                             } else {
                                 args.push_back(std::move(firstArg));
                             }
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after .split() at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after .split()", previous().span.end());
                         }
                         if (args.empty()) {
                             args.push_back(std::make_unique<LiteralNode>("\" \"", ThavaType::STRING));
                         }
-                        expr = std::make_unique<StrAdvMethodNode>(std::move(expr), "split", std::move(args), memberLine);
+                        expr = located(expressionSpan, std::make_unique<StrAdvMethodNode>(std::move(expr), "split", std::move(args), memberLine));
                     }
                     else if (memberName == "getsubstring") {
                         ASTPtr startExpr = expression();
@@ -4741,10 +4756,9 @@ class Parser {
                         }
                         ASTPtr endExpr = expression();
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after .getsubstring() at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after .getsubstring()", previous().span.end());
                         }
-                        expr = std::make_unique<StrSubstringNode>(std::move(expr), std::move(startExpr), std::move(endExpr));
+                        expr = located(expressionSpan, std::make_unique<StrSubstringNode>(std::move(expr), std::move(startExpr), std::move(endExpr)));
                     }
                     else if (memberName == "addval" || memberName == "removeval" || memberName == "assign" || memberName == "delval") {
                         auto* varNode = dynamic_cast<VarNode*>(expr.get());
@@ -4759,10 +4773,9 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after ." << memberName << " at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after ." + memberName, previous().span.end());
                         }
-                        expr = std::make_unique<ListMethodNode>(varName, memberName, std::move(args));
+                        expr = located(expressionSpan, std::make_unique<ListMethodNode>(varName, memberName, std::move(args)));
                     }
                     else if (memberName == "read" || memberName == "read_line" || memberName == "readline" ||
                              memberName == "read_lines" || memberName == "readlines" ||
@@ -4779,10 +4792,9 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after ." << memberName << " at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after ." + memberName, previous().span.end());
                         }
-                        expr = std::make_unique<FileMethodNode>(varName, memberName, std::move(args));
+                        expr = located(expressionSpan, std::make_unique<FileMethodNode>(varName, memberName, std::move(args)));
                     }
                     else {
                         // Class method: obj.method(args...) or locvar.method(args...)
@@ -4791,10 +4803,9 @@ class Parser {
                             do { args.push_back(expression()); } while (match(TokenType::COMMA));
                         }
                         if (!match(TokenType::RPAREN)) {
-                            std::cerr << "Parser Error: Missing ')' after ." << memberName << " at line " << peek().line << "\n";
-                            exit(1);
+                            diag::fail("Missing ')' after ." + memberName, previous().span.end());
                         }
-                        expr = std::make_unique<MethodCallNode>(std::move(expr), memberName, std::move(args), memberLine);
+                        expr = located(expressionSpan, std::make_unique<MethodCallNode>(std::move(expr), memberName, std::move(args), memberLine));
                     }
                 } else {
                     auto* enumVarNode = dynamic_cast<VarNode*>(expr.get());
@@ -4806,10 +4817,10 @@ class Parser {
                             std::cerr << "Parser Error: Enum '" << enumName << "' has no member '" << memberName << "' at line " << memberLine << "\n";
                             exit(1);
                         }
-                        expr = std::make_unique<LiteralNode>(std::to_string(mit->second), ThavaType::INT);
+                        expr = located(expressionSpan, std::make_unique<LiteralNode>(std::to_string(mit->second), ThavaType::INT));
                     } else {
                         // Property access of Class or Struct: obj.field or locvar.field
-                        expr = std::make_unique<MemberAccessNode>(std::move(expr), memberName, memberLine);
+                        expr = located(expressionSpan, std::make_unique<MemberAccessNode>(std::move(expr), memberName, memberLine));
                     }
                 }
             } else {
@@ -4820,24 +4831,25 @@ class Parser {
     }
 
     ASTPtr unary() {
+        const auto token = peek();
         // Explicit type cast syntax: <type> expression
         if (isTypeToken(peek().type) && peek().type != TokenType::TYPE_VOID && peek().type != TokenType::TYPE_CUSTOM) {
             std::string castWidth;
             ThavaType targetType = parseType(&castWidth);
             ASTPtr expr = unary();
-            return std::make_unique<CastNode>(targetType, std::move(expr), castWidth);
+            return located(token.span, std::make_unique<CastNode>(targetType, std::move(expr), castWidth));
         }
         if (check(TokenType::NOT)) {
             advance();
-            return std::make_unique<UnaryNotNode>(unary());
+            return located(token.span, std::make_unique<UnaryNotNode>(unary()));
         }
         if (check(TokenType::BNOT)) {
             advance();
-            return std::make_unique<UnaryBNotNode>(unary());
+            return located(token.span, std::make_unique<UnaryBNotNode>(unary()));
         }
         if (check(TokenType::MINUS)) {
             advance();
-            return std::make_unique<UnaryMinusNode>(unary());
+            return located(token.span, std::make_unique<UnaryMinusNode>(unary()));
         }
         if (check(TokenType::PLUS)) {
             advance();
@@ -4849,8 +4861,8 @@ class Parser {
     ASTPtr power() {
         ASTPtr expr = unary();
         if (check(TokenType::POW)) {
-            advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), "**", power());
+            const auto op = advance();
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, power()));
         }
         return expr;
     }
@@ -4859,7 +4871,7 @@ class Parser {
         ASTPtr expr = power();
         while (check(TokenType::STAR) || check(TokenType::SLASH) || check(TokenType::MODULO) || check(TokenType::FLOOR_DIV)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, power());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, power()));
         }
         return expr;
     }
@@ -4868,7 +4880,7 @@ class Parser {
         ASTPtr expr = multiplication();
         while (check(TokenType::PLUS) || check(TokenType::MINUS)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, multiplication());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, multiplication()));
         }
         return expr;
     }
@@ -4877,7 +4889,7 @@ class Parser {
         ASTPtr expr = addition();
         while (check(TokenType::BSHL) || check(TokenType::BSHR)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, addition());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, addition()));
         }
         return expr;
     }
@@ -4886,7 +4898,7 @@ class Parser {
         ASTPtr expr = bitShift();
         while (check(TokenType::BAND)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitShift());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitShift()));
         }
         return expr;
     }
@@ -4895,7 +4907,7 @@ class Parser {
         ASTPtr expr = bitAnd();
         while (check(TokenType::BXOR)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitAnd());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitAnd()));
         }
         return expr;
     }
@@ -4904,7 +4916,7 @@ class Parser {
         ASTPtr expr = bitXor();
         while (check(TokenType::BOR)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitXor());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitXor()));
         }
         return expr;
     }
@@ -4914,7 +4926,7 @@ class Parser {
         while (check(TokenType::LESS) || check(TokenType::LESS_EQ) ||
                check(TokenType::GREATER) || check(TokenType::GREATER_EQ)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitOr());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, bitOr()));
         }
         return expr;
     }
@@ -4923,11 +4935,11 @@ class Parser {
         ASTPtr expr = relational();
         while (check(TokenType::EQ) || check(TokenType::NOT_EQ) || check(TokenType::IN)) {
             if (check(TokenType::IN)) {
-                advance();
-                expr = std::make_unique<InNode>(std::move(expr), relational());
+                const auto op = advance();
+                expr = located(op.span, std::make_unique<InNode>(std::move(expr), relational()));
             } else {
                 Token op = advance();
-                expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, relational());
+                expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, relational()));
             }
         }
         return expr;
@@ -4937,7 +4949,7 @@ class Parser {
         ASTPtr expr = comparison();
         while (check(TokenType::AND)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, comparison());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, comparison()));
         }
         return expr;
     }
@@ -4946,7 +4958,7 @@ class Parser {
         ASTPtr expr = logicalAnd();
         while (check(TokenType::OR)) {
             Token op = advance();
-            expr = std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, logicalAnd());
+            expr = located(op.span, std::make_unique<BinaryOpNode>(std::move(expr), op.lexeme, logicalAnd()));
         }
         return expr;
     }
@@ -4954,20 +4966,27 @@ class Parser {
     ASTPtr conditional() {
         ASTPtr expr = logicalOr();
         if (check(TokenType::IF) && hasElseBeforeBrace(current + 1)) {
-            advance();
+            const auto span = advance().span;
             ASTPtr cond = logicalOr();
             if (!match(TokenType::ELSE)) {
                 std::cerr << "Parser Error: Missing 'else' in conditional expression at line " << peek().line << "\n";
                 exit(1);
             }
             ASTPtr falseExpr = conditional();
-            return std::make_unique<ConditionalExprNode>(std::move(cond), std::move(expr), std::move(falseExpr));
+            return located(span, std::make_unique<ConditionalExprNode>(std::move(cond), std::move(expr), std::move(falseExpr)));
         }
         return expr;
     }
 
-    ASTPtr expression() { 
-        return conditional(); 
+    ASTPtr expression() {
+        const auto token = peek();
+        const auto before = previous();
+        if (isTypeToken(token.type) && peekAt(1).type == TokenType::IDENTIFIER &&
+            peekAt(2).type == TokenType::ASSIGN && before.span.file &&
+            (token.span.file != before.span.file || token.line > before.line)) {
+            diag::fail("Expected an expression before the next declaration", before.span.end());
+        }
+        return conditional();
     }
 
     ASTPtr varDeclStatement() {
@@ -4984,7 +5003,8 @@ class Parser {
                              peekAt(1).type != TokenType::ASSIGN;
         if (isConst) advance();
         if (!check(TokenType::IDENTIFIER)) { std::cerr << "Parser Error: Missing variable name at line " << peek().line << "\n"; exit(1); }
-        std::string name = advance().lexeme;
+        const auto nameToken = advance();
+        std::string name = nameToken.lexeme;
 
         ASTPtr expr = nullptr;
         if (match(TokenType::ASSIGN)) {
@@ -4994,11 +5014,10 @@ class Parser {
                       << tokens[current - 1].line << "\n";
             exit(1);
         } else if (targetType != ThavaType::CUSTOM) {
-            std::cerr << "Parser Error: Missing '=' in assignment at line " << peek().line << "\n";
-            exit(1);
+            diag::fail("Missing '=' and an initializer after variable '" + name + "'", nameToken.span.end());
         }
 
-        return std::make_unique<VarDeclNode>(targetType, name, std::move(expr), customTypeName, isConst);
+        return located(nameToken.span, std::make_unique<VarDeclNode>(targetType, name, std::move(expr), customTypeName, isConst));
     }
 
     ASTPtr assignOrExprStatement() {
@@ -5024,8 +5043,7 @@ class Parser {
                 advance(); // Skip '['
                 ASTPtr idxExpr = expression();
                 if (!match(TokenType::RBRACKET)) {
-                    std::cerr << "Parser Error: Missing ']' in element assignment '" << varName << "[...]' at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ']' in element assignment '" + varName + "[...]'", previous().span.end());
                 }
                 std::string op = advance().lexeme; // Skip assignment operator (=, +=, -=, ...)
                 ASTPtr valExpr = expression();
@@ -5100,7 +5118,8 @@ class Parser {
 
         ASTPtr expr = expression();
 
-        if (!match(TokenType::RPAREN)) { std::cerr << "Parser Error: Missing closing ')' in cons.out at line " << peek().line << "\n"; exit(1); }
+        if (!match(TokenType::RPAREN))
+            diag::fail("Missing closing ')' in cons.out", previous().span.end());
 
         return std::make_unique<ConsOutNode>(std::move(expr));
     }
@@ -5148,7 +5167,7 @@ class Parser {
                 std::vector<ASTPtr> args;
                 args.push_back(expression());
                 while (match(TokenType::COMMA)) args.push_back(expression());
-                if (!match(TokenType::RPAREN)) { std::cerr << "Parser Error: Missing ')' after range(...) at line " << peek().line << "\n"; exit(1); }
+                if (!match(TokenType::RPAREN)) { diag::fail("Missing ')' after range(...)", previous().span.end()); }
 
                 if (args.size() < 1 || args.size() > 3) {
                     std::cerr << "Parser Error: range() accepts 1 to 3 arguments (stop) / (start, stop) / (start, stop, step) at line " << peek().line << "\n";
@@ -5225,12 +5244,13 @@ class Parser {
     }
 
     ASTPtr blockStatement() {
-        advance(); // Skip '{'
+        const auto open = advance();
         std::vector<ASTPtr> statements;
         while (!check(TokenType::RBRACE) && !check(TokenType::EOF_TOKEN)) {
             statements.push_back(statement());
         }
-        if (!match(TokenType::RBRACE)) { std::cerr << "Parser Error: Missing '}' to close block scope at line " << peek().line << "\n"; exit(1); }
+        if (!match(TokenType::RBRACE))
+            diag::fail("Missing '}' to close this block", open.span);
         return std::make_unique<BlockNode>(std::move(statements));
     }
 
@@ -5246,8 +5266,7 @@ class Parser {
             modeExpr = expression();
         }
         if (!match(TokenType::RPAREN)) {
-            std::cerr << "Parser Error: Missing ')' after file.open(...) arguments at line " << peek().line << "\n";
-            exit(1);
+            diag::fail("Missing ')' after file.open(...) arguments", previous().span.end());
         }
         if (!match(TokenType::AS)) {
             std::cerr << "Parser Error: Expected 'as' keyword after file.open(...) at line " << peek().line << "\n";
@@ -5382,14 +5401,18 @@ class Parser {
         ASTPtr msgExpr = expression();
 
         if (!match(TokenType::RPAREN)) {
-            std::cerr << "Parser Error: Missing ')' closing raise_error at line " << peek().line << "\n";
-            exit(1);
+            diag::fail("Missing ')' closing raise_error", previous().span.end());
         }
 
         return std::make_unique<RaiseErrorNode>(isCompileTime, std::move(typeExpr), std::move(msgExpr), errLine);
     }
 
     ASTPtr statement() {
+        const auto token = peek();
+        return located(token.span, statementImpl());
+    }
+
+    ASTPtr statementImpl() {
         if (check(TokenType::IDENTIFIER) && peek().lexeme == "global" && isTypeToken(peekAt(1).type)) {
             advance();
             std::string customType;
@@ -5517,8 +5540,7 @@ class Parser {
             }
             baseClassName = advance().lexeme;
             if (!match(TokenType::RPAREN)) {
-                std::cerr << "Parser Error: Missing ')' after base class name at line " << peek().line << "\n";
-                exit(1);
+                diag::fail("Missing ')' after base class name", previous().span.end());
             }
             if (g_classNames.find(baseClassName) == g_classNames.end()) {
                 std::cerr << "Parser Error: Base class '" << baseClassName << "' is not declared before subclass '" << className << "' at line " << peek().line << "\n";
@@ -5606,8 +5628,7 @@ class Parser {
                     } while (match(TokenType::COMMA));
                 }
                 if (!match(TokenType::RPAREN)) {
-                    std::cerr << "Parser Error: Missing ')' after method parameters at line " << peek().line << "\n";
-                    exit(1);
+                    diag::fail("Missing ')' after method parameters", previous().span.end());
                 }
 
                 if (match(TokenType::ARROW)) {
@@ -5894,7 +5915,7 @@ class Parser {
                         else if (check(TokenType::RBRACE)) brDepth--;
                         defTokens.push_back(advance());
                     }
-                    defTokens.push_back({TokenType::EOF_TOKEN, "", peek().line});
+                    defTokens.push_back({TokenType::EOF_TOKEN, "", peek().line, peek().span});
                     defaultArgTokens.push_back(defTokens);
                 } else {
                     if (hasDefault) {
@@ -5907,8 +5928,7 @@ class Parser {
             } while (match(TokenType::COMMA));
         }
         if (!match(TokenType::RPAREN)) {
-            std::cerr << "Parser Error: Missing ')' after function parameters at line " << peek().line << "\n";
-            exit(1);
+            diag::fail("Missing ')' after function parameters", previous().span.end());
         }
 
         // Support return type arrow syntax: func name(...) -> <type>
@@ -6010,7 +6030,7 @@ class Parser {
                         else if (check(TokenType::RBRACE)) brDepth--;
                         defTokens.push_back(advance());
                     }
-                    defTokens.push_back({TokenType::EOF_TOKEN, "", peek().line});
+                    defTokens.push_back({TokenType::EOF_TOKEN, "", peek().line, peek().span});
                     defaultArgTokens.push_back(defTokens);
                 } else {
                     if (hasDefault) {
@@ -6023,8 +6043,7 @@ class Parser {
             } while (match(TokenType::COMMA));
         }
         if (!match(TokenType::RPAREN)) {
-            std::cerr << "Parser Error: Missing ')' after function parameters at line " << peek().line << "\n";
-            exit(1);
+            diag::fail("Missing ')' after function parameters", previous().span.end());
         }
 
         if (match(TokenType::ARROW)) {
@@ -6103,7 +6122,7 @@ class Parser {
                         else if (check(TokenType::RBRACE)) brDepth--;
                         defTokens.push_back(advance());
                     }
-                    defTokens.push_back({TokenType::EOF_TOKEN, "", peek().line});
+                    defTokens.push_back({TokenType::EOF_TOKEN, "", peek().line, peek().span});
                     defaultArgTokens.push_back(defTokens);
                 } else {
                     if (hasDefault) {
@@ -6116,8 +6135,7 @@ class Parser {
             } while (match(TokenType::COMMA));
         }
         if (!match(TokenType::RPAREN)) {
-            std::cerr << "Parser Error: Missing ')' after function parameters cfunc at line " << peek().line << "\n";
-            exit(1);
+            diag::fail("Missing ')' after function parameters cfunc", previous().span.end());
         }
 
         if (match(TokenType::ARROW)) {
@@ -6145,6 +6163,7 @@ public:
     Parser(std::vector<Token> t) : tokens(std::move(t)) {}
 
     ASTPtr parseExpressionPublic(bool requireEnd = false) {
+        diag::Scope location;
         auto parsed = expression();
         if (requireEnd && !check(TokenType::EOF_TOKEN)) {
             std::cerr << "Parser Error: Unexpected token in string interpolation at line " << peek().line << "\n";
@@ -6154,6 +6173,7 @@ public:
     }
 
     std::vector<ASTPtr> parse() {
+        diag::Scope location;
         std::vector<ASTPtr> statements;
         while (!check(TokenType::EOF_TOKEN)) {
             statements.push_back(statement());
@@ -6235,6 +6255,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
                 const std::string& currentClassName = "",
                 const std::string& currentBaseClassName = "") {
     if (!node) return;
+    diag::Scope location(node->span);
     if (auto listMethod = dynamic_cast<ListMethodNode*>(node))
         checkExpr(listMethod, env, currentClassName, currentBaseClassName);
     if (auto dictMethod = dynamic_cast<DictMethodNode*>(node)) {
@@ -6274,6 +6295,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             if (varDecl->varType == ThavaType::DECIMAL) coerceDecimal(varDecl->initExpr, env);
             ThavaType exprType = varDecl->initExpr->getType(env);
             if (!isCompatible(varDecl->varType, exprType) && exprType != ThavaType::UNKNOWN) {
+                diag::Scope initializer(varDecl->initExpr->span);
                 std::cerr << "[Static Type Error]: Variable '" << varDecl->varName 
                           << "' was declared with type <" << typeToString(varDecl->varType)
                           << "> but assigned a value of type <" << typeToString(exprType) << ">!\n";
@@ -6322,6 +6344,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
         ThavaType exprType = assign->expr->getType(env);
         if (!isCompatible(varType, exprType) && exprType != ThavaType::UNKNOWN && exprType != ThavaType::NONE) {
+            diag::Scope value(assign->expr->span);
             std::cerr << "[Static Type Error]: Cannot assign expression of type <" << typeToString(exprType)
                       << "> to variable '" << assign->name << "' of type <" << typeToString(varType) << ">!\n";
             exit(1);
@@ -6374,7 +6397,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
     else if (auto ifNode = dynamic_cast<IfNode*>(node)) {
         ThavaType condType = ifNode->cond->getType(env);
         if (condType != ThavaType::BOOL && condType != ThavaType::UNKNOWN) {
-            std::cerr << "[Static Type Error]: 'if' condition must be of type <bl>!\n";
+            diag::Scope condition(ifNode->cond->span);
+            std::cerr << "[Static Type Error]: 'if' condition must have type <bl>, got <"
+                      << typeToString(condType) << ">.\n";
             exit(1);
         }
         checkExpr(ifNode->cond.get(), env, currentClassName, currentBaseClassName);
@@ -6386,7 +6411,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
     else if (auto whileNode = dynamic_cast<WhileNode*>(node)) {
         ThavaType condType = whileNode->cond->getType(env);
         if (condType != ThavaType::BOOL && condType != ThavaType::UNKNOWN) {
-            std::cerr << "[Static Type Error]: 'while' condition must be of type <bl>!\n";
+            diag::Scope condition(whileNode->cond->span);
+            std::cerr << "[Static Type Error]: 'while' condition must have type <bl>, got <"
+                      << typeToString(condType) << ">.\n";
             exit(1);
         }
         checkExpr(whileNode->cond.get(), env, currentClassName, currentBaseClassName);
@@ -6428,9 +6455,10 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             }
             if (currentFuncRetType != ThavaType::UNKNOWN) {
                 if (!isCompatible(currentFuncRetType, retType) && retType != ThavaType::UNKNOWN) {
+                    diag::Scope value(ret->expr->span);
                     std::cerr << "[Static Type Error]: Function '" << currentFuncName
-                              << "' khai bao tra ve <" << typeToString(currentFuncRetType)
-                              << "> but 'return' returns type <" << typeToString(retType) << ">!\n";
+                              << "' declares return type <" << typeToString(currentFuncRetType)
+                              << "> but returns <" << typeToString(retType) << ">.\n";
                     exit(1);
                 }
             }
@@ -6481,7 +6509,9 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         checkTypes(forNode->init.get(), innerEnv, currentFuncRetType, currentFuncName, currentClassName, currentBaseClassName);
         ThavaType condType = forNode->cond->getType(innerEnv);
         if (condType != ThavaType::BOOL && condType != ThavaType::UNKNOWN) {
-            std::cerr << "[Static Type Error]: 'for' condition must be of type <bl>!\n";
+            diag::Scope condition(forNode->cond->span);
+            std::cerr << "[Static Type Error]: 'for' condition must have type <bl>, got <"
+                      << typeToString(condType) << ">.\n";
             exit(1);
         }
         checkExpr(forNode->cond.get(), innerEnv, currentClassName, currentBaseClassName);
@@ -6958,8 +6988,7 @@ int main(int argc, char* argv[]) {
     g_hasCLib = false;
 
     std::vector<Token> tokens;
-    int lastLine = 1;
-    bool firstSource = true;
+    Token eof{TokenType::EOF_TOKEN, "", 1};
     for (const auto& inFile : inputFiles) {
         std::error_code ec;
         std::string normInput = std::filesystem::weakly_canonical(inFile, ec).string();
@@ -6976,18 +7005,16 @@ int main(int argc, char* argv[]) {
         buffer << file.rdbuf();
         std::string source = buffer.str();
 
-        if (firstSource) { diag::loadSource(inFile, source); firstSource = false; }
-
         g_attachedFiles.insert(normInput);
-        Lexer lexer(source, normInput);
+        Lexer lexer(std::move(source), normInput, 1, 0, nullptr, inFile);
         auto fileTokens = lexer.scanTokens();
         if (!fileTokens.empty() && fileTokens.back().type == TokenType::EOF_TOKEN) {
-            lastLine = fileTokens.back().line;
+            eof = fileTokens.back();
             fileTokens.pop_back();
         }
         tokens.insert(tokens.end(), fileTokens.begin(), fileTokens.end());
     }
-    tokens.push_back({TokenType::EOF_TOKEN, "", lastLine});
+    tokens.push_back(std::move(eof));
 
     // A program may declare its own variable named `c`; then `c.<name>` is member
     // access, not the C-interop namespace (also honoured by @{...} snippets).
@@ -7025,6 +7052,7 @@ int main(int argc, char* argv[]) {
     g_globalVars.clear();
     for (const auto& stmt : ast) {
         if (auto vd = dynamic_cast<VarDeclNode*>(stmt.get())) {
+            diag::Scope location(vd->span);
             if (globalEnv->variables.count(vd->varName) && (vd->isConst || globalEnv->isConst(vd->varName))) {
                 std::cerr << "[Static Type Error]: Const variable '" << vd->varName
                           << "' has already been declared in the same scope!\n";

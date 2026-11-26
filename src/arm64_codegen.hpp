@@ -1050,6 +1050,7 @@ public:
     }
 
     ThavaType compileExpression(ASTNode* node, ThavaType expected = ThavaType::UNKNOWN) {
+        diag::Scope location(node ? node->span : SourceSpan{});
         const auto actual = compileExpressionRaw(node, expected);
         if (actual == ThavaType::BOXED && expected != ThavaType::UNKNOWN) return emitUnbox(expected);
         if ((expected == ThavaType::MULTYPE && actual != ThavaType::MULTYPE) ||
@@ -3388,6 +3389,7 @@ public:
     // STATEMENT CODE GENERATION
     // ==========================================
     void compileStatement(ASTNode* node) {
+        diag::Scope location(node ? node->span : SourceSpan{});
         if (!node) return;
         checkUnsupported(node);
         checkRuntimeSupport(node);

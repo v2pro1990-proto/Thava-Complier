@@ -1452,6 +1452,7 @@ class Codegen {
     }
 
     ThavaType expression(ASTNode* node) {
+        diag::Scope location(node ? node->span : SourceSpan{});
         if (auto literal = dynamic_cast<DecimalParseNode*>(node))
             return emitDecimalOperation(THAVA_DECIMAL_PARSE, literal->text.get());
         if (auto minus = dynamic_cast<UnaryMinusNode*>(node); minus && minus->decimalArithmetic)
@@ -2008,6 +2009,7 @@ class Codegen {
     }
 
     void statement(ASTNode* node) {
+        diag::Scope location(node ? node->span : SourceSpan{});
         if (auto decl = dynamic_cast<VarDeclNode*>(node)) {
             auto& slot = lookup(decl->varName);
             if (decl->initExpr) storeValue(slot, expression(decl->initExpr.get()));

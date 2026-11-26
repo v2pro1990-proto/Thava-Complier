@@ -215,6 +215,41 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
         assert result.returncode != 0 and diagnostic in result.stdout.lower(), result.stdout
     print("Invalid string interpolations rejected", flush=True)
 
+    # The exact token, not an earlier occurrence of its name, determines the caret.
+    root = Path(tmp)
+    diagnostic_cases = [
+        ('cons.out("missing" + missing)\n', "Variable 'missing' is not declared", 1, 22, "^~~~~~~"),
+        ('<int> value =\n    "text"\n', "assigned a value of type <str>", 2, 5, "^~~~~~"),
+        ('<str> s = "ok"\ncons.out(s + 1)\n', "Operator '+'", 2, 12, "^"),
+        ('cons.out(1\ncons.out(2)\n', "Missing closing ')' in cons.out", 1, 11, "^"),
+        ('<int> x =\n<int> y = 2\n', "Expected an expression before the next declaration", 1, 10, "^"),
+        ('if true {\n    cons.out(1)\n', "Missing '}' to close this block", 1, 9, "^"),
+        ('<str> s = "hôm nay\\n @{1 + missing}"\n', "Variable 'missing' is not declared", 1, 28, "^~~~~~~"),
+        ('cons.out("hôm nay") §\n', "Unknown character '§'", 1, 21, "^"),
+        ('<str> s = "unfinished\nanother line\n', "Unterminated string literal", 1, 11, "^"),
+    ]
+    bad_source = root / "invalid_diagnostic.thv"
+    for source, message, line, column, caret in diagnostic_cases:
+        bad_source.write_text(source, encoding="utf-8")
+        result = subprocess.run([str(compiler), bad_source.name, "-O2", "-o", "invalid"],
+                                cwd=tmp, capture_output=True, encoding="utf-8")
+        assert result.returncode != 0, result.stdout
+        assert message in result.stderr, result.stderr
+        assert f"  --> {bad_source.name}:{line}:{column}\n" in result.stderr, result.stderr
+        assert f"  {line} | {source.splitlines()[line - 1]}\n" in result.stderr, result.stderr
+        pointer = " " * len(str(line)) + " | " + " " * (column - 1) + caret
+        assert f"  {pointer}\n" in result.stderr, result.stderr
+
+    dependency = root / "invalid_dependency.thv"
+    dependency.write_text('cons.out("unknown")\ncons.out(unknown)\n', encoding="utf-8")
+    bad_source.write_text('@attach "invalid_dependency.thv"\n', encoding="utf-8")
+    (root / "first_input.thv").write_text('cons.out("unknown")\n', encoding="utf-8")
+    for inputs in ([bad_source.name], ["first_input.thv", dependency.name]):
+        result = subprocess.run([str(compiler), *inputs, "-o", "invalid"], cwd=tmp,
+                                capture_output=True, encoding="utf-8")
+        assert result.returncode != 0 and "invalid_dependency.thv:2:10\n" in result.stderr, result.stderr
+    print("Verified source file, line, columns, and carets in compiler diagnostics", flush=True)
+
     Path(tmp, "invalid_return.thv").write_text('<int> func f() { return 1, "two" }\n', encoding="utf-8")
     result = subprocess.run([str(compiler), "invalid_return.thv", "-o", "invalid_return"],
                             cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

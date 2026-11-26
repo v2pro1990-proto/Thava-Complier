@@ -2640,6 +2640,7 @@ public:
     }
 
     ThavaType emitExpr(ASTNode* node, ThavaType expected = ThavaType::UNKNOWN) {
+        diag::Scope location(node ? node->span : SourceSpan{});
         const auto actual = emitExprRaw(node, expected);
         if (actual == ThavaType::BOXED && expected != ThavaType::UNKNOWN) return emitUnbox(expected);
         if ((expected == ThavaType::MULTYPE && actual != ThavaType::MULTYPE) ||
@@ -6323,6 +6324,7 @@ public:
     }
 
     void emitStmt(ASTNode* node) {
+        diag::Scope location(node ? node->span : SourceSpan{});
         if (!node) return;
 
         // --- MemberAssignNode (Gan thuoc tinh struct: obj.field = val / += / -= ...) ---

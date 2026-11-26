@@ -121,6 +121,11 @@ public:
     // Expression Constant Folder
     ASTPtr foldExpr(ASTPtr expr) {
         if (!expr) return nullptr;
+        const auto span = expr->span;
+        return located(span, foldExprImpl(std::move(expr)));
+    }
+
+    ASTPtr foldExprImpl(ASTPtr expr) {
 
         // 1. LiteralNode: already constant
         if (dynamic_cast<LiteralNode*>(expr.get())) {
@@ -494,6 +499,11 @@ public:
     // Statement Optimizer & Dead Code Eliminator
     ASTPtr foldStmt(ASTPtr stmt) {
         if (!stmt) return nullptr;
+        const auto span = stmt->span;
+        return located(span, foldStmtImpl(std::move(stmt)));
+    }
+
+    ASTPtr foldStmtImpl(ASTPtr stmt) {
 
         // 1. IfNode: Dead branch elimination
         if (auto ifNode = dynamic_cast<IfNode*>(stmt.get())) {
