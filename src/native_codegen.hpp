@@ -2989,7 +2989,7 @@ public:
         }
 
         if (auto dictM = dynamic_cast<DictMethodNode*>(node)) {
-            ThavaType baseT = emitExpr(dictM->base.get());
+            emitExpr(dictM->base.get());
             currentFrameOffset -= 8;
             if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
             int32_t dictSlot = currentFrameOffset;

@@ -384,7 +384,7 @@ inline DetectedCompiler detectHostCXXCompiler(const std::string& explicitCxx = "
     return { HostCXXType::NONE, "", "" };
 }
 
-inline void parseDLMetadata(const std::string& content, const std::string& libPath, int line) {
+inline void parseDLMetadata(const std::string& content, const std::string& libPath) {
     std::string libBasename = std::filesystem::path(libPath).filename().string();
     std::stringstream ss(content);
     std::string rawLine;
@@ -573,7 +573,7 @@ inline std::string resolveAndLoadDL(const std::string& rawPath, const std::strin
         size_t pEnd = (pStart != std::string::npos) ? binContent.find(endTag, pStart + tagLen) : std::string::npos;
         if (pStart != std::string::npos && pEnd != std::string::npos) {
             std::string metaContent = binContent.substr(pStart + tagLen, pEnd - (pStart + tagLen));
-            parseDLMetadata(metaContent, normPath, line);
+            parseDLMetadata(metaContent, normPath);
             loadedMeta = true;
         }
     }
@@ -585,7 +585,7 @@ inline std::string resolveAndLoadDL(const std::string& rawPath, const std::strin
             std::ifstream mf(metaPath);
             if (mf.is_open()) {
                 std::string content((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
-                parseDLMetadata(content, normPath, line);
+                parseDLMetadata(content, normPath);
                 loadedMeta = true;
             }
         }

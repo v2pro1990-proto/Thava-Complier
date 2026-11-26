@@ -123,7 +123,7 @@ public:
         if (!expr) return nullptr;
 
         // 1. LiteralNode: already constant
-        if (auto lit = dynamic_cast<LiteralNode*>(expr.get())) {
+        if (dynamic_cast<LiteralNode*>(expr.get())) {
             return expr;
         }
 

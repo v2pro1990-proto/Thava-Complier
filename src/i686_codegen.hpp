@@ -2252,7 +2252,7 @@ class Codegen {
     }
 
     void registerClass(const ClassDeclNode& decl) {
-        ClassLayout layout{{enc.label(), 8, reserveData(28)}, &decl};
+        ClassLayout layout{{enc.label(), 8, reserveData(28), {}, {}}, &decl, {}, {}};
         layout.schema = "class:" + decl.className;
         if (!decl.baseClassName.empty()) {
             const auto& base = classLayout(decl.baseClassName);
@@ -2275,7 +2275,7 @@ class Codegen {
     }
 
     void registerStruct(const StructDeclNode& decl) {
-        StructLayout layout{{enc.label(), 8, reserveData(28)}, &decl};
+        StructLayout layout{{enc.label(), 8, reserveData(28), {}, {}}, &decl};
         layout.schema = "struct:" + decl.structName;
         for (const auto& field : decl.fields) {
             if (layout.fields.count(field.name)) unsupported("Duplicate struct field '" + field.name + "'");

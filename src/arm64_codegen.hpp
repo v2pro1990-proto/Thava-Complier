@@ -2230,7 +2230,7 @@ public:
                 compileExpression(am->base.get());
                 enc.sub_rri(arm64::SP, arm64::SP, 16);
                 enc.str_imm(arm64::X0, arm64::SP, 0);
-                ThavaType lt = compileExpression(am->args[0].get());
+                compileExpression(am->args[0].get());
                 enc.mov_rr(arm64::X1, arm64::X0);
                 enc.ldr_imm(arm64::X0, arm64::SP, 0);
                 enc.add_rri(arm64::SP, arm64::SP, 16);
