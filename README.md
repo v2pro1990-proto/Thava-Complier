@@ -29,7 +29,7 @@ A systems programming language with direct PE and ELF machine code generation fo
 
 Thava is designed to bridge the gap between high-level expressive syntax and low-level bare-metal execution speed. It offers a dual-backend architecture:
 
-1. **Direct Native Machine Code Backend** emits Windows PE32/PE32+ and Linux ELF32/ELF64 executables and libraries without an external assembler or linker. A plain compiler invocation targets x86-64 on the current OS. For native i686, pair `--target win-i686` or `--target linux-i686` with `--native`.
+1. **Direct Native Machine Code Backend** emits Windows PE32/PE32+ and Linux ELF32/ELF64 executables and libraries without an external assembler or linker. A plain compiler invocation targets x86-64 on the current OS. Select `--target win-i686` or `--target linux-i686` for native i686.
 2. **C++17 Transpiler Backend (`--cpp`):** Targets optimized standard C++17, enabling seamless interoperability with legacy C/C++ libraries, complex template headers, and full object-oriented classes.
 
 ---
@@ -242,7 +242,7 @@ Usage: thavac <input.thv> [options]
 | `-O0`, `-O1`, `-O2`, `-O3` | Select an [optimization level](docs/DOCUMENTATION.md#optimization-levels--o0-to--o3). |
 | `--target win-x64`, `--target linux-x64` | Select Windows or Linux x86-64. |
 | `--target win-arm64`, `--target linux-arm64` | Select Windows or Linux ARM64. |
-| `--target win-i686`, `--target linux-i686` | Select Windows or Linux i686. Add `--native` for direct code generation. |
+| `--target win-i686`, `--target linux-i686` | Select native Windows or Linux i686. Add `--cpp` to use the C++ toolchain. |
 
 ---
 

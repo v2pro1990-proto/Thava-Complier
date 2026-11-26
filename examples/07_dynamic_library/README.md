@@ -24,4 +24,4 @@ thavac use_plugin.thv --target linux-x64 -o use_plugin
 ./use_plugin
 ```
 
-For other architectures, use the same `--target` on both build commands and the library extension for that OS. Add `--native` on both commands for i686.
+For other architectures, use the same `--target` on both build commands and the library extension for that OS.

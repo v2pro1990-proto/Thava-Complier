@@ -6750,13 +6750,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (isI686Mode) {
-        if (explicitCpp && explicitNative) {
-            std::cerr << "[Thava Compiler Error]: Choose either native i686 or the i686 C++ backend.\n";
-            return 1;
-        }
-        useCppBackend = !explicitNative;
-        explicitCpp = useCppBackend;
+    if (isI686Mode && explicitCpp && explicitNative) {
+        std::cerr << "[Thava Compiler Error]: Choose either native i686 or the i686 C++ backend.\n";
+        return 1;
     }
 
     // Automatically detect dynamic library mode
@@ -6914,7 +6910,7 @@ int main(int argc, char* argv[]) {
     }
 
     // 4. Code Generation
-    if (isI686Mode && explicitNative) {
+    if (isI686Mode && !useCppBackend) {
         try {
             i686::Codegen codegen(!isElfMode);
             if (codegen.compile(ast, outputFile)) {

@@ -666,7 +666,7 @@ Import resolution depends on the target:
 
 - **Windows PE x86-64** loads the `.thdl`/`.dll` at run time through the Windows loader (IAT thunks), exactly like before.
 - **Windows PE ARM64** builds an ARM64 `.thdl` as a DLL with a PE export table. The consumer imports the functions by name and calls each module's initializer once before running its own top-level code. The module's global values persist across calls. Place the DLLs, including transitive dependencies, beside the executable. Rebuild any ARM64 `.thdl` from before this support with `thavac library.thv --target win-arm64 --lib -o library.thdl`. Native ARM64 calls pass arguments beyond the first eight on the stack, including collection references.
-- **Native i686** uses PE32 DLLs on Windows and position-independent ELF32 modules on Linux. Build both sides with the same i686 target and `--native`. Include matching class and struct declarations with `@attach` when a signature shares those types across the module boundary.
+- **Native i686** uses PE32 DLLs on Windows and position-independent ELF32 modules on Linux. Build both sides with the same i686 target. Include matching class and struct declarations with `@attach` when a signature shares those types across the module boundary.
 - **`--backend cpp`** keeps its dynamic linking through the host compiler.
 - **Native Linux ELF64 (x86-64 and AArch64)** are zero-libc, so the generated program carries its own loader: at start-up it maps the `.so` with `mmap`, applies the module's relocations, runs its top-level initializer once, and calls the exports through the mapped image. The library is **not** inlined, so — exactly like on Windows — the `.so` has to exist at run time; the executable itself stays a single self-contained file. The `.so` is located by its absolute path at compile time, so the directory you run the executable from does not matter.
 
@@ -905,7 +905,7 @@ Usage: thavac <source.thv> [--target <target>] [--native|--cpp] [-o <output>] [-
 | `--target win-arm64` / `--target linux-arm64` | Target Windows or Linux ARM64. |
 | `--backend arm64` / `--backend elf-arm64` | Direct Native Linux AArch64 (ARM64) ELF64 code generation. |
 | `--backend pe-arm64` | Select the native Windows ARM64 emitter (PE32+). |
-| `--target win-i686` / `--target linux-i686` | Target Windows or Linux i686. These targets use the C++ toolchain by default. Add `--native` for direct code generation. |
+| `--target win-i686` / `--target linux-i686` | Target native Windows or Linux i686. Add `--cpp` to use the C++ toolchain. |
 | `--backend pe-i686` / `--backend elf-i686` | Select native Windows PE32 or Linux ELF32 directly. |
 | `--backend elf` | Direct Native Linux x86-64 ELF64 binary. |
 | `--backend pe` | Direct Native Windows x86-64 PE32+ binary. |
@@ -944,10 +944,10 @@ Besides one `func:<name>|ret:<type>|params:<...>` line per export, the section c
 | :--- | :--- | :--- |
 | `win-x64` | PE32+ x86-64 | `.thdl` |
 | `win-arm64` | PE32+ ARM64 (`0xAA64`) | `.thdl` |
-| `win-i686` with `--native` | PE32 i686 | `.thdl` |
+| `win-i686` | PE32 i686 | `.thdl` |
 | `linux-x64` | ELF64 x86-64 | `.so` |
 | `linux-arm64` | ELF64 AArch64 (`EM_AARCH64`) | `.so` |
-| `linux-i686` with `--native` | ELF32 i686 | `.so` |
+| `linux-i686` | ELF32 i686 | `.so` |
 
 CI builds compiler packages for all six targets. It runs native Windows ARM64 fixtures for globals, Unicode input, file I/O, OS and time operations, dynamic libraries, and scalar C interop. The source fixtures are in [`tests/`](../tests/).
 
@@ -957,13 +957,13 @@ On Windows ARM64, native `clib` can load ARM64 DLLs and call scalar C functions 
 
 The native backend writes i686 machine code and executable headers directly. Building a native i686 program requires no external C++ compiler, assembler, or linker.
 
-- `thavac program.thv --target win-i686 --native -o program.exe`: Windows PE32. The executable calls Kernel32 for console output and process exit. `--backend pe-i686` selects the same backend.
-- `thavac program.thv --target linux-i686 --native -o program`: standalone Linux ELF32 using Linux system calls. `--backend elf-i686` selects the same backend.
+- `thavac program.thv --target win-i686 -o program.exe`: Windows PE32. The executable calls Kernel32 for console output and process exit. `--backend pe-i686` selects the same backend.
+- `thavac program.thv --target linux-i686 -o program`: standalone Linux ELF32 using Linux system calls. `--backend elf-i686` selects the same backend.
 - `--backend native-i686` selects native i686 for the current OS. Use `--os windows` or `--os linux` to override that OS.
 
 The native backend supports integer widths including `<int64>`, integer `+`, `-`, `*`, `/`, `//` and `%`, comparisons, bitwise operations, booleans, UTF-8 string literals and comparisons, scalar functions and recursion, globals, `if`, `while`, C-style `for` and interpolated `cons.out`. The native backend also supports `<fl>` and `<dbl>` arithmetic (+, -, *, /), comparisons and numeric casts, integer exponentiation, string concatenation and repetition, byte length, UTF-8 indexing and `getsubstring()`, substring search and replacement, `strip()`, Unicode case conversion, and `key.input` for strings, integers, real numbers and booleans. Windows console input uses `ReadConsoleW`; redirected input and Linux input use UTF-8 bytes. Native i686 supports lists, tuples, and dictionaries with mixed, nested, object and function values, negative collection indexes, compound indexed assignment, collection returns, list mutation and parameter rebinding, dictionary lookup/mutation and projections, `split()`/`join()`, `foreach` and numeric `range` loops. Scoped `file.open` supports read/write/append, line reads and writes, and `read_lines()`. The scope closes its file on normal exit, `return`, `break` or `continue`. Random operations include `rand()`, `randint()` and `randres()` with optional numeric weights. OS operations cover process information, filesystem paths and directory listings, environment variables, `os.system()` and `os.sleep()`. `os.showmessagebox()` displays a dialog on Windows and returns zero on Linux. The time module includes Unix timestamps, millisecond sleep, calendar fields and formatted date/time strings. Calendar values use local time on Windows and UTC on standalone Linux. Native i686 supports typed `try`/`except`, `throw`, runtime `raise_error` and integer division-by-zero errors. Deferred actions run last-in, first-out when the function or program exits, including when unwound by an exception. A defer inside `file.open` runs before that file closes. Reaching the same defer site again before its scope exits leaves a single pending action. Native i686 supports class instances with scalar, collection and object fields, field defaults, typed constructor overloads, single inheritance, virtual method dispatch and explicit parent access via `parvar`. Class values may be passed to and returned from functions, and a member access through `none` raises `RuntimeError`. Native structs support positional and default field initialization, member reads and writes, and passing or returning struct references. Fields can hold scalars, collections, classes and nested struct references. Named enum members can be used as integer constants. A `<func>` variable can hold a Thava function, be reassigned, returned, or passed as a callback. Use `--lib` with a native i686 target to build a module and `@dlattach` to load one built for the same platform. Windows modules use PE32 DLLs. Linux modules use position-independent ELF32 images loaded by Thava. Native module exports support scalars, collections, function values, class instances and struct references. Include the same class and struct declarations with `@attach` in the library and its callers when sharing typed objects. The compiler checks the object layout when an imported signature is used. Rebuild attached modules with this compiler to propagate typed exceptions and deferred cleanup across module boundaries. Existing scalar and collection modules remain loadable. C interop still uses the C++ path. Unsupported native constructs report a compilation error.
 
-ELF32 programs detect iSH using its Linux release string. On iSH, they use `gettimeofday`, `nanosleep` and `stat64` for time, sleep and file metadata. On the iSH App Store kernel, time values follow its 32-bit clock ABI. Use `--target linux-i686 --native` when building a program for iSH.
+ELF32 programs detect iSH using its Linux release string. On iSH, they use `gettimeofday`, `nanosleep` and `stat64` for time, sleep and file metadata. On the iSH App Store kernel, time values follow its 32-bit clock ABI. Use `--target linux-i686` when building a program for iSH.
 
 The Linux i686 release includes `build-ish.sh`. Keep the script beside `thavac-linux-i686`. The script selects the native i686 target and disables glibc rseq for the compiler process.
 
@@ -972,7 +972,7 @@ sh ./build-ish.sh --i686_ish.thv -o test-ish
 ./test-ish
 ```
 
-The existing C++ path remains the default for `--target win-i686` and `--target linux-i686`. Select it explicitly with `--cpp` or use `--backend cpp-i686` for the current OS. Windows builds use `i686-w64-mingw32-g++` or an x86 MSVC developer environment. Linux builds use `i686-linux-gnu-g++` or GCC with 32-bit C++ libraries (`g++-multilib` on Ubuntu).
+Both i686 targets and `--arch i686` select native code generation by default. Choose `--cpp` or `--backend cpp-i686` to use C++. A source using `@cattach` selects C++ automatically. Combine it with `--native` to have the compiler reject header-based C interop. Windows builds use `i686-w64-mingw32-g++` or an x86 MSVC developer environment. Linux builds use `i686-linux-gnu-g++` or GCC with 32-bit C++ libraries (`g++-multilib` on Ubuntu).
 
 For Windows ARM64 code that uses C/C++ headers, use `--cpp --target win-arm64` with the ARM64 MSVC developer environment or an ARM64 MinGW-w64 toolchain. The transpiler verifies the C++ compiler's target architecture and OS before linking.
 

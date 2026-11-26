@@ -23,9 +23,10 @@ def assert_native_output(output, expected_lines):
 
 with tempfile.TemporaryDirectory() as tmp:
     output = Path(tmp) / ("smoke.exe" if windows else "smoke")
-    backend = ["--cpp"] if arm64 else []
-    subprocess.run([str(compiler), str(source), "--target", target, *backend,
-                    "-O2", "-o", str(output)], cwd=tmp, check=True)
+    build = subprocess.run([str(compiler), str(source), "--target", target, "--cpp",
+                            "-O2", "-o", str(output)], cwd=tmp, check=True,
+                           stdout=subprocess.PIPE, text=True)
+    assert "Using detected C++ compiler" in build.stdout, build.stdout
     data = output.read_bytes()
     if windows:
         pe = struct.unpack_from("<I", data, 0x3C)[0]
@@ -49,6 +50,8 @@ with tempfile.TemporaryDirectory() as tmp:
             env["PATH"] = ""
         env.pop("CXX", None)
         for switches, opt in [
+            (["--target", target], "-O2"),
+            (["--arch", "i686"], "-O0"),
             (["--target", target, "--native"], "-O0"),
             (["--backend", "pe-i686" if windows else "elf-i686"], "-O2"),
         ]:
@@ -78,6 +81,18 @@ with tempfile.TemporaryDirectory() as tmp:
                 "8 -1 1099511627776 -1 true false true trời đẹp",
             ])
         print(target, "native code generation and runtime output OK")
+
+        cattach = Path(tmp) / "i686_cattach.thv"
+        cattach.write_text('@cattach <stddef.h>\ncons.out("cattach")\n', encoding="utf-8")
+        cattach_output = Path(tmp) / ("cattach.exe" if windows else "cattach")
+        build = subprocess.run([str(compiler), str(cattach), "--target", target, "-o", str(cattach_output)],
+                               cwd=tmp, check=True, capture_output=True, text=True, timeout=60)
+        assert "Switching to C++ Transpiler" in build.stdout, build.stdout
+        output = subprocess.check_output([str(cattach_output)], cwd=tmp, encoding="utf-8", timeout=10)
+        assert_native_output(output, ["cattach"])
+        rejected = subprocess.run([str(compiler), str(cattach), "--target", target, "--native",
+                                   "-o", str(cattach_output)], cwd=tmp, capture_output=True, text=True, timeout=30)
+        assert rejected.returncode != 0 and "Cannot compile directly via --backend native" in rejected.stderr
 
         fixture = source.with_name("optimizer.thv")
         native = Path(tmp) / ("optimizer.exe" if windows else "optimizer")
