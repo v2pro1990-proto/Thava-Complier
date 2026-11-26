@@ -2,10 +2,13 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <map>
 #include <set>
 #include <sstream>
+#include "decimal_spec.h"
+#include "decimal_runtime_data.hpp"
 #include <fstream>
 #include <cstdlib>
 #include <cctype>
@@ -17,7 +20,7 @@
 // 1. LEXER (Lexical Analysis)
 // ==========================================
 enum class TokenType {
-    TYPE_INT, TYPE_INT64, TYPE_INT16, TYPE_FL, TYPE_DBL, TYPE_BL, TYPE_STR, TYPE_LST, TYPE_TPLE, TYPE_MULTYPE, TYPE_DICT, TYPE_VOID, TYPE_FUNC, TYPE_CUSTOM,
+    TYPE_INT, TYPE_INT64, TYPE_INT16, TYPE_FL, TYPE_DBL, TYPE_FLR, TYPE_BL, TYPE_STR, TYPE_LST, TYPE_TPLE, TYPE_MULTYPE, TYPE_DICT, TYPE_VOID, TYPE_FUNC, TYPE_CUSTOM,
     INT_LIT, FLOAT_LIT, BOOL_LIT, STR_LIT, NONE_LIT, IDENTIFIER,
     ASSIGN, PLUS_ASSIGN, MINUS_ASSIGN, STAR_ASSIGN, SLASH_ASSIGN, MODULO_ASSIGN, POW_ASSIGN,
     PLUS, MINUS, STAR, SLASH, MODULO, FLOOR_DIV, POW,
@@ -52,7 +55,7 @@ inline bool g_cNameIsVariable = false;
 inline bool detectCNameVariable(const std::vector<Token>& toks) {
     auto isTypeTok = [](TokenType t) {
         return t == TokenType::TYPE_INT || t == TokenType::TYPE_INT64 || t == TokenType::TYPE_INT16 ||
-               t == TokenType::TYPE_FL || t == TokenType::TYPE_DBL || t == TokenType::TYPE_BL ||
+               t == TokenType::TYPE_FL || t == TokenType::TYPE_DBL || t == TokenType::TYPE_FLR || t == TokenType::TYPE_BL ||
                t == TokenType::TYPE_STR || t == TokenType::TYPE_LST || t == TokenType::TYPE_TPLE ||
                t == TokenType::TYPE_MULTYPE || t == TokenType::TYPE_DICT || t == TokenType::TYPE_FUNC ||
                t == TokenType::TYPE_CUSTOM;
@@ -75,7 +78,7 @@ inline bool detectCNameVariable(const std::vector<Token>& toks) {
 // ==========================================
 // 1.5. TYPE SYSTEM & DYNAMIC LIBRARIES (Thava Types & Dynamic Libraries)
 // ==========================================
-enum class ThavaType { INT, FLOAT, DOUBLE, BOOL, STRING, LIST, TUPLE, MULTYPE, DICT, VOID, FUNC, FILE, CUSTOM, NONE, UNKNOWN, BOXED };
+enum class ThavaType { INT, FLOAT, DOUBLE, BOOL, STRING, LIST, TUPLE, MULTYPE, DICT, VOID, FUNC, FILE, CUSTOM, NONE, UNKNOWN, BOXED, DECIMAL };
 // Native x86-64/ARM64 <multype> ABI. The count is followed by 16-byte
 // entries containing a 64-bit payload and a 64-bit tag.
 namespace native_multype {
@@ -91,6 +94,7 @@ inline Tag tagFor(ThavaType type) {
         case ThavaType::FLOAT:
         case ThavaType::DOUBLE: return Real;
         case ThavaType::BOOL: return Boolean;
+        case ThavaType::DECIMAL:
         case ThavaType::STRING: return String;
         case ThavaType::MULTYPE: return Sequence;
         case ThavaType::DICT: return Dictionary;
@@ -107,6 +111,7 @@ inline std::string typeToString(ThavaType type) {
         case ThavaType::INT: return "int";
         case ThavaType::FLOAT: return "fl";
         case ThavaType::DOUBLE: return "dbl";
+        case ThavaType::DECIMAL: return "flr";
         case ThavaType::BOOL: return "bl";
         case ThavaType::STRING: return "str";
         case ThavaType::LIST: return "lst";
@@ -123,6 +128,7 @@ inline std::string typeToString(ThavaType type) {
 }
 
 inline ThavaType stringToType(const std::string& s) {
+    if (s == "flr") return ThavaType::DECIMAL;
     if (s == "int" || s == "int16" || s == "int64") return ThavaType::INT;
     if (s == "fl" || s == "float") return ThavaType::FLOAT;
     if (s == "dbl" || s == "double") return ThavaType::DOUBLE;
@@ -177,6 +183,7 @@ inline std::string cppTypeNameFor(ThavaType type, const std::string& customName 
         case ThavaType::FLOAT: return "float";
         case ThavaType::DOUBLE: return "double";
         case ThavaType::BOOL: return "bool";
+        case ThavaType::DECIMAL:
         case ThavaType::STRING: return "std::string";
         case ThavaType::LIST:
         case ThavaType::TUPLE:
@@ -201,6 +208,7 @@ inline std::string cppParamTypeNameFor(ThavaType type, const std::string& custom
         // Strings are passed by value: assigning to a string parameter only
         // rebinds the local copy (same as the native backends, where a string
         // is a pointer and reassigning it never mutates the caller's value).
+        case ThavaType::DECIMAL:
         case ThavaType::STRING: return "std::string";
         case ThavaType::LIST:
         case ThavaType::MULTYPE: return "std::vector<ThavaValue>&";
@@ -219,6 +227,7 @@ inline std::string cppParamTypeNameFor(ThavaType type, const std::string& custom
 
 inline bool isCompatible(ThavaType dest, ThavaType src) {
     if (dest == src) return true;
+    if (dest == ThavaType::DECIMAL || src == ThavaType::DECIMAL) return false;
     if (src == ThavaType::NONE || dest == ThavaType::NONE) return true;
     if (dest == ThavaType::FUNC && src == ThavaType::FUNC) return true;
     if ((dest == ThavaType::FUNC && src == ThavaType::INT) || (dest == ThavaType::INT && src == ThavaType::FUNC)) return true;
@@ -746,6 +755,7 @@ public:
                     else if (typeStr == "int16") tokens.push_back({TokenType::TYPE_INT16, "<int16>", line});
                     else if (typeStr == "fl" || typeStr == "float") tokens.push_back({TokenType::TYPE_FL, "<fl>", line});
                     else if (typeStr == "dbl" || typeStr == "double") tokens.push_back({TokenType::TYPE_DBL, "<dbl>", line});
+                    else if (typeStr == "flr") tokens.push_back({TokenType::TYPE_FLR, "<flr>", line});
                     else if (typeStr == "bl" || typeStr == "bool") tokens.push_back({TokenType::TYPE_BL, "<bl>", line});
                     else if (typeStr == "str" || typeStr == "string") tokens.push_back({TokenType::TYPE_STR, "<str>", line});
                     else if (typeStr == "lst" || typeStr == "list") tokens.push_back({TokenType::TYPE_LST, "<lst>", line});
@@ -1575,16 +1585,55 @@ public:
     }
 };
 
+static bool g_usesDecimal = false;
+
+static int decimalOperator(const std::string& op) {
+    static const std::map<std::string, int> operations = {
+        {"+", THAVA_DECIMAL_ADD}, {"-", THAVA_DECIMAL_SUBTRACT},
+        {"*", THAVA_DECIMAL_MULTIPLY}, {"/", THAVA_DECIMAL_DIVIDE},
+        {"==", THAVA_DECIMAL_EQUAL}, {"!=", THAVA_DECIMAL_NOT_EQUAL},
+        {"<", THAVA_DECIMAL_LESS}, {"<=", THAVA_DECIMAL_LESS_EQUAL},
+        {">", THAVA_DECIMAL_GREATER}, {">=", THAVA_DECIMAL_GREATER_EQUAL},
+    };
+    const auto found = operations.find(op);
+    return found == operations.end() ? -1 : found->second;
+}
+
+static constexpr bool decimalComparison(int op) { return op >= THAVA_DECIMAL_EQUAL; }
+
+static constexpr std::pair<int, const char*> decimalErrors[] = {
+    {THAVA_DECIMAL_INVALID, "Invalid decimal value"},
+    {THAVA_DECIMAL_OVERFLOW, "Decimal precision overflow"},
+    {THAVA_DECIMAL_DIVIDE_BY_ZERO, "Decimal division by zero"},
+};
+
+static void coerceDecimal(ASTPtr& expr, const std::shared_ptr<Environment>& env, bool text = false);
+
+class DecimalParseNode : public ASTNode {
+public:
+    ASTPtr text;
+    explicit DecimalParseNode(ASTPtr value) : text(std::move(value)) { g_usesDecimal = true; }
+    std::string generateCode() override { return "_thava_decimal_parse(" + text->generateCode() + ")"; }
+    ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::DECIMAL; }
+};
+
 // AST node for unary minus, e.g. -1, -x
 class UnaryMinusNode : public ASTNode {
 public:
     ASTPtr expr;
+    bool decimalArithmetic = false;
     UnaryMinusNode(ASTPtr e) : expr(std::move(e)) {}
     std::string generateCode() override {
+        if (decimalArithmetic) return "_thava_decimal_negate(" + expr->generateCode() + ")";
         return "(-(" + expr->generateCode() + "))";
     }
     ThavaType getType(std::shared_ptr<Environment> env) override {
         ThavaType t = expr->getType(env);
+        if (t == ThavaType::DECIMAL) {
+            decimalArithmetic = true;
+            g_usesDecimal = true;
+            return t;
+        }
         if (t != ThavaType::INT && t != ThavaType::FLOAT && t != ThavaType::DOUBLE && t != ThavaType::UNKNOWN) {
             std::cerr << "[Static Type Error]: Unary '-' operator only applies to numeric types!\n";
             exit(1);
@@ -1651,6 +1700,11 @@ public:
         }
         ThavaType tt = trueExpr->getType(env);
         ThavaType ft = falseExpr->getType(env);
+        if (tt == ThavaType::DECIMAL || ft == ThavaType::DECIMAL) {
+            coerceDecimal(trueExpr, env);
+            coerceDecimal(falseExpr, env);
+            return ThavaType::DECIMAL;
+        }
         if (tt == ft) return tt;
         if ((tt == ThavaType::INT && ft == ThavaType::FLOAT) || (tt == ThavaType::FLOAT && ft == ThavaType::INT)) return ThavaType::FLOAT;
         if ((tt == ThavaType::INT && ft == ThavaType::DOUBLE) || (tt == ThavaType::DOUBLE && ft == ThavaType::INT)) return ThavaType::DOUBLE;
@@ -1664,8 +1718,15 @@ class BinaryOpNode : public ASTNode {
 public:
     ASTPtr left, right;
     std::string op;
-    BinaryOpNode(ASTPtr l, std::string o, ASTPtr r) : left(std::move(l)), op(std::move(o)), right(std::move(r)) {}
+    int decimalOp = -1;
+    BinaryOpNode(ASTPtr l, std::string o, ASTPtr r) : left(std::move(l)), right(std::move(r)), op(std::move(o)) {}
     std::string generateCode() override {
+        if (decimalOp >= 0) {
+            const std::string helper = decimalComparison(decimalOp) ? "_thava_decimal_compare" : "_thava_decimal_value";
+            return "([&]() { auto _thava_decimal_left = " + left->generateCode() +
+                   "; auto _thava_decimal_right = " + right->generateCode() + "; return " + helper +
+                   "(" + std::to_string(decimalOp) + ", _thava_decimal_left, _thava_decimal_right); }())";
+        }
         if (op == "/" || op == "//") {
             return "(_thava_div(" + left->generateCode() + ", " + right->generateCode() + "))";
         }
@@ -1688,6 +1749,17 @@ public:
     ThavaType getType(std::shared_ptr<Environment> env) override {
         ThavaType lt = left->getType(env);
         ThavaType rt = right->getType(env);
+        if (lt == ThavaType::DECIMAL || rt == ThavaType::DECIMAL) {
+            decimalOp = decimalOperator(op);
+            if (decimalOp < 0) {
+                std::cerr << "[Static Type Error]: Operator '" << op << "' is not supported for <flr>.\n";
+                exit(1);
+            }
+            coerceDecimal(left, env);
+            coerceDecimal(right, env);
+            g_usesDecimal = true;
+            return decimalComparison(decimalOp) ? ThavaType::BOOL : ThavaType::DECIMAL;
+        }
 
         if (op == "**") {
             if (lt == ThavaType::DOUBLE || rt == ThavaType::DOUBLE) return ThavaType::DOUBLE;
@@ -1862,7 +1934,8 @@ public:
             case ThavaType::FLOAT: return "float";
             case ThavaType::DOUBLE: return "double";
             case ThavaType::BOOL: return "bool";
-            case ThavaType::STRING: return "std::string";
+            case ThavaType::DECIMAL:
+        case ThavaType::STRING: return "std::string";
             case ThavaType::LIST:
             case ThavaType::TUPLE:
             case ThavaType::MULTYPE: return "std::vector<ThavaValue>";
@@ -1887,6 +1960,7 @@ public:
             case ThavaType::FLOAT: cppType = "float"; break;
             case ThavaType::DOUBLE: cppType = "double"; break;
             case ThavaType::BOOL: cppType = "bool"; break;
+            case ThavaType::DECIMAL:
             case ThavaType::STRING: cppType = "std::string"; break;
             case ThavaType::LIST: 
             case ThavaType::TUPLE:
@@ -3149,6 +3223,7 @@ public:
             const auto& expectedTypes = g_funcParamTypes[name];
             if (args.size() == expectedTypes.size()) {
                 for (size_t i = 0; i < args.size(); ++i) {
+                    if (expectedTypes[i] == ThavaType::DECIMAL) coerceDecimal(args[i], env);
                     ThavaType actual = args[i]->getType(env);
                     if (!isCompatible(expectedTypes[i], actual) && actual != ThavaType::UNKNOWN) {
                         std::cerr << "[Static Type Error]: Argument #" << (i + 1)
@@ -3186,10 +3261,59 @@ public:
     }
 
     ThavaType getType(std::shared_ptr<Environment> env) override {
-        if (expr) expr->getType(env);
+        if (targetType == ThavaType::DECIMAL) {
+            coerceDecimal(expr, env, true);
+        } else if (expr && expr->getType(env) == ThavaType::DECIMAL && targetType != ThavaType::STRING) {
+            std::cerr << "[Static Type Error]: Convert <flr> to <str> before converting to another numeric type.\n";
+            exit(1);
+        }
         return targetType;
     }
 };
+
+static void coerceDecimal(ASTPtr& expr, const std::shared_ptr<Environment>& env, bool text) {
+    if (auto literal = dynamic_cast<LiteralNode*>(expr.get())) {
+        const auto type = literal->getLitType();
+        if (type == ThavaType::INT || type == ThavaType::DOUBLE || type == ThavaType::FLOAT) {
+            expr = std::make_unique<DecimalParseNode>(
+                std::make_unique<LiteralNode>(literal->getVal(), ThavaType::STRING));
+            return;
+        }
+    }
+    if (auto minus = dynamic_cast<UnaryMinusNode*>(expr.get())) {
+        coerceDecimal(minus->expr, env, text);
+        minus->decimalArithmetic = true;
+        return;
+    }
+    if (auto binary = dynamic_cast<BinaryOpNode*>(expr.get())) {
+        const auto op = decimalOperator(binary->op);
+        if (op >= 0 && !decimalComparison(op)) {
+            coerceDecimal(binary->left, env);
+            coerceDecimal(binary->right, env);
+            binary->decimalOp = op;
+            return;
+        }
+    }
+    if (auto condition = dynamic_cast<ConditionalExprNode*>(expr.get())) {
+        coerceDecimal(condition->trueExpr, env, text);
+        coerceDecimal(condition->falseExpr, env, text);
+        return;
+    }
+    const auto type = expr->getType(env);
+    if (type == ThavaType::DECIMAL) return;
+    if (type == ThavaType::INT) {
+        expr = std::make_unique<DecimalParseNode>(
+            std::make_unique<CastNode>(ThavaType::STRING, std::move(expr)));
+        return;
+    }
+    if (text && type == ThavaType::STRING) {
+        expr = std::make_unique<DecimalParseNode>(std::move(expr));
+        return;
+    }
+    std::cerr << "[Static Type Error]: An <flr> value needs a decimal literal, an integer, "
+                 "or an explicit <flr> cast from decimal text.\n";
+    exit(1);
+}
 
 // AST node for built-in random functions (rand, randint, randres)
 class RandCallNode : public ASTNode {
@@ -3785,6 +3909,10 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
                       const std::string& currentClassName = "",
                       const std::string& currentBaseClassName = "") {
     if (!expr) return;
+    if (auto decimal = dynamic_cast<DecimalParseNode*>(expr)) {
+        checkExpr(decimal->text.get(), env, currentClassName, currentBaseClassName);
+        return;
+    }
     if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(expr)) {
         for (const auto& part : interpolation->parts) {
             part->getType(env);
@@ -4017,7 +4145,7 @@ class Parser {
     bool isTypeToken(TokenType t) {
         return t == TokenType::TYPE_INT || t == TokenType::TYPE_INT64 || t == TokenType::TYPE_INT16 ||
                t == TokenType::TYPE_FL ||
-               t == TokenType::TYPE_DBL || t == TokenType::TYPE_BL ||
+               t == TokenType::TYPE_DBL || t == TokenType::TYPE_FLR || t == TokenType::TYPE_BL ||
                t == TokenType::TYPE_STR || t == TokenType::TYPE_LST ||
                t == TokenType::TYPE_TPLE || t == TokenType::TYPE_MULTYPE ||
                t == TokenType::TYPE_DICT || t == TokenType::TYPE_VOID ||
@@ -4030,6 +4158,7 @@ class Parser {
         if (match(TokenType::TYPE_INT16)) { if (outCustomName) *outCustomName = "int16"; return ThavaType::INT; }
         if (match(TokenType::TYPE_FL)) return ThavaType::FLOAT;
         if (match(TokenType::TYPE_DBL)) return ThavaType::DOUBLE;
+        if (match(TokenType::TYPE_FLR)) return ThavaType::DECIMAL;
         if (match(TokenType::TYPE_BL)) return ThavaType::BOOL;
         if (match(TokenType::TYPE_STR)) return ThavaType::STRING;
         if (match(TokenType::TYPE_LST)) return ThavaType::LIST;
@@ -4335,6 +4464,7 @@ class Parser {
             else if (match(TokenType::TYPE_INT16)) inputType = ThavaType::INT;
             else if (match(TokenType::TYPE_FL)) inputType = ThavaType::FLOAT;
             else if (match(TokenType::TYPE_DBL)) inputType = ThavaType::DOUBLE;
+            else if (match(TokenType::TYPE_FLR)) inputType = ThavaType::DECIMAL;
             else if (match(TokenType::TYPE_BL)) inputType = ThavaType::BOOL;
             else if (match(TokenType::TYPE_STR)) inputType = ThavaType::STRING;
             else { std::cerr << "Parser Error: key.input requires type specification <type> at line " << peek().line << "\n"; exit(1); }
@@ -4345,6 +4475,8 @@ class Parser {
 
             if (!match(TokenType::RPAREN)) { std::cerr << "Parser Error: Missing ')' after key.input at line " << peek().line << "\n"; exit(1); }
 
+            if (inputType == ThavaType::DECIMAL)
+                return std::make_unique<DecimalParseNode>(std::make_unique<InputNode>(ThavaType::STRING, std::move(prompt)));
             return std::make_unique<InputNode>(inputType, std::move(prompt));
         }
 
@@ -6139,6 +6271,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             exit(1);
         }
         if (varDecl->initExpr) {
+            if (varDecl->varType == ThavaType::DECIMAL) coerceDecimal(varDecl->initExpr, env);
             ThavaType exprType = varDecl->initExpr->getType(env);
             if (!isCompatible(varDecl->varType, exprType) && exprType != ThavaType::UNKNOWN) {
                 std::cerr << "[Static Type Error]: Variable '" << varDecl->varName 
@@ -6174,6 +6307,19 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             if (elemT != ThavaType::UNKNOWN) env->defineListElem(assign->name, elemT);
         }
         ThavaType varType = env->get(assign->name);
+        if (varType == ThavaType::DECIMAL) {
+            if (assign->op != "=") {
+                auto op = assign->op.substr(0, assign->op.size() - 1);
+                if (decimalOperator(op) < 0) {
+                    std::cerr << "[Static Type Error]: Unsupported <flr> assignment operator.\n";
+                    exit(1);
+                }
+                assign->expr = std::make_unique<BinaryOpNode>(std::make_unique<VarNode>(assign->name),
+                                                            std::move(op), std::move(assign->expr));
+                assign->op = "=";
+            }
+            coerceDecimal(assign->expr, env);
+        }
         ThavaType exprType = assign->expr->getType(env);
         if (!isCompatible(varType, exprType) && exprType != ThavaType::UNKNOWN && exprType != ThavaType::NONE) {
             std::cerr << "[Static Type Error]: Cannot assign expression of type <" << typeToString(exprType)
@@ -6273,6 +6419,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             exit(1);
         }
         if (ret->expr) {
+            if (currentFuncRetType == ThavaType::DECIMAL) coerceDecimal(ret->expr, env);
             ThavaType retType = ret->expr->getType(env);
             if (currentFuncRetType == ThavaType::VOID) {
                 std::cerr << "[Static Type Error]: Function '" << currentFuncName
@@ -6483,9 +6630,10 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         auto classEnv = std::make_shared<Environment>(env);
         classEnv->currentClassName = clsDecl->className;
         classEnv->currentBaseClassName = clsDecl->baseClassName;
-        for (const auto& f : clsDecl->fields) {
+        for (auto& f : clsDecl->fields) {
             classEnv->define(f.name, f.type, f.customTypeName);
             if (f.initExpr) {
+                if (f.type == ThavaType::DECIMAL) coerceDecimal(f.initExpr, classEnv);
                 f.initExpr->getType(classEnv);
                 checkExpr(f.initExpr.get(), classEnv, clsDecl->className, clsDecl->baseClassName);
             }
@@ -7095,7 +7243,33 @@ int main(int argc, char* argv[]) {
               << "    ThavaException(const std::string& msg)\n"
               << "        : std::runtime_error(msg), typeName(\"RuntimeError\") {}\n"
               << "};\n\n"
-              << "template<typename T1, typename T2>\n"
+              ;
+    if (g_usesDecimal) {
+        cppOutput << decimal_runtime::cppSource << R"decimal_helpers(
+inline int _thava_decimal_checked(int op, const std::string& left, const std::string& right, char* result) {
+    const int code = thava_decimal_run(op, left.c_str(), right.c_str(), result);
+    if (code == THAVA_DECIMAL_DIVIDE_BY_ZERO) throw ThavaException("RuntimeError", "Decimal division by zero");
+    if (code == THAVA_DECIMAL_OVERFLOW) throw ThavaException("RuntimeError", "Decimal precision overflow");
+    if (code < 0) throw ThavaException("RuntimeError", "Invalid decimal value");
+    return code;
+}
+inline std::string _thava_decimal_value(int op, const std::string& left, const std::string& right) {
+    char text[THAVA_DECIMAL_BUFFER];
+    _thava_decimal_checked(op, left, right, text);
+    return text;
+}
+inline bool _thava_decimal_compare(int op, const std::string& left, const std::string& right) {
+    return _thava_decimal_checked(op, left, right, nullptr) != 0;
+}
+inline std::string _thava_decimal_parse(const std::string& text) {
+    return _thava_decimal_value(THAVA_DECIMAL_PARSE, text, {});
+}
+inline std::string _thava_decimal_negate(const std::string& text) {
+    return _thava_decimal_value(THAVA_DECIMAL_NEGATE, text, {});
+}
+)decimal_helpers";
+    }
+    cppOutput << "template<typename T1, typename T2>\n"
               << "inline auto _thava_div(T1 a, T2 b) {\n"
               << "    if (b == 0) throw ThavaException(\"RuntimeError\", \"Division by zero!\");\n"
               << "    return a / b;\n"

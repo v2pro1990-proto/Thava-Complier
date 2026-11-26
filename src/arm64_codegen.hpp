@@ -254,6 +254,11 @@ public:
 
     // Static (compile-time) type inference for expressions
     ThavaType staticExprType(ASTNode* n) {
+        if (dynamic_cast<DecimalParseNode*>(n)) return ThavaType::DECIMAL;
+        if (auto minus = dynamic_cast<UnaryMinusNode*>(n); minus && minus->decimalArithmetic)
+            return ThavaType::DECIMAL;
+        if (auto binary = dynamic_cast<BinaryOpNode*>(n); binary && binary->decimalOp >= 0)
+            return decimalComparison(binary->decimalOp) ? ThavaType::BOOL : ThavaType::DECIMAL;
         if (dynamic_cast<InterpolatedStringNode*>(n)) return ThavaType::STRING;
         if (!n) return ThavaType::UNKNOWN;
         if (auto lit = dynamic_cast<LiteralNode*>(n)) return lit->getLitType();
@@ -397,6 +402,7 @@ public:
     std::string currentClassName;
     std::string currentBaseClassName;
     size_t lblThrow = 0;
+    std::optional<size_t> decimalEntry;
     size_t lblBoxedToString = 0;
     size_t lblMultypeToString = 0;
     bool usesMultypeFormatting = false;
@@ -787,7 +793,7 @@ public:
     // Returns the static ThavaType of the expression
     // ==========================================
     void emitStringCast(ThavaType srcT) {
-        if (srcT == ThavaType::STRING) return;
+        if (srcT == ThavaType::STRING || srcT == ThavaType::DECIMAL) return;
         // value -> heap string
         if (srcT == ThavaType::DOUBLE || srcT == ThavaType::FLOAT) {
             enc.bl(runtime.lblFileFmtDouble);
@@ -814,7 +820,7 @@ public:
         } else if (type == ThavaType::NONE) {
             enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("none"));
         } else if (type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
-                   type == ThavaType::BOOL || type == ThavaType::STRING) {
+                   type == ThavaType::BOOL || type == ThavaType::STRING || type == ThavaType::DECIMAL) {
             emitStringCast(type);
         } else {
             std::cerr << "[ARM64 Codegen Error]: This value cannot be interpolated as a string on ARM64.\n";
@@ -1054,7 +1060,61 @@ public:
         return actual;
     }
 
+    ThavaType emitDecimalOperation(int op, ASTNode* left, ASTNode* right = nullptr) {
+        using namespace arm64;
+        if (!decimalEntry) decimalEntry = enc.createLabel();
+        const bool comparison = decimalComparison(op);
+        enc.sub_rri(SP, SP, 32);
+        compileExpression(left);
+        enc.str_imm(X0, SP, 0);
+        if (right) {
+            compileExpression(right);
+            enc.str_imm(X0, SP, 8);
+        }
+        if (!comparison) {
+            enc.mov_ri64(X0, THAVA_DECIMAL_BUFFER);
+            enc.bl(runtime.lblMalloc);
+            enc.str_imm(X0, SP, 16);
+        }
+
+        enc.mov_ri64(X0, op);
+        enc.ldr_imm(X1, SP, 0);
+        if (right) enc.ldr_imm(X2, SP, 8);
+        else enc.mov_ri64(X2, 0);
+        if (comparison) enc.mov_ri64(X3, 0);
+        else enc.ldr_imm(X3, SP, 16);
+        enc.bl(*decimalEntry);
+
+        const auto done = enc.createLabel();
+        enc.mov_ri64(X9, 0xffffffff);
+        enc.and_rrr(X0, X0, X9);
+        enc.cbz(X0, done);
+        if (comparison) {
+            enc.cmp_ri(X0, 1);
+            enc.b_cond(EQ, done);
+        }
+        for (const auto& error : decimalErrors) {
+            const auto next = enc.createLabel();
+            enc.mov_ri64(X9, static_cast<uint32_t>(error.first));
+            enc.cmp_rr(X0, X9);
+            enc.b_cond(NE, next);
+            enc.add_rri(SP, SP, 32);
+            emitThrowCall(nullptr, nullptr, error.second);
+            enc.bindLabel(next);
+        }
+        enc.bindLabel(done);
+        if (!comparison) enc.ldr_imm(X0, SP, 16);
+        enc.add_rri(SP, SP, 32);
+        return comparison ? ThavaType::BOOL : ThavaType::DECIMAL;
+    }
+
     ThavaType compileExpressionRaw(ASTNode* node, ThavaType expected) {
+        if (auto literal = dynamic_cast<DecimalParseNode*>(node))
+            return emitDecimalOperation(THAVA_DECIMAL_PARSE, literal->text.get());
+        if (auto minus = dynamic_cast<UnaryMinusNode*>(node); minus && minus->decimalArithmetic)
+            return emitDecimalOperation(THAVA_DECIMAL_NEGATE, minus->expr.get());
+        if (auto binary = dynamic_cast<BinaryOpNode*>(node); binary && binary->decimalOp >= 0)
+            return emitDecimalOperation(binary->decimalOp, binary->left.get(), binary->right.get());
         if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
             emitInterpolationPart(interpolation->parts.front().get());
             if (interpolation->parts.size() == 1) return ThavaType::STRING;
@@ -3123,7 +3183,7 @@ public:
             if (t == ThavaType::BOXED) emitBoxedString();
             else emitMultypeString();
             enc.bl(runtime.lblPrintStr);
-        } else if (t == ThavaType::STRING) {
+        } else if (t == ThavaType::STRING || t == ThavaType::DECIMAL) {
             enc.bl(runtime.lblPrintStr);
         } else if (t == ThavaType::NONE) {
             enc.adr_data(arm64::X0, emitter.addStringLiteralOffset("none"));
@@ -3806,7 +3866,7 @@ public:
                 if (t == ThavaType::BOXED) emitBoxedString();
                 else emitMultypeString();
                 enc.bl(runtime.lblPrintStrNL);
-            } else if (t == ThavaType::STRING) {
+            } else if (t == ThavaType::STRING || t == ThavaType::DECIMAL) {
                 enc.bl(runtime.lblPrintStrNL);
             } else if (t == ThavaType::BOOL) {
                 enc.bl(runtime.lblPrintBoolNL);
@@ -4654,6 +4714,17 @@ public:
             enc.ret();
         }
         emitMultypeHelpers();
+        // The linked runtime uses ARM64 page-relative addressing.
+        if (decimalEntry) {
+            constexpr size_t alignment = 4096;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            const auto first = std::begin(decimal_runtime::arm64);
+            const auto last = std::end(decimal_runtime::arm64);
+            const auto entry = first + decimal_runtime::arm64Entry;
+            enc.code.insert(enc.code.end(), first, entry);
+            enc.bindLabel(*decimalEntry);
+            enc.code.insert(enc.code.end(), entry, last);
+        }
         runtime.emitHelpers();
         if constexpr (peTarget) emitPELibraryThunks();
 

@@ -103,6 +103,7 @@ public:
     size_t lblFileReadLine = 0;
     size_t lblFileReadLines = 0;
     size_t lblThrow = 0;
+    std::optional<size_t> decimalEntry;
     size_t lblBoxedToString = 0;
     size_t lblMultypeToString = 0;
     bool usesMultypeFormatting = false;
@@ -2251,6 +2252,11 @@ public:
     }
 
     ThavaType getStaticExprType(ASTNode* n) {
+        if (dynamic_cast<DecimalParseNode*>(n)) return ThavaType::DECIMAL;
+        if (auto minus = dynamic_cast<UnaryMinusNode*>(n); minus && minus->decimalArithmetic)
+            return ThavaType::DECIMAL;
+        if (auto binary = dynamic_cast<BinaryOpNode*>(n); binary && binary->decimalOp >= 0)
+            return decimalComparison(binary->decimalOp) ? ThavaType::BOOL : ThavaType::DECIMAL;
         if (!n) return ThavaType::UNKNOWN;
         if (dynamic_cast<InterpolatedStringNode*>(n)) return ThavaType::STRING;
         if (auto lit = dynamic_cast<LiteralNode*>(n)) return lit->getLitType();
@@ -2296,7 +2302,7 @@ public:
     // EXPRESSION CODE GENERATION
     // ==========================================
     ThavaType emitStringCast(ThavaType srcType) {
-        if (srcType == ThavaType::STRING) return ThavaType::STRING;
+        if (srcType == ThavaType::STRING || srcType == ThavaType::DECIMAL) return ThavaType::STRING;
         if (srcType == ThavaType::NONE) {
             uint32_t offNone = pe.addStringLiteralOffset("none");
             enc.lea_rip_rdata(x86::RAX, offNone);
@@ -2371,7 +2377,7 @@ public:
         } else if (type == ThavaType::CUSTOM) {
             enc.lea_rip_rdata(x86::RAX, pe.addStringLiteralOffset("<struct object>"));
         } else if (type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
-                   type == ThavaType::BOOL || type == ThavaType::STRING || type == ThavaType::NONE) {
+                   type == ThavaType::BOOL || type == ThavaType::STRING || type == ThavaType::DECIMAL || type == ThavaType::NONE) {
             const auto savedOffset = currentFrameOffset;
             emitStringCast(type);
             currentFrameOffset = savedOffset;
@@ -2644,7 +2650,68 @@ public:
         return actual;
     }
 
+    ThavaType emitDecimalOperation(int op, ASTNode* left, ASTNode* right = nullptr) {
+        using namespace x86;
+        if (!decimalEntry) decimalEntry = enc.createLabel();
+        const bool comparison = decimalComparison(op);
+        const auto savedOffset = currentFrameOffset;
+        const auto leftSlot = savedOffset - 8;
+        const auto rightSlot = savedOffset - 16;
+        const auto resultSlot = savedOffset - 24;
+        currentFrameOffset = resultSlot;
+        maxFrameOffset = std::min(maxFrameOffset, resultSlot);
+
+        emitExpr(left);
+        enc.mov_mr_rbp(leftSlot, RAX);
+        if (right) {
+            emitExpr(right);
+            enc.mov_mr_rbp(rightSlot, RAX);
+        }
+        if (!comparison) {
+            enc.mov_ri64(RCX, THAVA_DECIMAL_BUFFER);
+            enc.call_iat_func("malloc");
+            enc.mov_mr_rbp(resultSlot, RAX);
+        }
+
+        enc.mov_ri64(RCX, op);
+        enc.mov_rm_rbp(RDX, leftSlot);
+        if (right) enc.mov_rm_rbp(R8, rightSlot);
+        else enc.xor_rr(R8, R8);
+        if (comparison) enc.xor_rr(R9, R9);
+        else enc.mov_rm_rbp(R9, resultSlot);
+        enc.call_label(*decimalEntry);
+
+        // The runtime returns a signed 32-bit status in EAX.
+        const auto done = enc.createLabel();
+        enc.mov_ri64(R10, 0xffffffff);
+        enc.and_rr(RAX, R10);
+        enc.cmp_ri(RAX, 0);
+        enc.jcc(Cond::E, done);
+        if (comparison) {
+            enc.cmp_ri(RAX, 1);
+            enc.jcc(Cond::E, done);
+        }
+        for (const auto& error : decimalErrors) {
+            const auto next = enc.createLabel();
+            enc.mov_ri64(R10, static_cast<uint32_t>(error.first));
+            enc.cmp_rr(RAX, R10);
+            enc.jcc(Cond::NE, next);
+            emitThrowCall(nullptr, nullptr, error.second);
+            enc.bindLabel(next);
+        }
+        enc.bindLabel(done);
+        if (!comparison) enc.mov_rm_rbp(RAX, resultSlot);
+        currentFrameOffset = savedOffset;
+        return comparison ? ThavaType::BOOL : ThavaType::DECIMAL;
+    }
+
     ThavaType emitExprRaw(ASTNode* node, ThavaType expected) {
+        if (auto literal = dynamic_cast<DecimalParseNode*>(node))
+            return emitDecimalOperation(THAVA_DECIMAL_PARSE, literal->text.get());
+        if (auto minus = dynamic_cast<UnaryMinusNode*>(node); minus && minus->decimalArithmetic)
+            return emitDecimalOperation(THAVA_DECIMAL_NEGATE, minus->expr.get());
+        if (auto binary = dynamic_cast<BinaryOpNode*>(node); binary && binary->decimalOp >= 0)
+            return emitDecimalOperation(binary->decimalOp, binary->left.get(), binary->right.get());
         if (!node) return ThavaType::UNKNOWN;
 
         if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
@@ -7073,7 +7140,7 @@ public:
                         emitCallPrintf(offFmtStr, x86::RDX, true);
                     } else if (et == ThavaType::FLOAT || et == ThavaType::DOUBLE) {
                         emitCallPrintfFloat(offFmtFloat, x86::XMM0);
-                    } else if (et == ThavaType::STRING) {
+                    } else if (et == ThavaType::STRING || et == ThavaType::DECIMAL) {
                         emitCallPrintf(offFmtStr, x86::RAX, true);
                     } else if (et == ThavaType::NONE) {
                         uint32_t off = pe.addStringLiteralOffset("none");
@@ -7107,7 +7174,7 @@ public:
                     emitCallPrintf(offFmtStrNL, x86::RDX, true);
                 } else if (et == ThavaType::FLOAT || et == ThavaType::DOUBLE) {
                     emitCallPrintfFloat(offFmtFloatNL, x86::XMM0);
-                } else if (et == ThavaType::STRING) {
+                } else if (et == ThavaType::STRING || et == ThavaType::DECIMAL) {
                     emitCallPrintf(offFmtStrNL, x86::RAX, true);
                 } else if (et == ThavaType::NONE) {
                     uint32_t off = pe.addStringLiteralOffset("none\n");
@@ -7949,6 +8016,16 @@ public:
         }
 
         emitMultypeHelpers();
+        if (decimalEntry) {
+            constexpr size_t alignment = 16;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            const auto first = std::begin(decimal_runtime::x64);
+            const auto last = std::end(decimal_runtime::x64);
+            const auto entry = first + decimal_runtime::x64Entry;
+            enc.code.insert(enc.code.end(), first, entry);
+            enc.bindLabel(*decimalEntry);
+            enc.code.insert(enc.code.end(), entry, last);
+        }
 
         // 5.5. Dynamic Library Export & Metadata registration
         // The metadata carries image offsets of the exported functions, so it can

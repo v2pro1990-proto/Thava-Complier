@@ -113,6 +113,7 @@ Thava uses angle brackets for type annotations. Write `<type> name = value` for 
 | Signed 64-bit integer | `<int64>` | | Range −9,223,372,036,854,775,808 to 9,223,372,036,854,775,807. |
 | Float | `<fl>` | `<float>` | Single-precision type. See the precision note below. |
 | Double | `<dbl>` | `<double>` | Double-precision floating-point. |
+| Decimal | `<flr>` | | Base-10 decimal with up to 128 digits. |
 | Boolean | `<bl>` | `<bool>` | `true` or `false`. |
 | String | `<str>` | `<string>` | UTF-8 text. See [String Manipulation](#string-manipulation-str) for indexing and lengths. |
 
@@ -129,6 +130,21 @@ Integer widths apply to declared values. Use `<int64>` to keep a value such as `
 Native i686 and the C++ backend round values stored as `<fl>` to single precision. Native x86-64 and ARM64 can keep double precision in `<fl>` computations or storage. Code that depends on exact single-precision rounding should account for the target backend.
 
 Decimal literals such as `1000000.25` start as `<dbl>`. When formatting finite real values with absolute magnitudes from `1000000` to below `1000000000000`, `cons.out` and string interpolation display ordinary decimal notation and trim trailing fractional zeros. For example, `1000000.0` displays as `1000000` and `-12345678.125` keeps its fraction.
+
+### High-precision decimal (`<flr>`)
+
+A decimal literal used in an `<flr>` expression retains its base-10 digits. Integers can participate directly. Use `<flr>(text)` to parse a string in decimal notation, with an optional sign, or read a decimal directly with `key.input(<flr>, "Amount: ")`. A previously computed `<fl>` or `<dbl>` value cannot be promoted implicitly.
+
+```thava
+<flr> exact = 0.1 + 0.2
+<flr> balance = <flr>("12345678901234567890.00000000000000000001")
+<flr> third = 1 / 3
+cons.out("@{exact} @{exact == 0.3}") # 0.3 true
+cons.out(balance * 2)             # 24691357802469135780.00000000000000000002
+cons.out(third)                   # 0.33333333333333333333333333333333
+```
+
+Addition, subtraction, multiplication, and comparison are exact within the 128-digit capacity. Division truncates toward zero after 32 fractional digits. A result exceeding the capacity, division by zero, or invalid decimal text raises `RuntimeError`. Printing, interpolation, and `<str>(value)` use ordinary decimal notation and trim trailing fractional zeros.
 
 ### Collection Types
 | Type | Keyword | Alias | Literal example |
@@ -721,7 +737,7 @@ cons.out("Interpolated: @{name} has @{count * 2} items")
 ```
 
 ### `key` (Keyboard Input)
-* `key.input(<type>, prompt)`: Displays `prompt` to standard output and reads input from standard input, parsing it into the requested type `<int>`, `<fl>`, `<dbl>`, `<bl>`, or `<str>`.
+* `key.input(<type>, prompt)`: Displays `prompt` to standard output and reads input from standard input, parsing it into the requested type `<int>`, `<fl>`, `<dbl>`, `<flr>`, `<bl>`, or `<str>`.
 * `key.input.upper(<str>, prompt)`: Reads a line of input and converts all characters to uppercase.
 * `key.input.lower(<str>, prompt)`: Reads a line of input and converts all characters to lowercase.
 * `key.input.title(<str>, prompt)` applies Unicode titlecase on native i686 and the C++ backend. Native x86-64 and ARM64 return the line unchanged for this form. To apply titlecase on every backend, use `key.input(<str>, prompt).title()`.

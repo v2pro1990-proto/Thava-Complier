@@ -26,6 +26,18 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
                            "1000001 -12345678.125\n1000000 999999999999.25\n2.5",
             "interpolation": "Trần Minh có 42 điểm\nthứ 1\n2 / 3\n[đúng] true, 2.5\n@{name}\nTrần? Nhập: chào"}
 
+expected["flr"] = "\n".join((
+    "0.3 true 0",
+    "246913578024691357802469135780.24",
+    "2.25000000000000000001",
+    "0.33333333333333333333333333333333 -0.66666666666666666666666666666666",
+    "12.34000000000000000056 true true",
+    "Invalid decimal value",
+    "Decimal division by zero",
+    "Decimal precision overflow",
+    "Amount: 9007199254740992.99",
+))
+
 unicode_output = (
     "hôm nay trời đẹp quá",
     "HÔM NAY TRỜI ĐẸP QUÁ",
@@ -92,11 +104,11 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 levels.append("-O3")
             if case == "optimizer":
                 levels += ["-O1", "-O2", "-O3"]
-            if case in ("const_variables", "real_output", "multype_return"):
+            if case in ("const_variables", "real_output", "multype_return", "flr"):
                 levels.append("-O2")
             for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
-                toolchain = ["--cxx", "missing-compiler"] if case == "multype_return" and target != "cpp" else []
+                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "flr") and target != "cpp" else []
                 subprocess.run([str(compiler), str(source), "--backend",
                                 target, opt, *toolchain, "-o", output.name], cwd=tmp, check=True)
                 if case == "optimizer" and target != "cpp":
@@ -110,7 +122,7 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                     if not run_windows_arm64:
                         continue
                 runner = ["qemu-aarch64"] if target == "arm64" else []
-                input_data = {"unicode_case": unicode_input, "interpolation": "chào\n"}
+                input_data = {"unicode_case": unicode_input, "interpolation": "chào\n", "flr": "9007199254740993.99\n"}
                 result = subprocess.run(runner + [str(output)], cwd=tmp,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8",
                                         input=input_data.get(case))

@@ -1,0 +1,40 @@
+<flr> func add_tax(<flr> amount, <int> multiplier) -> <flr> {
+    return amount * multiplier + 0.00000000000000000001
+}
+
+<flr> exact = 0.1 + 0.2
+<flr> zero = -0.000
+cons.out("@{exact} @{exact == 0.3} @{zero}")
+<flr> large = 123456789012345678901234567890.12
+large *= 2
+cons.out(large)
+cons.out(add_tax(1.125, 2))
+<flr> third = 1 / 3
+<flr> negative = -2 / 3
+cons.out("@{third} @{negative}")
+<str> input = "00012.34000000000000000056"
+<flr> parsed = <flr>(input)
+<str> text = <str>(parsed)
+cons.out("@{text} @{parsed > 12.34} @{parsed != 12.34}")
+try {
+    <flr> invalid = <flr>("NaN")
+    cons.out(invalid)
+} except RuntimeError as message {
+    cons.out(message)
+}
+try {
+    <flr> failure = 1 / 0
+    cons.out(failure)
+} except RuntimeError as message {
+    cons.out(message)
+}
+try {
+    <flr> overflow = 99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999 + 1
+    cons.out(overflow)
+} except RuntimeError as message {
+    cons.out(message)
+}
+
+
+<flr> typed = key.input(<flr>, "Amount: ")
+cons.out(typed - 1)

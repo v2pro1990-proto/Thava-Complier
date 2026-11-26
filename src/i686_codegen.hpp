@@ -105,6 +105,7 @@ class Codegen {
     uint32_t randomState = UINT32_MAX;
     size_t allocateLabel = enc.label();
     bool allocatorUsed = false;
+    std::optional<size_t> decimalEntry;
     std::vector<DataFixup> textFixups;
     std::map<uint32_t, size_t> runtimeCalls;
 
@@ -118,7 +119,7 @@ class Codegen {
     }
 
     static bool scalar(ThavaType t) {
-        return t == ThavaType::INT || t == ThavaType::BOOL || t == ThavaType::STRING || floating(t);
+        return t == ThavaType::INT || t == ThavaType::BOOL || t == ThavaType::STRING || t == ThavaType::DECIMAL || floating(t);
     }
 
     static bool collection(ThavaType type) {
@@ -135,7 +136,7 @@ class Codegen {
             case ThavaType::INT: return VALUE_INT;
             case ThavaType::FLOAT: case ThavaType::DOUBLE: return VALUE_REAL;
             case ThavaType::BOOL: return VALUE_BOOL;
-            case ThavaType::STRING: return VALUE_STRING;
+            case ThavaType::STRING: case ThavaType::DECIMAL: return VALUE_STRING;
             case ThavaType::LIST: case ThavaType::MULTYPE: return VALUE_LIST;
             case ThavaType::TUPLE: return VALUE_TUPLE;
             case ThavaType::DICT: return VALUE_DICT;
@@ -307,7 +308,8 @@ class Codegen {
 
     void defaultValue(ThavaType type) {
         lastCustomType.clear();
-        if (type == ThavaType::STRING) stringValue("");
+        if (type == ThavaType::DECIMAL) stringValue("0");
+        else if (type == ThavaType::STRING) stringValue("");
         else if (collection(type)) {
             pushAllocationContext();
             callRuntime(runtime::rt_collection_new, 8);
@@ -599,7 +601,7 @@ class Codegen {
     }
 
     void formatScalar(ThavaType type) {
-        if (type == ThavaType::STRING) return;
+        if (type == ThavaType::STRING || type == ThavaType::DECIMAL) return;
         if (type == ThavaType::BOOL) {
             const auto isTrue = enc.label(), done = enc.label();
             enc.alu(Cmp, EAX, 0);
@@ -1393,7 +1395,69 @@ class Codegen {
         return ThavaType::CUSTOM;
     }
 
+    ThavaType emitDecimalOperation(int op, ASTNode* left, ASTNode* right = nullptr) {
+        if (!decimalEntry) decimalEntry = enc.label();
+        const bool comparison = decimalComparison(op);
+        enc.alu(Sub, ESP, 12);
+        expression(left);
+        enc.store(ESP, 0, EAX);
+        if (right) {
+            expression(right);
+            enc.store(ESP, 4, EAX);
+        }
+        if (!comparison) {
+            allocatorUsed = true;
+            enc.push(EBX);
+            enc.pushImm(THAVA_DECIMAL_BUFFER);
+            enc.call(allocateLabel);
+            enc.alu(Add, ESP, 8);
+            enc.store(ESP, 8, EAX);
+        }
+
+        enc.load(ECX, ESP, 0);
+        if (right) enc.load(EDX, ESP, 4);
+        else enc.alu(Xor, EDX, EDX);
+        if (comparison) enc.pushImm(0);
+        else {
+            enc.load(EAX, ESP, 8);
+            enc.push(EAX);
+        }
+        enc.push(EDX);
+        enc.push(ECX);
+        enc.pushImm(op);
+        enc.call(*decimalEntry);
+        enc.alu(Add, ESP, 16);
+
+        const auto done = enc.label();
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, done);
+        if (comparison) {
+            enc.alu(Cmp, EAX, 1);
+            enc.jump(Equal, done);
+        }
+        for (const auto& error : decimalErrors) {
+            const auto next = enc.label();
+            enc.alu(Cmp, EAX, error.first);
+            enc.jump(NotEqual, next);
+            enc.alu(Add, ESP, 12);
+            LiteralNode message(error.second, ThavaType::STRING);
+            raiseException(&message);
+            enc.bind(next);
+        }
+        enc.bind(done);
+        if (!comparison) enc.load(EAX, ESP, 8);
+        enc.alu(Add, ESP, 12);
+        enc.alu(Xor, EDX, EDX);
+        return comparison ? ThavaType::BOOL : ThavaType::DECIMAL;
+    }
+
     ThavaType expression(ASTNode* node) {
+        if (auto literal = dynamic_cast<DecimalParseNode*>(node))
+            return emitDecimalOperation(THAVA_DECIMAL_PARSE, literal->text.get());
+        if (auto minus = dynamic_cast<UnaryMinusNode*>(node); minus && minus->decimalArithmetic)
+            return emitDecimalOperation(THAVA_DECIMAL_NEGATE, minus->expr.get());
+        if (auto binary = dynamic_cast<BinaryOpNode*>(node); binary && binary->decimalOp >= 0)
+            return emitDecimalOperation(binary->decimalOp, binary->left.get(), binary->right.get());
         if (auto interpolation = dynamic_cast<InterpolatedStringNode*>(node)) {
             formatScalar(expression(interpolation->parts.front().get()));
             for (size_t i = 1; i < interpolation->parts.size(); ++i) {
@@ -3251,6 +3315,14 @@ public:
             const auto base = enc.code.size();
             for (const auto& [offset, label] : runtimeCalls) enc.bindAt(label, base + offset);
             enc.code.insert(enc.code.end(), std::begin(runtime::code), std::end(runtime::code));
+        }
+        if (decimalEntry) {
+            constexpr size_t alignment = 16;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            const auto first = std::begin(decimal_runtime::i686);
+            const auto last = std::end(decimal_runtime::i686);
+            enc.bindAt(*decimalEntry, enc.code.size() + decimal_runtime::i686Entry);
+            enc.code.insert(enc.code.end(), first, last);
         }
         for (const auto& fixup : textFixups)
             enc.patch(fixup.at, ElfI686Emitter::textRva + static_cast<uint32_t>(enc.offset(fixup.offset)));

@@ -40,10 +40,10 @@ public:
         if (!node) return true;
         if (dynamic_cast<const LiteralNode*>(node)) return true;
         if (dynamic_cast<const VarNode*>(node)) return true;
-        if (auto u = dynamic_cast<const UnaryMinusNode*>(node)) return isPure(u->expr.get());
+        if (auto u = dynamic_cast<const UnaryMinusNode*>(node)) return !u->decimalArithmetic && isPure(u->expr.get());
         if (auto u = dynamic_cast<const UnaryNotNode*>(node)) return isPure(u->expr.get());
         if (auto u = dynamic_cast<const UnaryBNotNode*>(node)) return isPure(u->expr.get());
-        if (auto b = dynamic_cast<const BinaryOpNode*>(node)) return isPure(b->left.get()) && isPure(b->right.get());
+        if (auto b = dynamic_cast<const BinaryOpNode*>(node)) return b->decimalOp < 0 && isPure(b->left.get()) && isPure(b->right.get());
         if (auto c = dynamic_cast<const CastNode*>(node)) return isPure(c->expr.get());
         if (auto cond = dynamic_cast<const ConditionalExprNode*>(node)) {
             return isPure(cond->condition.get()) && isPure(cond->trueExpr.get()) && isPure(cond->falseExpr.get());

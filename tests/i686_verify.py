@@ -113,6 +113,17 @@ with tempfile.TemporaryDirectory() as tmp:
                 "[42, ok, true, 2.5]", "ok", "[wait, 3]", "50", "true 2.5 4",
                 "[1, [nested, false], none]", "nested", "out of range",
             ], None),
+            ("flr.thv", [
+                "0.3 true 0",
+                "246913578024691357802469135780.24",
+                "2.25000000000000000001",
+                "0.33333333333333333333333333333333 -0.66666666666666666666666666666666",
+                "12.34000000000000000056 true true",
+                "Invalid decimal value",
+                "Decimal division by zero",
+                "Decimal precision overflow",
+                "Amount: 9007199254740992.99",
+            ], "9007199254740993.99\n"),
             ("real_output.thv", [
                 "1000000", "1000000.25", "999999999999.25", "-12345678.125",
                 "1000001 -12345678.125", "1000000 999999999999.25", "2.5",
