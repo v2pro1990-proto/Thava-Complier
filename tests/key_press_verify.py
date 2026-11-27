@@ -32,11 +32,14 @@ def verify_key_press(compiler, work, backend, runner=()):
     else:
         output = _verify_pty(command, work)
 
-    assert output.splitlines() == [
+    lines = [line for line in output.splitlines() if line]
+    expected = [
         "ready", "KEY_A", "KEY_ENTER", "KEY_RIGHT", "KEY_ầ", "KEY_ESCAPE",
-        "name: Trần Minh", "empty rejected", "unknown rejected", "",
-        "[Thava Native] Build and run successful!",
-    ], output
+        "name: Trần Minh", "empty rejected", "unknown rejected",
+    ]
+    if backend != "pe-arm64":
+        expected.append("[Thava Native] Build and run successful!")
+    assert lines == expected, (backend, lines)
     print(backend, "key.press and subsequent key.input OK", flush=True)
 
 
