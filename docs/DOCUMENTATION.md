@@ -558,7 +558,7 @@ Rebuild applications that consume scalar `<multype>` values from a `.thdl` modul
 cons.out(result[1]) # ok
 ```
 
-Native x86-64, ARM64, and i686 preserve element types when building, returning, and indexing `<multype>` values. A collection literal in a `<multype>` declaration, argument, or return receives tags for its individual elements. Use a type annotation or explicit cast when doing arithmetic with an indexed element. Native x86-64 and ARM64 support rebinding the collection variable, while indexed mutation and list mutation methods on `<multype>` currently require native i686 or the C++ backend.
+Native x86-64, ARM64, and i686 preserve element types when building, returning, and indexing `<multype>` values. A collection literal in a `<multype>` declaration, argument, or return receives tags for its individual elements. Use a type annotation or explicit cast when doing arithmetic with an indexed element. Lists stored in `<multype>` support indexed assignment, compound updates, `addval(value)`, `addval([index], value)`, `assign([index], value)`, `removeval(value)`, `removeval([index])`, and `delval()` on the native and C++ backends. Negative indexes count from the end. Rebuild native x86-64 and ARM64 modules and their consumers when sharing growable `<multype>` lists across module boundaries.
 
 ### Default Arguments
 Trailing parameters can specify default values:

@@ -128,6 +128,10 @@ with tempfile.TemporaryDirectory() as tmp:
                 "1", "1", "xin chào", "2.5", "true", "9007199254740993.123456789012345679",
                 "[1, ok, false]", "ok", "5", "2", "none", "7", "zero",
             ], None),
+            ("multype_mutation.thv", [
+                "[7, 99, old text, 5]", "4", "5", "boxed", "[]", "[4]", "scalar rejected", "42",
+                "[7]", "out of range", "[7]",
+            ], None),
             ("multype_scalar.thv", [
                 "7", "Không thể chia cho 0", "1.5", "5.5", "Incompatible <multype> element type",
                 "Expected exactly one <multype> element", "Expected exactly one <multype> element",

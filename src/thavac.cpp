@@ -1,4 +1,6 @@
 #include <iostream>
+#include "multype_mutation.h"
+#include "multype_mutation_data.hpp"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -99,7 +101,31 @@ constexpr int entrySize = 16;
 constexpr int tagOffset = 8;
 
 enum Tag { None, Integer, Real, Boolean, String, Sequence, Dictionary, Function, Object, Decimal };
-constexpr int scalarHeader = -1;
+constexpr int scalarHeader = THAVA_SCALAR_BOX;
+constexpr int handleSize = 24;
+static_assert(Integer == THAVA_TAG_INT && Real == THAVA_TAG_REAL && String == THAVA_TAG_STRING &&
+              Sequence == THAVA_TAG_SEQUENCE && Dictionary == THAVA_TAG_DICT && Decimal == THAVA_TAG_DECIMAL);
+
+constexpr const char* mutationErrors[] = {
+    nullptr,
+    "Cannot mutate a scalar <multype> as a list",
+    "<multype> index out of range",
+    "Cannot allocate <multype> list storage",
+    "Incompatible types for compound <multype> assignment",
+    "Division by zero",
+    "Rebuild the module before growing this <multype> list",
+    "Cannot create a cyclic <multype> list",
+};
+
+static int assignmentMutation(const std::string& op) {
+    if (op == "=") return THAVA_LIST_SET;
+    if (op == "+=") return THAVA_LIST_ADD;
+    if (op == "-=") return THAVA_LIST_SUB;
+    if (op == "*=") return THAVA_LIST_MUL;
+    if (op == "/=") return THAVA_LIST_DIV;
+    if (op == "%=") return THAVA_LIST_MOD;
+    return THAVA_LIST_POW;
+}
 
 inline Tag tagFor(ThavaType type) {
     switch (type) {
@@ -1989,7 +2015,11 @@ public:
 
     std::string generateCode() override {
         if (cppIsGlobalRef(varName) || g_cppHoisted.count(varName)) {
-            if (initExpr) return cppVarRef(varName) + " = " + initExpr->generateCode() + ";";
+            if (initExpr) {
+                const auto value = initExpr->generateCode();
+                return cppVarRef(varName) + " = " +
+                       (varType == ThavaType::STRING ? "static_cast<std::string>(" + value + ")" : value) + ";";
+            }
             return std::string();
         }
         std::string cppType;
@@ -2581,29 +2611,18 @@ public:
         : varName(std::move(v)), indexExpr(std::move(i)), valExpr(std::move(val)), op(std::move(o)) {}
 
     std::string generateCode() override {
-        const std::string varName = cppVarRef(this->varName);
-        if (op == "=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", " + valExpr->generateCode() + ");";
-        }
-        if (op == "+=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", _thava_add(_thava_index(" + varName + ", " + indexExpr->generateCode() + "), " + valExpr->generateCode() + "));";
-        }
-        if (op == "-=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", _thava_sub(_thava_index(" + varName + ", " + indexExpr->generateCode() + "), " + valExpr->generateCode() + "));";
-        }
-        if (op == "*=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", _thava_mul(_thava_index(" + varName + ", " + indexExpr->generateCode() + "), " + valExpr->generateCode() + "));";
-        }
-        if (op == "/=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", _thava_div(_thava_index(" + varName + ", " + indexExpr->generateCode() + "), " + valExpr->generateCode() + "));";
-        }
-        if (op == "%=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", _thava_mod(_thava_index(" + varName + ", " + indexExpr->generateCode() + "), " + valExpr->generateCode() + "));";
-        }
-        if (op == "**=") {
-            return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", _thava_pow(_thava_index(" + varName + ", " + indexExpr->generateCode() + "), " + valExpr->generateCode() + "));";
-        }
-        return "_thava_list_assign(" + varName + ", " + indexExpr->generateCode() + ", " + valExpr->generateCode() + ");";
+        const auto base = cppVarRef(varName);
+        const auto key = indexExpr->generateCode();
+        const auto rhs = valExpr->generateCode();
+        if (op == "=") return "_thava_list_assign(" + base + ", " + key + ", " + rhs + ");";
+
+        static const std::map<std::string, std::string> operators = {
+            {"+=", "_thava_add"}, {"-=", "_thava_sub"}, {"*=", "_thava_mul"},
+            {"/=", "_thava_div"}, {"%=", "_thava_mod"}, {"**=", "_thava_pow"},
+        };
+        return "([&](const auto& _thava_index_key) { const ThavaValue _thava_previous = _thava_index(" +
+               base + ", _thava_index_key); _thava_list_assign(" + base + ", _thava_index_key, " +
+               operators.at(op) + "(_thava_previous, ThavaValue(" + rhs + "))); })(" + key + ");";
     }
 
     ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::INT; }
@@ -2881,6 +2900,33 @@ public:
         return ThavaType::UNKNOWN;
     }
 };
+
+struct ListMutation {
+    int op;
+    ASTNode* index = nullptr;
+    ASTNode* value = nullptr;
+};
+
+static ListMutation listMutation(const ListMethodNode& call) {
+    ASTNode* index = nullptr;
+    if (!call.args.empty()) {
+        auto* candidate = dynamic_cast<CollectionNode*>(call.args.front().get());
+        if (candidate && !candidate->getIsTuple() && candidate->getElements().size() == 1)
+            index = candidate->getElements().front().get();
+    }
+    if (call.method == "addval") {
+        if (call.args.size() == 1) return {THAVA_LIST_APPEND, nullptr, call.args.front().get()};
+        if (call.args.size() == 2 && index) return {THAVA_LIST_INSERT, index, call.args.back().get()};
+    } else if (call.method == "assign" && call.args.size() == 2 && index) {
+        return {THAVA_LIST_SET, index, call.args.back().get()};
+    } else if (call.method == "removeval" && call.args.size() == 1) {
+        return index ? ListMutation{THAVA_LIST_REMOVE_AT, index}
+                     : ListMutation{THAVA_LIST_REMOVE_VALUE, nullptr, call.args.front().get()};
+    } else if (call.method == "delval" && call.args.empty()) {
+        return {THAVA_LIST_CLEAR};
+    }
+    diag::fail("Invalid arguments for <multype> list method '" + call.method + "'.", call.span);
+}
 
 // AST node for standard os library (OS interaction: Windows / Linux / MessageBox)
 class OsMethodNode : public ASTNode {
@@ -6762,6 +6808,18 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
 #include "pe_emitter.hpp"
 #include "elf_emitter.hpp"
 #include "x86_encoder.hpp"
+static bool hasMultypeExports(const std::vector<ASTPtr>& ast) {
+    for (const auto& node : ast) {
+        auto* function = dynamic_cast<FunctionDeclNode*>(node.get());
+        if (!function) continue;
+        if (function->returnType == ThavaType::MULTYPE ||
+            std::any_of(function->params.begin(), function->params.end(),
+                        [](const auto& parameter) { return parameter.first == ThavaType::MULTYPE; }))
+            return true;
+    }
+    return false;
+}
+
 #include "native_codegen.hpp"
 #include "ast_optimizer.hpp"
 #include "arm64_encoder.hpp"

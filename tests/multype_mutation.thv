@@ -1,0 +1,51 @@
+<multype> values = [1, "old", true, 2.5]
+
+func change(<multype> list) {
+    list[0] += 6
+    list[-1] *= 2.0
+    list[1] += " text"
+    list.assign([2], "set")
+    list.addval([1], 99)
+    list.addval("tail")
+    list.removeval("set")
+    list.removeval([-1])
+}
+change(values)
+cons.out(values)
+cons.out(len(values))
+<dbl> last = values[-1]
+cons.out(last)
+
+<multype> boxed = "boxed"
+values.addval(boxed)
+<str> unboxed = values[-1]
+cons.out(unboxed)
+
+values.delval()
+cons.out(values)
+values.addval(5)
+values[0] **= 2
+values[0] %= 7
+cons.out(values)
+
+<multype> scalar = 42
+try {
+    scalar.addval(1)
+} except RuntimeError {
+    cons.out("scalar rejected")
+}
+cons.out(scalar)
+
+<int> func overwrite(<multype> list) {
+    list[0] = 50
+    return 3
+}
+values[0] += overwrite(values)
+cons.out(values)
+
+try {
+    values[9] = 1
+} except RuntimeError {
+    cons.out("out of range")
+}
+cons.out(values)

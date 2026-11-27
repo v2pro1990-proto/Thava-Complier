@@ -667,6 +667,29 @@ class Codegen {
         enc.store(ESP, offset + 8, ECX);
     }
 
+    void storeListValue(ThavaType type, int32_t offset) {
+        if (type != ThavaType::MULTYPE) {
+            storeTagged(type, offset);
+            return;
+        }
+        const auto sequence = enc.label();
+        const auto done = enc.label();
+        enc.push(EAX);
+        enc.push(EAX);
+        callRuntime(runtime::rt_is_multype_scalar, 4);
+        enc.alu(Cmp, EAX, 0);
+        enc.pop(EAX);
+        enc.jump(Equal, sequence);
+        enc.push(EAX);
+        callRuntime(runtime::rt_multype_singleton, 4);
+        storeTagged(ThavaType::UNKNOWN, offset);
+        enc.jump(done);
+        enc.bind(sequence);
+        enc.alu(Xor, EDX, EDX);
+        storeTagged(type, offset);
+        enc.bind(done);
+    }
+
     void requireValue(const char* error) {
         const auto valid = enc.label();
         enc.alu(Cmp, EAX, 0);
@@ -715,7 +738,7 @@ class Codegen {
             integer(index++);
             storeArgument(4);
             const auto element = expression(value.get());
-            storeTagged(element, 12);
+            storeListValue(element, 12);
             callRuntime(runtime::rt_list_insert, 32);
         }
         enc.pop(EAX);
@@ -781,7 +804,7 @@ class Codegen {
         else integer(0x7fffffffffffffffULL);
         if (!dict && keyType != ThavaType::INT && keyType != ThavaType::UNKNOWN) unsupported("A non-integer list index");
         storeTagged(keyType, 4);
-        if (op != "=") {
+        if (op != "=" || (slot.type == ThavaType::MULTYPE && !insert)) {
             // Reuse the staged receiver and key without evaluating either again.
             pushAllocationContext();
             enc.alu(Sub, ESP, 20);
@@ -793,11 +816,11 @@ class Codegen {
             enc.store(ESP, 16, EAX);
             callRuntime(runtime::rt_collection_current, 28);
             requireValue("Invalid collection index or missing key");
-            saveValue();
+            if (op != "=") saveValue();
         }
         auto element = expression(value);
         if (op != "=") element = emitBinary(op.substr(0, op.size() - 1), ThavaType::UNKNOWN, element);
-        storeTagged(element, 16);
+        storeListValue(element, 16);
         enc.imm(EAX, dict ? COLLECTION_DICT_SET : insert ? COLLECTION_INSERT : COLLECTION_SET);
         enc.store(ESP, 28, EAX);
         callRuntime(runtime::rt_collection_write, 40);
@@ -855,7 +878,7 @@ class Codegen {
                 enc.alu(Sub, ESP, 16);
                 loadValue(slot);
                 enc.store(ESP, 0, EAX);
-                storeTagged(expression(node->args[0].get()), 4);
+                storeListValue(expression(node->args[0].get()), 4);
                 callRuntime(runtime::rt_list_remove_value, 16);
             }
         } else unsupported("List method '" + method + "'");
@@ -2107,7 +2130,9 @@ class Codegen {
         } else if (auto defer = dynamic_cast<DeferNode*>(node)) {
             registerDefer(defer);
         } else if (auto index = dynamic_cast<IndexAssignNode*>(node)) {
-            mutateCollection(lookup(index->varName), index->indexExpr.get(), index->valExpr.get(), false, index->op);
+            auto& slot = lookup(index->varName);
+            requireSequence(slot);
+            mutateCollection(slot, index->indexExpr.get(), index->valExpr.get(), false, index->op);
         } else if (auto body = dynamic_cast<BlockNode*>(node)) {
             for (const auto& child : body->statements) statement(child.get());
         } else if (auto branch = dynamic_cast<IfNode*>(node)) {

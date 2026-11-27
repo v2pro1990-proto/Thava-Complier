@@ -36,6 +36,10 @@ expected["multype_dynamic"] = (
     "[1, ok, false]\nok\n5\n2\nnone\n7\nzero"
 )
 
+expected["multype_mutation"] = (
+    "[7, 99, old text, 5]\n4\n5\nboxed\n[]\n[4]\nscalar rejected\n42\n[7]\nout of range\n[7]"
+)
+
 expected["flr"] = "\n".join((
     "0.3 true 0",
     "246913578024691357802469135780.24",
@@ -114,11 +118,11 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 levels.append("-O3")
             if case == "optimizer":
                 levels += ["-O1", "-O2", "-O3"]
-            if case in ("const_variables", "real_output", "multype_return", "multype_scalar", "multype_dynamic", "flr"):
+            if case in ("const_variables", "real_output", "multype_return", "multype_scalar", "multype_dynamic", "multype_mutation", "flr"):
                 levels.append("-O2")
             for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
-                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "multype_scalar", "multype_dynamic", "flr") and target != "cpp" else []
+                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "multype_scalar", "multype_dynamic", "multype_mutation", "flr") and target != "cpp" else []
                 subprocess.run([str(compiler), str(source), "--backend",
                                 target, opt, *toolchain, "-o", output.name], cwd=tmp, check=True)
                 if case == "optimizer" and target != "cpp":
@@ -271,7 +275,8 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
         '<multype> func export_number() { return 2.5 }\n', encoding="utf-8")
     Path(tmp, "mixed_consumer.thv").write_text(
         '@dlattach "mixed_library"\n<multype> value = export_mix()\ncons.out(value)\ncons.out(value[1])\n'
-        '<multype> number = export_number()\ncons.out(number)\n',
+        '<multype> number = export_number()\ncons.out(number)\n'
+        'value.addval("new")\ncons.out(value)\n',
         encoding="utf-8")
     for target in targets:
         if target == "cpp" or (target == "pe-arm64" and not run_windows_arm64):
@@ -286,4 +291,4 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
         runner = ["qemu-aarch64"] if target == "arm64" else []
         result = subprocess.run(runner + [str(binary)], cwd=tmp, check=True,
                                 capture_output=True, encoding="utf-8", timeout=15)
-        assert result.stdout.splitlines()[:3] == ["[42, library, true]", "library", "2.5"], (target, result.stdout)
+        assert result.stdout.splitlines()[:4] == ["[42, library, true]", "library", "2.5", "[42, library, true, new]"], (target, result.stdout)

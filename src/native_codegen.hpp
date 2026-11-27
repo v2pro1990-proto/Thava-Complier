@@ -104,6 +104,8 @@ public:
     size_t lblFileReadLines = 0;
     size_t lblThrow = 0;
     std::optional<size_t> decimalEntry;
+    std::optional<size_t> mutationEntry;
+    size_t mutationAllocator = 0;
     size_t lblBoxedToString = 0;
     size_t lblMultypeToString = 0;
     bool usesMultypeFormatting = false;
@@ -2391,6 +2393,97 @@ public:
         emitThrowCall(nullptr, nullptr, message);
     }
 
+    void loadMultypeBlock(x86::Reg reg) {
+        using namespace x86;
+        const auto ready = enc.createLabel();
+        enc.test_rr(reg, reg);
+        enc.je(ready);
+        enc.mov_rm(R11, reg, 0);
+        enc.cmp_ri32(R11, THAVA_SEQUENCE_HANDLE);
+        enc.jne(ready);
+        enc.mov_rm(reg, reg, 8);
+        enc.bindLabel(ready);
+    }
+
+    void initMultypeHandle(x86::Reg handle, x86::Reg capacity) {
+        using namespace x86;
+        enc.mov_ri64(R11, THAVA_SEQUENCE_HANDLE);
+        enc.mov_mr(handle, 0, R11);
+        enc.mov_rr(R11, handle);
+        enc.add_ri32(R11, native_multype::handleSize);
+        enc.mov_mr(handle, 8, R11);
+        enc.mov_mr(handle, 16, capacity);
+    }
+
+    void mutateMultype(const std::string& name, ListMutation mutation) {
+        using namespace x86;
+        if (!mutationEntry) {
+            mutationEntry = enc.createLabel();
+            mutationAllocator = enc.createLabel();
+        }
+        const auto saved = currentFrameOffset;
+        currentFrameOffset -= 64;
+        const auto request = currentFrameOffset;
+        maxFrameOffset = std::min(maxFrameOffset, request);
+        loadCollectionPtr(name, lookupVar(name), RAX);
+        enc.mov_mr_rbp(request, RAX);
+        if (mutation.index) {
+            if (emitExpr(mutation.index, ThavaType::INT) != ThavaType::INT)
+                diag::fail("A <multype> list index must be an integer.", mutation.index->span);
+        }
+        else enc.xor_rr(RAX, RAX);
+        enc.mov_mr_rbp(request + 16, RAX);
+        if (mutation.op >= THAVA_LIST_ADD) emitMultypeMutationCall(request, THAVA_LIST_READ);
+        if (mutation.value) {
+            const auto type = emitExpr(mutation.value, dynamic_cast<CollectionNode*>(mutation.value)
+                                       ? ThavaType::MULTYPE : ThavaType::UNKNOWN);
+            if (type == ThavaType::VOID || type == ThavaType::UNKNOWN || type == ThavaType::FILE)
+                diag::fail("This value cannot be stored in a <multype> list.", mutation.value->span);
+            if (type == ThavaType::BOXED) {
+                enc.mov_rm(R10, RAX, 8);
+                enc.mov_rm(RAX, RAX, 0);
+                enc.mov_mr_rbp(request + 24, RAX);
+            } else {
+                if (type == ThavaType::LIST || type == ThavaType::TUPLE) {
+                    const auto element = elemTypeOfIndexedList(mutation.value);
+                    boxPlainSequence(element == ThavaType::UNKNOWN ? ThavaType::INT : element);
+                }
+                if (type == ThavaType::FLOAT || type == ThavaType::DOUBLE) enc.movsd_mr_rbp(request + 24, XMM0);
+                else enc.mov_mr_rbp(request + 24, RAX);
+                enc.mov_ri64(R10, native_multype::tagFor(type == ThavaType::LIST || type == ThavaType::TUPLE
+                                                         ? ThavaType::MULTYPE : type));
+            }
+            enc.mov_mr_rbp(request + 32, R10);
+        } else {
+            enc.xor_rr(RAX, RAX);
+            enc.mov_mr_rbp(request + 24, RAX);
+            enc.mov_mr_rbp(request + 32, RAX);
+        }
+        emitMultypeMutationCall(request, mutation.op);
+        currentFrameOffset = saved;
+    }
+
+    void emitMultypeMutationCall(int32_t request, int op) {
+        using namespace x86;
+        enc.mov_ri64(RAX, op);
+        enc.mov_mr_rbp(request + 8, RAX);
+        enc.lea_rip_label(RAX, mutationAllocator);
+        enc.mov_mr_rbp(request + 40, RAX);
+        enc.lea_rm_rbp(RCX, request);
+        enc.call_label(*mutationEntry);
+        const auto done = enc.createLabel();
+        enc.test_rr(RAX, RAX);
+        enc.je(done);
+        for (size_t i = 1; i < std::size(native_multype::mutationErrors); ++i) {
+            const auto next = enc.createLabel();
+            enc.cmp_ri32(RAX, i);
+            enc.jne(next);
+            emitMultypeError(native_multype::mutationErrors[i]);
+            enc.bindLabel(next);
+        }
+        enc.bindLabel(done);
+    }
+
     void emitBoxedString() {
         usesMultypeFormatting = true;
         enc.call_label(lblBoxedToString);
@@ -2492,6 +2585,7 @@ public:
 
         // Locals survive calls to the scalar formatters and nested sequences.
         enc.bindLabel(lblMultypeToString);
+        loadMultypeBlock(RAX);
         enc.push(RBP);
         enc.mov_rr(RBP, RSP);
         enc.sub_rsp(80);
@@ -2616,15 +2710,17 @@ public:
         currentFrameOffset -= 8;
         const auto slot = currentFrameOffset;
         if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-        enc.mov_ri64(RCX, countSize + elements.size() * entrySize);
+        const bool sequence = collection.scalarPayload == ThavaType::UNKNOWN;
+        enc.mov_ri64(RCX, (sequence ? handleSize : 0) + countSize + elements.size() * entrySize);
         enc.call_iat_func("malloc");
         enc.mov_mr_rbp(slot, RAX);
-        enc.mov_ri64(R10, collection.scalarPayload == ThavaType::UNKNOWN ? int64_t(elements.size()) : scalarHeader);
-        enc.mov_mr(RAX, 0, R10);
+        enc.mov_ri64(R10, sequence ? int64_t(elements.size()) : scalarHeader);
+        if (sequence) initMultypeHandle(RAX, R10);
+        enc.mov_mr(RAX, sequence ? handleSize : 0, R10);
         for (size_t i = 0; i < elements.size(); ++i) {
             const auto type = emitExpr(elements[i].get(),
                 dynamic_cast<CollectionNode*>(elements[i].get()) ? ThavaType::MULTYPE : ThavaType::UNKNOWN);
-            const auto offset = static_cast<int32_t>(countSize + i * entrySize);
+            const auto offset = static_cast<int32_t>((sequence ? handleSize : 0) + countSize + i * entrySize);
             enc.mov_rm_rbp(R11, slot);
             if (type == ThavaType::BOXED) {
                 enc.mov_rm(R10, RAX, 0);
@@ -2660,14 +2756,15 @@ public:
         enc.mov_mr_rbp(currentFrameOffset, RAX);
         enc.mov_rm(RCX, RAX, 0);
         enc.imul_ri(RCX, entrySize);
-        enc.add_ri32(RCX, countSize);
+        enc.add_ri32(RCX, handleSize + countSize);
         enc.call_iat_func("malloc");
         enc.mov_rm_rbp(R8, currentFrameOffset);
         enc.mov_rm(R10, R8, 0);
-        enc.mov_mr(RAX, 0, R10);
+        initMultypeHandle(RAX, R10);
+        enc.mov_mr(RAX, handleSize, R10);
         enc.add_ri32(R8, 8);
         enc.mov_rr(R9, RAX);
-        enc.add_ri32(R9, countSize);
+        enc.add_ri32(R9, handleSize + countSize);
         enc.mov_ri64(RDX, tagFor(element));
         enc.bindLabel(loop);
         enc.test_rr(R10, R10);
@@ -4405,6 +4502,7 @@ public:
             ThavaType baseT = emitExpr(idxNode->base.get());
             if (baseT == ThavaType::BOXED) baseT = emitUnbox(ThavaType::MULTYPE);
             if (baseT == ThavaType::MULTYPE) {
+                loadMultypeBlock(RAX);
                 if (idxNode->singletonType != ThavaType::UNKNOWN) {
                     const auto invalid = enc.createLabel();
                     const auto single = enc.createLabel();
@@ -4557,6 +4655,7 @@ public:
                 enc.mov_rr(x86::RCX, x86::RAX);
                 enc.call_iat_func("strlen");
             } else if (argT == ThavaType::MULTYPE) {
+                loadMultypeBlock(x86::RAX);
                 const auto zero = enc.createLabel();
                 enc.test_rr(x86::RAX, x86::RAX);
                 enc.je(zero);
@@ -5009,9 +5108,9 @@ public:
     ThavaType emitListMethod(ListMethodNode* lm) {
         const auto* local = lookupVar(lm->varName);
         const auto type = local ? local->type : globalEnv->get(lm->varName);
-        if (type == ThavaType::MULTYPE && lm->method != "len" && lm->method != "size") {
-            std::cerr << "[Native Codegen Error]: List mutation is not supported for <multype>.\n";
-            exit(1);
+        if (type == ThavaType::MULTYPE) {
+            mutateMultype(lm->varName, listMutation(*lm));
+            return ThavaType::VOID;
         }
         if (!lookupVar(lm->varName) && isGlobalName(lm->varName) &&
             (lm->method != "addval" || lm->args.size() != 1)) {
@@ -6750,8 +6849,9 @@ public:
                 exit(1);
             }
             if ((vi ? vi->type : globalEnv->get(idxAssign->varName)) == ThavaType::MULTYPE) {
-                std::cerr << "[Native Codegen Error]: Indexed mutation of <multype> is not supported.\n";
-                exit(1);
+                mutateMultype(idxAssign->varName, {native_multype::assignmentMutation(idxAssign->op),
+                                                   idxAssign->indexExpr.get(), idxAssign->valExpr.get()});
+                return;
             }
             if ((vi ? vi->type : globalEnv->get(idxAssign->varName)) == ThavaType::DICT) {
                 ThavaType kt = emitExpr(idxAssign->indexExpr.get());
@@ -7715,10 +7815,20 @@ public:
             }
             const DLLibraryInfo& lib = infoIt->second;
             const char* expectedMachine = std::is_same_v<TEmitter, PeEmitter> ? "x86-64-pe" : "x86-64-elf";
-            if (!lib.machine.empty() && lib.machine != expectedMachine) {
+            const bool growableLists = lib.machine == std::string(expectedMachine) + "-multype-v2";
+            if (!lib.machine.empty() && lib.machine != expectedMachine && !growableLists) {
                 std::cerr << "[Thava Compiler] Error: dynamic library '" << libPath << "' was built for '"
                           << lib.machine << "', but this target is '" << expectedMachine << "'.\n";
                 exit(1);
+            }
+            if (!growableLists) {
+                for (const auto& [name, signature] : g_dlFunctions) {
+                    if (signature.libPath == libPath &&
+                        std::find(signature.paramTypes.begin(), signature.paramTypes.end(),
+                                  ThavaType::MULTYPE) != signature.paramTypes.end()) {
+                        diag::fail("Rebuild module '" + libPath + "' before passing <multype> to '" + name + "'.", {});
+                    }
+                }
             }
             const int64_t base = (int64_t)dlLoadBaseForPath(libPath);
             const int64_t delta = base - (int64_t)lib.imageBase;
@@ -8099,6 +8209,26 @@ public:
             enc.code.insert(enc.code.end(), entry, last);
         }
 
+        if (mutationEntry) {
+            enc.bindLabel(mutationAllocator);
+            // Keep MS ABI nonvolatile registers intact around the Linux heap helper.
+            enc.push(x86::RDI);
+            enc.push(x86::RSI);
+            enc.sub_rsp(40);
+            enc.call_iat_func("malloc");
+            enc.add_rsp(40);
+            enc.pop(x86::RSI);
+            enc.pop(x86::RDI);
+            enc.ret();
+            constexpr size_t alignment = 16;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            const auto first = std::begin(multype_mutation::x64);
+            const auto entry = first + multype_mutation::x64Entry;
+            enc.code.insert(enc.code.end(), first, entry);
+            enc.bindLabel(*mutationEntry);
+            enc.code.insert(enc.code.end(), entry, std::end(multype_mutation::x64));
+        }
+
         // 5.5. Dynamic Library Export & Metadata registration
         // The metadata carries image offsets of the exported functions, so it can
         // only be built once .text is final; it is therefore reached through a data
@@ -8148,6 +8278,7 @@ public:
             std::string metaStr = "__THAVA_METADATA_START__\n# THAVA DYNAMIC LIBRARY METADATA\n";
             metaStr += "machine:";
             metaStr += std::is_same_v<TEmitter, PeEmitter> ? "x86-64-pe" : "x86-64-elf";
+            if (hasMultypeExports(ast)) metaStr += "-multype-v2";
             metaStr += "\n";
             metaStr += "image:" + hexVal(0x400000) + "\n";
             metaStr += "text:" + hexVal(pe.textRva) + "\n";

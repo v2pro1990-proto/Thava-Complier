@@ -403,6 +403,8 @@ public:
     std::string currentBaseClassName;
     size_t lblThrow = 0;
     std::optional<size_t> decimalEntry;
+    std::optional<size_t> mutationEntry;
+    size_t mutationAllocator = 0;
     size_t lblBoxedToString = 0;
     size_t lblMultypeToString = 0;
     bool usesMultypeFormatting = false;
@@ -828,6 +830,90 @@ public:
         }
     }
 
+    void loadMultypeBlock(arm64::Reg reg) {
+        using namespace arm64;
+        const auto ready = enc.createLabel();
+        enc.cbz(reg, ready);
+        enc.ldr_imm(X14, reg, 0);
+        enc.mov_ri64(X15, THAVA_SEQUENCE_HANDLE);
+        enc.cmp_rr(X14, X15);
+        enc.b_cond(NE, ready);
+        enc.ldr_imm(reg, reg, 8);
+        enc.bindLabel(ready);
+    }
+
+    void initMultypeHandle(arm64::Reg handle, arm64::Reg capacity) {
+        using namespace arm64;
+        enc.mov_ri64(X14, THAVA_SEQUENCE_HANDLE);
+        enc.str_imm(X14, handle, 0);
+        enc.add_rri(X14, handle, native_multype::handleSize);
+        enc.str_imm(X14, handle, 8);
+        enc.str_imm(capacity, handle, 16);
+    }
+
+    void mutateMultype(const std::string& name, ListMutation mutation) {
+        using namespace arm64;
+        if (!mutationEntry) {
+            mutationEntry = enc.createLabel();
+            mutationAllocator = enc.createLabel();
+        }
+        enc.sub_rri(SP, SP, 64);
+        loadCollectionPtr(name, lookupVar(name), X0);
+        enc.str_imm(X0, SP, 0);
+        if (mutation.index) {
+            if (compileExpression(mutation.index, ThavaType::INT) != ThavaType::INT)
+                diag::fail("A <multype> list index must be an integer.", mutation.index->span);
+        }
+        else enc.movz(X0, 0, 0);
+        enc.str_imm(X0, SP, 16);
+        if (mutation.op >= THAVA_LIST_ADD) emitMultypeMutationCall(THAVA_LIST_READ);
+        if (mutation.value) {
+            const auto type = compileExpression(mutation.value, dynamic_cast<CollectionNode*>(mutation.value)
+                                                ? ThavaType::MULTYPE : ThavaType::UNKNOWN);
+            if (type == ThavaType::VOID || type == ThavaType::UNKNOWN || type == ThavaType::FILE)
+                diag::fail("This value cannot be stored in a <multype> list.", mutation.value->span);
+            if (type == ThavaType::BOXED) {
+                enc.ldr_imm(X10, X0, 8);
+                enc.ldr_imm(X0, X0, 0);
+            } else {
+                if (type == ThavaType::LIST || type == ThavaType::TUPLE) {
+                    const auto element = elemTypeOfIndexedList(mutation.value);
+                    boxPlainSequence(element == ThavaType::UNKNOWN ? ThavaType::INT : element);
+                }
+                enc.movz(X10, native_multype::tagFor(type == ThavaType::LIST || type == ThavaType::TUPLE
+                                                     ? ThavaType::MULTYPE : type), 0);
+            }
+            enc.str_imm(X0, SP, 24);
+            enc.str_imm(X10, SP, 32);
+        } else {
+            enc.str_imm(XZR, SP, 24);
+            enc.str_imm(XZR, SP, 32);
+        }
+        emitMultypeMutationCall(mutation.op);
+        enc.add_rri(SP, SP, 64);
+    }
+
+    void emitMultypeMutationCall(int op) {
+        using namespace arm64;
+        enc.mov_ri64(X0, op);
+        enc.str_imm(X0, SP, 8);
+        enc.adr(X0, mutationAllocator);
+        enc.str_imm(X0, SP, 40);
+        enc.add_rri(X0, SP, 0);
+        enc.bl(*mutationEntry);
+        const auto done = enc.createLabel();
+        enc.cbz(X0, done);
+        for (size_t i = 1; i < std::size(native_multype::mutationErrors); ++i) {
+            const auto next = enc.createLabel();
+            enc.cmp_ri(X0, i);
+            enc.b_cond(NE, next);
+            enc.add_rri(SP, SP, 64);
+            emitThrowCall(nullptr, nullptr, native_multype::mutationErrors[i]);
+            enc.bindLabel(next);
+        }
+        enc.bindLabel(done);
+    }
+
     void emitBoxedString() {
         usesMultypeFormatting = true;
         enc.bl(lblBoxedToString);
@@ -918,6 +1004,7 @@ public:
         enc.ret();
 
         enc.bindLabel(lblMultypeToString);
+        loadMultypeBlock(X0);
         enc.stp_pre(FP, LR, SP, -48);
         enc.mov_rr(FP, SP);
         enc.str_imm(X0, FP, 16); // source
@@ -1027,16 +1114,21 @@ public:
         using namespace arm64;
         using namespace native_multype;
         const auto& elements = collection.getElements();
-        enc.mov_ri64(X0, countSize + elements.size() * entrySize);
+        const bool sequence = collection.scalarPayload == ThavaType::UNKNOWN;
+        enc.mov_ri64(X0, (sequence ? handleSize : 0) + countSize + elements.size() * entrySize);
         enc.bl(runtime.lblMalloc);
         enc.sub_rri(SP, SP, 16);
         enc.str_imm(X0, SP, 0);
-        enc.mov_ri64(X10, collection.scalarPayload == ThavaType::UNKNOWN ? int64_t(elements.size()) : scalarHeader);
+        enc.mov_ri64(X10, sequence ? int64_t(elements.size()) : scalarHeader);
+        if (sequence) {
+            initMultypeHandle(X0, X10);
+            enc.add_rri(X0, X0, handleSize);
+        }
         enc.str_imm(X10, X0, 0);
         for (size_t i = 0; i < elements.size(); ++i) {
             const auto type = compileExpression(elements[i].get(),
                 dynamic_cast<CollectionNode*>(elements[i].get()) ? ThavaType::MULTYPE : ThavaType::UNKNOWN);
-            const auto offset = static_cast<int32_t>(countSize + i * entrySize);
+            const auto offset = static_cast<int32_t>((sequence ? handleSize : 0) + countSize + i * entrySize);
             enc.ldr_imm(X11, SP, 0);
             if (type == ThavaType::BOXED) {
                 enc.ldr_imm(X10, X0, 0);
@@ -1070,14 +1162,15 @@ public:
         enc.ldr_imm(X9, X0, 0);
         enc.movz(X10, entrySize, 0);
         enc.mul_rrr(X0, X9, X10);
-        enc.add_rri(X0, X0, countSize);
+        enc.add_rri(X0, X0, handleSize + countSize);
         enc.bl(runtime.lblMalloc);
         enc.ldr_imm(X9, SP, 0);
         enc.add_rri(SP, SP, 16);
         enc.ldr_imm(X10, X9, 0);
-        enc.str_imm(X10, X0, 0);
+        initMultypeHandle(X0, X10);
+        enc.str_imm(X10, X0, handleSize);
         enc.add_rri(X9, X9, 8);
-        enc.add_rri(X11, X0, countSize);
+        enc.add_rri(X11, X0, handleSize + countSize);
         enc.movz(X12, tagFor(element), 0);
         enc.bindLabel(loop);
         enc.cbz(X10, done);
@@ -1726,6 +1819,7 @@ public:
             ThavaType baseT = compileExpression(idxn->base.get());
             if (baseT == ThavaType::BOXED) baseT = emitUnbox(ThavaType::MULTYPE);
             if (baseT == ThavaType::MULTYPE) {
+                loadMultypeBlock(X0);
                 if (idxn->singletonType != ThavaType::UNKNOWN) {
                     const auto invalid = enc.createLabel();
                     const auto single = enc.createLabel();
@@ -1839,6 +1933,7 @@ public:
                 return ThavaType::INT;
             }
             if (at == ThavaType::MULTYPE) {
+                loadMultypeBlock(arm64::X0);
                 const auto zero = enc.createLabel();
                 enc.cbz(arm64::X0, zero);
                 enc.ldr_imm(arm64::X0, arm64::X0, 0);
@@ -1859,9 +1954,9 @@ public:
         if (auto lm = dynamic_cast<ListMethodNode*>(node)) {
             const auto* local = lookupVar(lm->varName);
             const auto type = local ? local->type : globalEnv->get(lm->varName);
-            if (type == ThavaType::MULTYPE && lm->method != "len" && lm->method != "size") {
-                std::cerr << "[ARM64 Codegen Error]: List mutation is not supported for <multype>.\n";
-                exit(1);
+            if (type == ThavaType::MULTYPE) {
+                mutateMultype(lm->varName, listMutation(*lm));
+                return ThavaType::VOID;
             }
             if (!lookupVar(lm->varName) && isGlobalName(lm->varName) &&
                 (lm->method != "addval" || lm->args.size() != 1)) {
@@ -3780,8 +3875,9 @@ public:
                 return;
             }
             if ((vi ? vi->type : globalEnv->get(ia->varName)) == ThavaType::MULTYPE) {
-                std::cerr << "[ARM64 Codegen Error]: Indexed mutation of <multype> is not supported.\n";
-                exit(1);
+                mutateMultype(ia->varName, {native_multype::assignmentMutation(ia->op),
+                                            ia->indexExpr.get(), ia->valExpr.get()});
+                return;
             }
             if ((vi ? vi->type : globalEnv->get(ia->varName)) == ThavaType::DICT) {
                 ThavaType kt = compileExpression(ia->indexExpr.get());
@@ -4398,10 +4494,20 @@ public:
             }
             const DLLibraryInfo& lib = infoIt->second;
             const char* expectedMachine = std::is_same_v<TEmitter, ElfArm64Emitter> ? "arm64-elf" : "arm64-pe";
-            if (!lib.machine.empty() && lib.machine != expectedMachine) {
+            const bool growableLists = lib.machine == std::string(expectedMachine) + "-multype-v2";
+            if (!lib.machine.empty() && lib.machine != expectedMachine && !growableLists) {
                 std::cerr << "[Thava Compiler] Error: dynamic library '" << libPath << "' was built for '"
                           << lib.machine << "', but this target is '" << expectedMachine << "'.\n";
                 exit(1);
+            }
+            if (!growableLists) {
+                for (const auto& [name, signature] : g_dlFunctions) {
+                    if (signature.libPath == libPath &&
+                        std::find(signature.paramTypes.begin(), signature.paramTypes.end(),
+                                  ThavaType::MULTYPE) != signature.paramTypes.end()) {
+                        diag::fail("Rebuild module '" + libPath + "' before passing <multype> to '" + name + "'.", {});
+                    }
+                }
             }
             const int64_t base = (int64_t)dlLoadBaseForPath(libPath);
             const int64_t delta = base - (int64_t)lib.imageBase;
@@ -4536,6 +4642,18 @@ public:
             if (!dllNames.insert(key).second) {
                 std::cerr << "[Thava Compiler] Error: multiple attached libraries named '" << key << "'.\n";
                 exit(1);
+            }
+            if (library->second.machine != "arm64-pe" && library->second.machine != "arm64-pe-multype-v2")
+                diag::fail("Incompatible Windows ARM64 module '" + library->second.path + "'.", {});
+            if (library->second.machine == "arm64-pe") {
+                for (const auto& [name, signature] : g_dlFunctions) {
+                    if (signature.libPath == library->second.path &&
+                        std::find(signature.paramTypes.begin(), signature.paramTypes.end(),
+                                  ThavaType::MULTYPE) != signature.paramTypes.end()) {
+                        diag::fail("Rebuild module '" + library->second.path +
+                                   "' before passing <multype> to '" + name + "'.", {});
+                    }
+                }
             }
             peLibraryInitializers.push_back(registerPELibraryThunk(library->second.basename, peInitializerName));
         }
@@ -4796,6 +4914,17 @@ public:
             enc.bindLabel(*decimalEntry);
             enc.code.insert(enc.code.end(), entry, last);
         }
+        if (mutationEntry) {
+            enc.bindLabel(mutationAllocator);
+            enc.b(runtime.lblMalloc);
+            constexpr size_t alignment = 4096;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            const auto first = std::begin(multype_mutation::arm64);
+            const auto entry = first + multype_mutation::arm64Entry;
+            enc.code.insert(enc.code.end(), first, entry);
+            enc.bindLabel(*mutationEntry);
+            enc.code.insert(enc.code.end(), entry, std::end(multype_mutation::arm64));
+        }
         runtime.emitHelpers();
         if constexpr (peTarget) emitPELibraryThunks();
 
@@ -4820,6 +4949,7 @@ public:
             std::string metaStr = "__THAVA_METADATA_START__\n# THAVA DYNAMIC LIBRARY METADATA\n";
             metaStr += "machine:";
             metaStr += std::is_same_v<TEmitter, ElfArm64Emitter> ? "arm64-elf" : "arm64-pe";
+            if (hasMultypeExports(ast)) metaStr += "-multype-v2";
             metaStr += "\n";
             if (peLibrary) metaStr += "pe-dll:1\n";
             metaStr += "image:" + hexVal(peLibrary ? PeEmitter::IMAGE_BASE : 0x400000) + "\n";
