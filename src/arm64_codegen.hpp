@@ -4993,6 +4993,8 @@ public:
             enc.code.insert(enc.code.end(), first, first + offset);
             enc.bindLabel(*keyPressEntry);
             enc.code.insert(enc.code.end(), first + offset, first + size);
+            // The embedded runtime can end with a byte-aligned string table.
+            enc.code.resize((enc.code.size() + 3) & ~size_t(3));
         }
         if (mutationEntry) {
             enc.bindLabel(mutationAllocator);
