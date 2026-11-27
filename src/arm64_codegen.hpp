@@ -859,7 +859,7 @@ public:
         enc.ldr_imm(X10, X0, tagOffset);
         for (const auto& [tag, label] : {
                  std::pair<Tag, size_t>{String, text}, {Integer, whole}, {Real, real},
-                 {Boolean, boolean}, {Sequence, sequence}, {Dictionary, dictionary},
+                 {Boolean, boolean}, {Decimal, text}, {Sequence, sequence}, {Dictionary, dictionary},
                  {Function, function}, {Object, object}}) {
             enc.cmp_ri(X10, tag);
             enc.b_cond(EQ, label);
@@ -927,6 +927,15 @@ public:
         const auto empty = enc.createLabel();
         const auto finish = enc.createLabel();
         enc.cbz(X0, empty);
+        enc.ldr_imm(X10, X0, 0);
+        const auto collection = enc.createLabel();
+        enc.mov_ri64(X11, scalarHeader);
+        enc.cmp_rr(X10, X11);
+        enc.b_cond(NE, collection);
+        enc.add_rri(X0, X0, countSize);
+        enc.bl(lblBoxedToString);
+        enc.b(finish);
+        enc.bindLabel(collection);
         enc.str_imm(XZR, FP, 24); // index
         literal("[");
         enc.str_imm(X0, FP, 32); // output
@@ -1022,7 +1031,7 @@ public:
         enc.bl(runtime.lblMalloc);
         enc.sub_rri(SP, SP, 16);
         enc.str_imm(X0, SP, 0);
-        enc.mov_ri64(X10, elements.size());
+        enc.mov_ri64(X10, collection.scalarPayload == ThavaType::UNKNOWN ? int64_t(elements.size()) : scalarHeader);
         enc.str_imm(X10, X0, 0);
         for (size_t i = 0; i < elements.size(); ++i) {
             const auto type = compileExpression(elements[i].get(),
@@ -1049,10 +1058,49 @@ public:
         return ThavaType::MULTYPE;
     }
 
+    void boxPlainSequence(ThavaType element) {
+        using namespace arm64;
+        using namespace native_multype;
+        const auto empty = enc.createLabel();
+        const auto loop = enc.createLabel();
+        const auto done = enc.createLabel();
+        enc.cbz(X0, empty);
+        enc.sub_rri(SP, SP, 16);
+        enc.str_imm(X0, SP, 0);
+        enc.ldr_imm(X9, X0, 0);
+        enc.movz(X10, entrySize, 0);
+        enc.mul_rrr(X0, X9, X10);
+        enc.add_rri(X0, X0, countSize);
+        enc.bl(runtime.lblMalloc);
+        enc.ldr_imm(X9, SP, 0);
+        enc.add_rri(SP, SP, 16);
+        enc.ldr_imm(X10, X9, 0);
+        enc.str_imm(X10, X0, 0);
+        enc.add_rri(X9, X9, 8);
+        enc.add_rri(X11, X0, countSize);
+        enc.movz(X12, tagFor(element), 0);
+        enc.bindLabel(loop);
+        enc.cbz(X10, done);
+        enc.ldr_imm(X13, X9, 0);
+        enc.str_imm(X13, X11, 0);
+        enc.str_imm(X12, X11, tagOffset);
+        enc.add_rri(X9, X9, 8);
+        enc.add_rri(X11, X11, entrySize);
+        enc.sub_rri(X10, X10, 1);
+        enc.b(loop);
+        enc.bindLabel(empty);
+        enc.bindLabel(done);
+    }
+
     ThavaType compileExpression(ASTNode* node, ThavaType expected = ThavaType::UNKNOWN) {
         diag::Scope location(node ? node->span : SourceSpan{});
         const auto actual = compileExpressionRaw(node, expected);
         if (actual == ThavaType::BOXED && expected != ThavaType::UNKNOWN) return emitUnbox(expected);
+        if (expected == ThavaType::MULTYPE && (actual == ThavaType::LIST || actual == ThavaType::TUPLE)) {
+            const auto element = elemTypeOfIndexedList(node);
+            boxPlainSequence(element == ThavaType::UNKNOWN ? ThavaType::INT : element);
+            return ThavaType::MULTYPE;
+        }
         if ((expected == ThavaType::MULTYPE && actual != ThavaType::MULTYPE) ||
             (actual == ThavaType::MULTYPE && (expected == ThavaType::LIST || expected == ThavaType::TUPLE))) {
             std::cerr << "[ARM64 Codegen Error]: Keep mixed collections declared as <multype>.\n";
@@ -1685,6 +1733,9 @@ public:
                     enc.ldr_imm(X10, X0, 0);
                     enc.cmp_ri(X10, 1);
                     enc.b_cond(EQ, single);
+                    enc.mov_ri64(X11, scalarHeader);
+                    enc.cmp_rr(X10, X11);
+                    enc.b_cond(EQ, single);
                     enc.bindLabel(invalid);
                     emitThrowCall(nullptr, nullptr, "Expected exactly one <multype> element");
                     enc.bindLabel(single);
@@ -1704,6 +1755,8 @@ public:
                 const auto outOfRange = enc.createLabel();
                 enc.cbz(X10, outOfRange);
                 enc.ldr_imm(X11, X10, 0);
+                enc.cmp_ri(X11, 0);
+                enc.b_cond(LT, outOfRange);
                 enc.cmp_ri(X0, 0);
                 enc.b_cond(GE, nonnegative);
                 enc.add_rrr(X0, X0, X11);
@@ -1789,6 +1842,9 @@ public:
                 const auto zero = enc.createLabel();
                 enc.cbz(arm64::X0, zero);
                 enc.ldr_imm(arm64::X0, arm64::X0, 0);
+                enc.cmp_ri(arm64::X0, 0);
+                enc.b_cond(arm64::GE, zero);
+                emitThrowCall(nullptr, nullptr, "Cannot take the length of a scalar <multype>");
                 enc.bindLabel(zero);
                 return ThavaType::INT;
             }

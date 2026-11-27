@@ -136,7 +136,8 @@ class Codegen {
             case ThavaType::INT: return VALUE_INT;
             case ThavaType::FLOAT: case ThavaType::DOUBLE: return VALUE_REAL;
             case ThavaType::BOOL: return VALUE_BOOL;
-            case ThavaType::STRING: case ThavaType::DECIMAL: return VALUE_STRING;
+            case ThavaType::STRING: return VALUE_STRING;
+            case ThavaType::DECIMAL: return VALUE_DECIMAL;
             case ThavaType::LIST: case ThavaType::MULTYPE: return VALUE_LIST;
             case ThavaType::TUPLE: return VALUE_TUPLE;
             case ThavaType::DICT: return VALUE_DICT;
@@ -718,8 +719,14 @@ class Codegen {
             callRuntime(runtime::rt_list_insert, 32);
         }
         enc.pop(EAX);
+        if (node->scalarPayload != ThavaType::UNKNOWN) {
+            enc.push(EAX);
+            enc.push(EAX);
+            callRuntime(runtime::rt_mark_multype_scalar, 4);
+            enc.pop(EAX);
+        }
         enc.alu(Xor, EDX, EDX);
-        return type;
+        return node->scalarPayload == ThavaType::UNKNOWN ? type : ThavaType::MULTYPE;
     }
 
     ThavaType dictLiteral(DictNode* node) {
@@ -802,10 +809,24 @@ class Codegen {
             ? sub->getElements().front().get() : nullptr;
     }
 
+    void requireSequence(Slot& slot) {
+        if (slot.type != ThavaType::MULTYPE) return;
+        loadValue(slot);
+        enc.push(EAX);
+        callRuntime(runtime::rt_is_multype_scalar, 4);
+        const auto sequence = enc.label();
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, sequence);
+        LiteralNode message("Cannot mutate a scalar <multype> as a list", ThavaType::STRING);
+        raiseException(&message);
+        enc.bind(sequence);
+    }
+
     ThavaType listMethod(ListMethodNode* node) {
         auto& slot = lookup(node->varName);
         if (slot.type != ThavaType::LIST && slot.type != ThavaType::MULTYPE)
             unsupported("Mutating this collection type");
+        requireSequence(slot);
         const auto& method = node->method;
         if (method == "addval" || method == "assign") {
             const bool insert = method == "addval";
@@ -1615,16 +1636,8 @@ class Codegen {
             if (type == ThavaType::STRING) return substring(nullptr, index->indexExpr.get(), nullptr, true);
             if (index->singletonType != ThavaType::UNKNOWN) {
                 enc.push(EAX);
-                enc.push(EAX);
-                callRuntime(runtime::rt_collection_len, 4);
-                enc.alu(Cmp, EAX, 1);
-                enc.pop(EAX);
-                const auto single = enc.label();
-                enc.jump(Equal, single);
-                LiteralNode sizeError("Expected exactly one <multype> element", ThavaType::STRING);
-                raiseException(&sizeError);
-                enc.bind(single);
-                collectionGet(type, index->indexExpr.get());
+                callRuntime(runtime::rt_multype_singleton, 4);
+                requireValue("Expected exactly one <multype> element");
 
                 const auto valueType = index->singletonType;
                 const auto valid = enc.label();
@@ -1656,6 +1669,18 @@ class Codegen {
         if (auto len = dynamic_cast<LenNode*>(node)) {
             const auto type = expression(len->arg.get());
             if (type != ThavaType::STRING && type != ThavaType::UNKNOWN && !collection(type)) unsupported("Length of this type");
+            if (type == ThavaType::MULTYPE) {
+                const auto sequence = enc.label();
+                enc.push(EAX);
+                enc.push(EAX);
+                callRuntime(runtime::rt_is_multype_scalar, 4);
+                enc.alu(Cmp, EAX, 0);
+                enc.pop(EAX);
+                enc.jump(Equal, sequence);
+                LiteralNode error("Cannot take the length of a scalar <multype>", ThavaType::STRING);
+                raiseException(&error);
+                enc.bind(sequence);
+            }
             enc.push(EAX);
             callRuntime(type == ThavaType::STRING ? runtime::rt_len : type == ThavaType::UNKNOWN ?
                         runtime::rt_value_len : runtime::rt_collection_len, 4);

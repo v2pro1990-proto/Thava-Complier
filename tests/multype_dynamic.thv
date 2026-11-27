@@ -1,0 +1,32 @@
+<multype> a = 1
+cons.out(a)
+<int> integer = a
+cons.out(integer)
+a = "xin chào"
+cons.out(a)
+a = <fl>2.5
+cons.out(a)
+a = true
+cons.out(a)
+<flr> precise = 9007199254740993.1234567890123456789
+a = precise
+<flr> recovered = a
+cons.out(recovered + 0.0000000000000000001)
+a = [1, "ok", false]
+cons.out(a)
+cons.out(a[1])
+<lst> numbers = [5, 6]
+a = numbers
+cons.out(a[0])
+cons.out(len(a))
+a = none
+cons.out(a)
+
+<multype> func choose(<bl> numeric) {
+    if numeric { return 21.0 / 3.0 }
+    return "zero"
+}
+a = choose(true)
+cons.out(a)
+a = choose(false)
+cons.out(a)

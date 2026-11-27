@@ -152,7 +152,7 @@ Addition, subtraction, multiplication, and comparison are exact within the 128-d
 | List | `<lst>` | `<list>` | `[1, "two", 3.0]` |
 | Tuple | `<tple>` | `<tuple>` | `{10, 20, "label"}` |
 | Dictionary | `<dict>` | `<map>` | `{"id": 101, "role": "admin"}` |
-| Multi-type collection | `<multype>` | | A list or tuple value, such as `[1, "two"]`. |
+| Dynamic value | `<multype>` | | A tagged scalar or collection, such as `1` or `[1, "two"]`. |
 
 Lists and tuples are ordered and indexed from zero. Use a list for portable element updates because tuple mutation depends on the backend. `{}` creates an empty dictionary. Declare a mixed collection as `<multype>` when creating it so native targets keep a type tag on every element.
 
@@ -523,7 +523,18 @@ func compute_arrow(<int> a, <int> b) -> <int> {
 
 #### Returning mixed values with `<multype>`
 
-A `<multype>` function can return a list or tuple with elements of different types. Use `return a, b, c` as shorthand for `return [a, b, c]`. The caller receives one collection and can index its elements from zero. A single `<int>`, `<fl>`, `<dbl>`, `<bl>`, `<str>`, or `none` return is stored as one tagged element.
+A `<multype>` value keeps its runtime type. A variable can be rebound to a different type without a cast.
+
+```thava
+<multype> value = 1
+value = "ready"
+value = true
+value = <flr>("1.234567890123456789")
+value = [1, "two"]
+cons.out(value[1])
+```
+
+A `<multype>` function can return a scalar on one branch and a collection or another scalar type on a different branch. `return a, b, c` still returns a list with three elements.
 
 ```thava
 <multype> func divide(<dbl> a, <dbl> b) {
@@ -534,7 +545,9 @@ A `<multype>` function can return a list or tuple with elements of different typ
 <str> message = divide(21, 0)
 ```
 
-When a scalar type is expected, Thava extracts the single element and checks its runtime type. An empty result, multiple elements, or an incompatible type raises `RuntimeError`. Use a `<multype>` variable if you need to retain the collection.
+When a scalar type is expected, Thava checks the stored runtime type. A list containing one element can still be extracted for compatibility. An empty list, a list with multiple elements, or an incompatible type raises `RuntimeError`. Use `<multype>` to keep the result in its original form.
+
+Rebuild applications that consume scalar `<multype>` values from a `.thdl` module. Updated consumers can still read lists returned by existing modules.
 
 ```thava
 <multype> func report() {
@@ -545,7 +558,7 @@ When a scalar type is expected, Thava extracts the single element and checks its
 cons.out(result[1]) # ok
 ```
 
-Native x86-64, ARM64, and i686 preserve element types when building, returning, and indexing `<multype>` values. On x86-64 and ARM64, declare stored collections as `<multype>` before returning or passing them as mixed values. A literal in a `<multype>` declaration, argument, or return gets its tags automatically. Use a type annotation or explicit cast when doing arithmetic with an indexed element. Native x86-64 and ARM64 support rebinding the collection variable, while indexed mutation and list mutation methods on `<multype>` currently require native i686 or the C++ backend.
+Native x86-64, ARM64, and i686 preserve element types when building, returning, and indexing `<multype>` values. A collection literal in a `<multype>` declaration, argument, or return receives tags for its individual elements. Use a type annotation or explicit cast when doing arithmetic with an indexed element. Native x86-64 and ARM64 support rebinding the collection variable, while indexed mutation and list mutation methods on `<multype>` currently require native i686 or the C++ backend.
 
 ### Default Arguments
 Trailing parameters can specify default values:

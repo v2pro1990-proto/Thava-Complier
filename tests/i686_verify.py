@@ -124,8 +124,12 @@ with tempfile.TemporaryDirectory() as tmp:
                 "Decimal precision overflow",
                 "Amount: 9007199254740992.99",
             ], "9007199254740993.99\n"),
+            ("multype_dynamic.thv", [
+                "1", "1", "xin chào", "2.5", "true", "9007199254740993.123456789012345679",
+                "[1, ok, false]", "ok", "5", "2", "none", "7", "zero",
+            ], None),
             ("multype_scalar.thv", [
-                "7", "Không thể chia cho 0", "1.5", "[5.5]", "Incompatible <multype> element type",
+                "7", "Không thể chia cho 0", "1.5", "5.5", "Incompatible <multype> element type",
                 "Expected exactly one <multype> element", "Expected exactly one <multype> element",
             ], None),
             ("real_output.thv", [

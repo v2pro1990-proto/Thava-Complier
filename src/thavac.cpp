@@ -98,7 +98,8 @@ constexpr int countSize = 8;
 constexpr int entrySize = 16;
 constexpr int tagOffset = 8;
 
-enum Tag { None, Integer, Real, Boolean, String, Sequence, Dictionary, Function, Object };
+enum Tag { None, Integer, Real, Boolean, String, Sequence, Dictionary, Function, Object, Decimal };
+constexpr int scalarHeader = -1;
 
 inline Tag tagFor(ThavaType type) {
     switch (type) {
@@ -106,7 +107,7 @@ inline Tag tagFor(ThavaType type) {
         case ThavaType::FLOAT:
         case ThavaType::DOUBLE: return Real;
         case ThavaType::BOOL: return Boolean;
-        case ThavaType::DECIMAL:
+        case ThavaType::DECIMAL: return Decimal;
         case ThavaType::STRING: return String;
         case ThavaType::MULTYPE: return Sequence;
         case ThavaType::DICT: return Dictionary;
@@ -239,7 +240,7 @@ inline std::string cppParamTypeNameFor(ThavaType type, const std::string& custom
 
 static bool multypeScalar(ThavaType type) {
     return type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
-           type == ThavaType::BOOL || type == ThavaType::STRING;
+           type == ThavaType::BOOL || type == ThavaType::STRING || type == ThavaType::DECIMAL;
 }
 
 inline bool isCompatible(ThavaType dest, ThavaType src) {
@@ -1853,10 +1854,19 @@ class CollectionNode : public ASTNode {
     std::vector<ASTPtr> elements;
     bool isTuple;
 public:
+    ThavaType scalarPayload = ThavaType::UNKNOWN;
+
     CollectionNode(std::vector<ASTPtr> el, bool tuple = false) : elements(std::move(el)), isTuple(tuple) {}
     std::vector<ASTPtr>& getElements() { return elements; }
     bool getIsTuple() const { return isTuple; }
     std::string generateCode() override {
+        if (scalarPayload != ThavaType::UNKNOWN) {
+            const auto code = elements.front()->generateCode();
+            const auto tag = std::to_string(native_multype::tagFor(scalarPayload));
+            if (scalarPayload == ThavaType::CUSTOM || scalarPayload == ThavaType::FUNC)
+                return "_thava_box_opaque(" + code + ", " + tag + ")";
+            return "_thava_box_scalar(ThavaValue(" + code + "), " + tag + ")";
+        }
         std::string res = "std::vector<ThavaValue>{";
         for (size_t i = 0; i < elements.size(); ++i) {
             res += elements[i]->generateCode();
@@ -1866,6 +1876,7 @@ public:
         return res;
     }
     ThavaType getType(std::shared_ptr<Environment>) override {
+        if (scalarPayload != ThavaType::UNKNOWN) return ThavaType::MULTYPE;
         return isTuple ? ThavaType::TUPLE : ThavaType::LIST;
     }
 };
@@ -2533,10 +2544,22 @@ public:
     ThavaType getType(std::shared_ptr<Environment>) override { return singletonType; }
 };
 
-static ThavaType checkScalarContext(ASTPtr& expr, ThavaType expected,
+static ThavaType checkValueContext(ASTPtr& expr, ThavaType expected,
                                     const std::shared_ptr<Environment>& env) {
     const auto actual = expr->getType(env);
-    if (actual != ThavaType::MULTYPE || !multypeScalar(expected)) return actual;
+    if (expected == ThavaType::MULTYPE &&
+        (multypeScalar(actual) || actual == ThavaType::NONE || actual == ThavaType::DICT ||
+         actual == ThavaType::FUNC || actual == ThavaType::CUSTOM)) {
+        const auto span = expr->span;
+        std::vector<ASTPtr> values;
+        values.push_back(std::move(expr));
+        auto boxed = std::make_unique<CollectionNode>(std::move(values), false);
+        boxed->scalarPayload = actual;
+        boxed->span = span;
+        expr = std::move(boxed);
+        return expected;
+    }
+    if (actual != ThavaType::MULTYPE || (!multypeScalar(expected) && expected != ThavaType::DICT)) return actual;
 
     const auto span = expr->span;
     auto element = std::make_unique<IndexNode>(std::move(expr), std::make_unique<LiteralNode>("0", ThavaType::INT));
@@ -3273,7 +3296,7 @@ public:
             if (args.size() == expectedTypes.size()) {
                 for (size_t i = 0; i < args.size(); ++i) {
                     if (expectedTypes[i] == ThavaType::DECIMAL) coerceDecimal(args[i], env);
-                    ThavaType actual = checkScalarContext(args[i], expectedTypes[i], env);
+                    ThavaType actual = checkValueContext(args[i], expectedTypes[i], env);
                     if (!isCompatible(expectedTypes[i], actual) && actual != ThavaType::UNKNOWN) {
                         diag::Scope argument(args[i]->span);
                         std::cerr << "[Static Type Error]: Argument #" << (i + 1)
@@ -3314,7 +3337,7 @@ public:
         diag::Scope location(span);
         if (targetType == ThavaType::DECIMAL) {
             coerceDecimal(expr, env, true);
-        } else if (expr && checkScalarContext(expr, targetType, env) == ThavaType::DECIMAL &&
+        } else if (expr && checkValueContext(expr, targetType, env) == ThavaType::DECIMAL &&
                    targetType != ThavaType::STRING) {
             std::cerr << "[Static Type Error]: Convert <flr> to <str> before converting to another numeric type.\n";
             exit(1);
@@ -3352,7 +3375,7 @@ static void coerceDecimal(ASTPtr& expr, const std::shared_ptr<Environment>& env,
         coerceDecimal(condition->falseExpr, env, text);
         return;
     }
-    const auto type = expr->getType(env);
+    const auto type = checkValueContext(expr, ThavaType::DECIMAL, env);
     if (type == ThavaType::DECIMAL) return;
     if (type == ThavaType::INT) {
         expr = std::make_unique<DecimalParseNode>(
@@ -6319,7 +6342,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
         if (varDecl->initExpr) {
             if (varDecl->varType == ThavaType::DECIMAL) coerceDecimal(varDecl->initExpr, env);
-            ThavaType exprType = checkScalarContext(varDecl->initExpr, varDecl->varType, env);
+            ThavaType exprType = checkValueContext(varDecl->initExpr, varDecl->varType, env);
             if (!isCompatible(varDecl->varType, exprType) && exprType != ThavaType::UNKNOWN) {
                 diag::Scope initializer(varDecl->initExpr->span);
                 std::cerr << "[Static Type Error]: Variable '" << varDecl->varName 
@@ -6368,7 +6391,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             }
             coerceDecimal(assign->expr, env);
         }
-        ThavaType exprType = checkScalarContext(assign->expr, varType, env);
+        ThavaType exprType = checkValueContext(assign->expr, varType, env);
         if (!isCompatible(varType, exprType) && exprType != ThavaType::UNKNOWN && exprType != ThavaType::NONE) {
             diag::Scope value(assign->expr->span);
             std::cerr << "[Static Type Error]: Cannot assign expression of type <" << typeToString(exprType)
@@ -6473,15 +6496,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
         if (ret->expr) {
             if (currentFuncRetType == ThavaType::DECIMAL) coerceDecimal(ret->expr, env);
-            ThavaType retType = checkScalarContext(ret->expr, currentFuncRetType, env);
-            if (currentFuncRetType == ThavaType::MULTYPE &&
-                (multypeScalar(retType) || retType == ThavaType::NONE)) {
-                const auto span = ret->expr->span;
-                std::vector<ASTPtr> values;
-                values.push_back(std::move(ret->expr));
-                ret->expr = located(span, std::make_unique<CollectionNode>(std::move(values), false));
-                retType = ThavaType::LIST;
-            }
+            ThavaType retType = checkValueContext(ret->expr, currentFuncRetType, env);
             if (currentFuncRetType == ThavaType::VOID) {
                 std::cerr << "[Static Type Error]: Function '" << currentFuncName
                           << "' is a void function and cannot return a value!\n";
@@ -7437,9 +7452,13 @@ inline std::string _thava_decimal_negate(const std::string& text) {
               << "    ThavaValue(bool v) : bVal(v), type(3) {}\n"
               << "    ThavaValue(std::string v) : sVal(v), type(4) {}\n"
               << "    ThavaValue(const char* v) : sVal(v ? v : \"\"), type(4) {}\n"
-              << "    ThavaValue(std::vector<ThavaValue> v) : lVal(v), type(5) {}\n"
+              << "    ThavaValue(std::vector<ThavaValue> v) {\n"
+              << "        if (v.size() == 2 && v.front().type == -1) *this = std::move(v.back());\n"
+              << "        else { lVal = std::move(v); type = 5; }\n"
+              << "    }\n"
               << "    ThavaValue(const ThavaDict& d);\n"
               << "    ThavaValue(const ThavaNoneType&);\n\n"
+              << "    std::shared_ptr<void> opaque;\n\n"
               << "    // Provide implicit conversion operators to easily convert back to native C++ types.\n"
               << "    // Numeric conversions honour the runtime tag so an int-tagged value is never\n"
               << "    // read through the double slot (that used to yield 0 for list/dict reads\n"
@@ -7476,6 +7495,18 @@ inline std::string _thava_decimal_negate(const std::string& text) {
               << "};\n"
               << "inline constexpr ThavaNoneType _thava_none{};\n"
               << "inline ThavaValue::ThavaValue(const ThavaNoneType&) : type(0) {}\n\n"
+              << "inline bool _thava_scalar_box(const std::vector<ThavaValue>& box) {\n"
+              << "    return box.size() == 2 && box.front().type == -1;\n"
+              << "}\n"
+              << "inline std::vector<ThavaValue> _thava_box_scalar(ThavaValue value, int tag) {\n"
+              << "    ThavaValue marker; marker.type = -1;\n"
+              << "    value.type = tag;\n"
+              << "    return {std::move(marker), std::move(value)};\n"
+              << "}\n"
+              << "template<class T> std::vector<ThavaValue> _thava_box_opaque(const T& value, int tag) {\n"
+              << "    ThavaValue stored; stored.opaque = std::make_shared<T>(value);\n"
+              << "    return _thava_box_scalar(std::move(stored), tag);\n"
+              << "}\n\n"
               << "struct ThavaDict {\n"
               << "    std::vector<std::pair<ThavaValue, ThavaValue>> entries;\n"
               << "    ThavaDict() {}\n"
@@ -7582,6 +7613,7 @@ inline std::string _thava_decimal_negate(const std::string& text) {
               << "inline std::vector<ThavaValue> _thava_to_iterable(const ThavaValue& v) { if (v.type == 5) return v.lVal; if (v.type == 6 && v.dVal) return v.dVal->keys(); if (v.type == 4) { std::vector<ThavaValue> res; for (char c : v.sVal) res.push_back(ThavaValue(std::string(1, c))); return res; } return {}; }\n\n"
               << "std::ostream& operator<<(std::ostream& os, const ThavaValue& val);\n\n"
               << "std::ostream& operator<<(std::ostream& os, const std::vector<ThavaValue>& vec) {\n"
+              << "    if (_thava_scalar_box(vec)) return os << vec.back();\n"
               << "    os << \"[\";\n"
               << "    for (size_t i = 0; i < vec.size(); ++i) {\n"
               << "        os << vec[i];\n"
@@ -7595,7 +7627,9 @@ inline std::string _thava_decimal_negate(const std::string& text) {
               << "    else if (val.type == 1) os << val.iVal;\n"
               << "    else if (val.type == 2) os << _thava_console_value(val.fVal);\n"
               << "    else if (val.type == 3) os << (val.bVal ? \"true\" : \"false\");\n"
-              << "    else if (val.type == 4) os << val.sVal;\n"
+              << "    else if (val.type == 4 || val.type == 9) os << val.sVal;\n"
+              << "    else if (val.type == 7) os << \"<func>\";\n"
+              << "    else if (val.type == 8) os << \"<object>\";\n"
               << "    else if (val.type == 5) os << val.lVal;\n"
               << "    else if (val.type == 6 && val.dVal) os << *val.dVal;\n"
               << "    return os;\n"
@@ -8208,6 +8242,7 @@ inline std::string _thava_read_console_line() {
               << "}\n\n"
               // List/tuple index access, supports negative index (a[-1] = last element)
               << "inline ThavaValue _thava_index(const std::vector<ThavaValue>& vec, long long idx) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot index a scalar <multype>\");\n"
               << "    long long i = idx;\n"
               << "    if (i < 0) i += (long long)vec.size();\n"
               << "    if (i < 0 || i >= (long long)vec.size()) {\n"
@@ -8216,8 +8251,9 @@ inline std::string _thava_read_console_line() {
               << "    return vec[(size_t)i];\n"
               << "}\n\n"
               << "inline const ThavaValue& _thava_multype_singleton(const std::vector<ThavaValue>& vec, int expected) {\n"
-              << "    if (vec.size() != 1) throw ThavaException(\"RuntimeError\", \"Expected exactly one <multype> element\");\n"
-              << "    const auto& value = vec.front();\n"
+              << "    if (!_thava_scalar_box(vec) && vec.size() != 1)\n"
+              << "        throw ThavaException(\"RuntimeError\", \"Expected exactly one <multype> element\");\n"
+              << "    const auto& value = vec.back();\n"
               << "    if (value.type != expected && !(expected == 1 && value.type == 2) && !(expected == 2 && value.type == 1))\n"
               << "        throw ThavaException(\"RuntimeError\", \"Incompatible <multype> element type\");\n"
               << "    return value;\n"
@@ -8365,9 +8401,11 @@ inline std::string _thava_read_console_line() {
               << "}\n\n"
               // List/tuple mutation functions: addval / removeval / assign / delval
               << "inline int _thava_list_addval(std::vector<ThavaValue>& vec, ThavaValue val) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot mutate a scalar <multype> as a list\");\n"
               << "    vec.push_back(val); return 0;\n"
               << "}\n\n"
               << "inline int _thava_list_addval_at(std::vector<ThavaValue>& vec, long long idx, ThavaValue val) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot mutate a scalar <multype> as a list\");\n"
               << "    long long i = idx;\n"
               << "    if (i < 0) i += (long long)vec.size();\n"
               << "    if (i < 0) i = 0;\n"
@@ -8375,6 +8413,7 @@ inline std::string _thava_read_console_line() {
               << "    vec.insert(vec.begin() + i, val); return 0;\n"
               << "}\n\n"
               << "inline int _thava_list_removeval_at(std::vector<ThavaValue>& vec, long long idx) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot mutate a scalar <multype> as a list\");\n"
               << "    long long i = idx;\n"
               << "    if (i < 0) i += (long long)vec.size();\n"
               << "    if (i < 0 || i >= (long long)vec.size()) {\n"
@@ -8383,12 +8422,14 @@ inline std::string _thava_read_console_line() {
               << "    vec.erase(vec.begin() + i); return 0;\n"
               << "}\n\n"
               << "inline int _thava_list_removeval_by_value(std::vector<ThavaValue>& vec, ThavaValue val) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot mutate a scalar <multype> as a list\");\n"
               << "    for (size_t k = 0; k < vec.size(); ++k) {\n"
               << "        if (_thava_value_equals(vec[k], val)) { vec.erase(vec.begin() + k); return 0; }\n"
               << "    }\n"
               << "    return 0;\n"
               << "}\n\n"
               << "inline int _thava_list_assign(std::vector<ThavaValue>& vec, long long idx, ThavaValue val) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot mutate a scalar <multype> as a list\");\n"
               << "    long long i = idx;\n"
               << "    if (i < 0) i += (long long)vec.size();\n"
               << "    if (i < 0 || i >= (long long)vec.size()) {\n"
@@ -8397,6 +8438,7 @@ inline std::string _thava_read_console_line() {
               << "    vec[(size_t)i] = val; return 0;\n"
               << "}\n\n"
               << "inline int _thava_list_delval(std::vector<ThavaValue>& vec) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot mutate a scalar <multype> as a list\");\n"
               << "    vec.clear(); return 0;\n"
               << "}\n\n"
               << "inline bool operator==(const ThavaValue& a, const ThavaValue& b) { return _thava_value_equals(a, b); }\n"
@@ -8467,7 +8509,10 @@ inline std::string _thava_read_console_line() {
               << "inline T operator*(const ThavaValue& a, T b) { return _thava_mixed_mul(a, b); }\n"
               << "template<typename T, typename std::enable_if<std::is_arithmetic<T>::value, int>::type = 0>\n"
               << "inline T operator*(T a, const ThavaValue& b) { return _thava_mixed_mul(b, a); }\n\n"
-              << "inline long long _thava_len(const std::vector<ThavaValue>& vec) { return (long long)vec.size(); }\n"
+              << "inline long long _thava_len(const std::vector<ThavaValue>& vec) {\n"
+              << "    if (_thava_scalar_box(vec)) throw ThavaException(\"RuntimeError\", \"Cannot take the length of a scalar <multype>\");\n"
+              << "    return (long long)vec.size();\n"
+              << "}\n"
               << "inline long long _thava_len(const std::string& s) { return (long long)s.size(); }\n"
               << "inline long long _thava_len(const ThavaValue& v) {\n"
               << "    if (v.type == 6 && v.dVal) return v.dVal->len();\n"

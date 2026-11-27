@@ -2427,7 +2427,7 @@ public:
         enc.mov_rm(R10, RAX, tagOffset);
         for (const auto& [tag, label] : {
                  std::pair<Tag, size_t>{String, text}, {Integer, whole}, {Real, real},
-                 {Boolean, boolean}, {Sequence, sequence}, {Dictionary, dictionary},
+                 {Boolean, boolean}, {Decimal, text}, {Sequence, sequence}, {Dictionary, dictionary},
                  {Function, function}, {Object, object}}) {
             enc.cmp_ri32(R10, tag);
             enc.je(label);
@@ -2503,6 +2503,14 @@ public:
         const auto finish = enc.createLabel();
         enc.test_rr(RAX, RAX);
         enc.je(empty);
+        enc.mov_rm(R10, RAX, 0);
+        const auto collection = enc.createLabel();
+        enc.cmp_ri32(R10, scalarHeader);
+        enc.jne(collection);
+        enc.add_ri32(RAX, countSize);
+        enc.call_label(lblBoxedToString);
+        enc.jmp(finish);
+        enc.bindLabel(collection);
         enc.xor_r32(R10, R10);
         enc.mov_mr_rbp(-16, R10); // index
         literal("[");
@@ -2611,7 +2619,7 @@ public:
         enc.mov_ri64(RCX, countSize + elements.size() * entrySize);
         enc.call_iat_func("malloc");
         enc.mov_mr_rbp(slot, RAX);
-        enc.mov_ri64(R10, elements.size());
+        enc.mov_ri64(R10, collection.scalarPayload == ThavaType::UNKNOWN ? int64_t(elements.size()) : scalarHeader);
         enc.mov_mr(RAX, 0, R10);
         for (size_t i = 0; i < elements.size(); ++i) {
             const auto type = emitExpr(elements[i].get(),
@@ -2639,10 +2647,51 @@ public:
         return ThavaType::MULTYPE;
     }
 
+    void boxPlainSequence(ThavaType element) {
+        using namespace x86;
+        using namespace native_multype;
+        const auto done = enc.createLabel();
+        const auto loop = enc.createLabel();
+        enc.test_rr(RAX, RAX);
+        enc.je(done);
+        const auto saved = currentFrameOffset;
+        currentFrameOffset -= 8;
+        maxFrameOffset = std::min(maxFrameOffset, currentFrameOffset);
+        enc.mov_mr_rbp(currentFrameOffset, RAX);
+        enc.mov_rm(RCX, RAX, 0);
+        enc.imul_ri(RCX, entrySize);
+        enc.add_ri32(RCX, countSize);
+        enc.call_iat_func("malloc");
+        enc.mov_rm_rbp(R8, currentFrameOffset);
+        enc.mov_rm(R10, R8, 0);
+        enc.mov_mr(RAX, 0, R10);
+        enc.add_ri32(R8, 8);
+        enc.mov_rr(R9, RAX);
+        enc.add_ri32(R9, countSize);
+        enc.mov_ri64(RDX, tagFor(element));
+        enc.bindLabel(loop);
+        enc.test_rr(R10, R10);
+        enc.je(done);
+        enc.mov_rm(R11, R8, 0);
+        enc.mov_mr(R9, 0, R11);
+        enc.mov_mr(R9, tagOffset, RDX);
+        enc.add_ri32(R8, 8);
+        enc.add_ri32(R9, entrySize);
+        enc.sub_ri32(R10, 1);
+        enc.jmp(loop);
+        enc.bindLabel(done);
+        currentFrameOffset = saved;
+    }
+
     ThavaType emitExpr(ASTNode* node, ThavaType expected = ThavaType::UNKNOWN) {
         diag::Scope location(node ? node->span : SourceSpan{});
         const auto actual = emitExprRaw(node, expected);
         if (actual == ThavaType::BOXED && expected != ThavaType::UNKNOWN) return emitUnbox(expected);
+        if (expected == ThavaType::MULTYPE && (actual == ThavaType::LIST || actual == ThavaType::TUPLE)) {
+            const auto element = elemTypeOfIndexedList(node);
+            boxPlainSequence(element == ThavaType::UNKNOWN ? ThavaType::INT : element);
+            return ThavaType::MULTYPE;
+        }
         if ((expected == ThavaType::MULTYPE && actual != ThavaType::MULTYPE) ||
             (actual == ThavaType::MULTYPE && (expected == ThavaType::LIST || expected == ThavaType::TUPLE))) {
             std::cerr << "[Native Codegen Error]: Keep mixed collections declared as <multype>.\n";
@@ -4364,6 +4413,8 @@ public:
                     enc.mov_rm(R10, RAX, 0);
                     enc.cmp_ri32(R10, 1);
                     enc.je(single);
+                    enc.cmp_ri32(R10, scalarHeader);
+                    enc.je(single);
                     enc.bindLabel(invalid);
                     emitMultypeError("Expected exactly one <multype> element");
                     enc.bindLabel(single);
@@ -4386,6 +4437,8 @@ public:
                 enc.test_rr(R10, R10);
                 enc.je(outOfRange);
                 enc.mov_rm(R11, R10, 0);
+                enc.test_rr(R11, R11);
+                enc.jcc(Cond::L, outOfRange);
                 enc.test_rr(RAX, RAX);
                 enc.jns(nonnegative);
                 enc.add_rr(RAX, R11);
@@ -4508,6 +4561,9 @@ public:
                 enc.test_rr(x86::RAX, x86::RAX);
                 enc.je(zero);
                 enc.mov_rm(x86::RAX, x86::RAX, 0);
+                enc.test_rr(x86::RAX, x86::RAX);
+                enc.jns(zero);
+                emitMultypeError("Cannot take the length of a scalar <multype>");
                 enc.bindLabel(zero);
             } else {
                 enc.mov_rm(x86::RAX, x86::RAX, 0); // count is at offset 0

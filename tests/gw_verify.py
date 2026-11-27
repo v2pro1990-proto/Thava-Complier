@@ -27,8 +27,13 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
             "interpolation": "Trần Minh có 42 điểm\nthứ 1\n2 / 3\n[đúng] true, 2.5\n@{name}\nTrần? Nhập: chào"}
 
 expected["multype_scalar"] = (
-    "7\nKhông thể chia cho 0\n1.5\n[5.5]\nIncompatible <multype> element type\n"
+    "7\nKhông thể chia cho 0\n1.5\n5.5\nIncompatible <multype> element type\n"
     "Expected exactly one <multype> element\nExpected exactly one <multype> element"
+)
+
+expected["multype_dynamic"] = (
+    "1\n1\nxin chào\n2.5\ntrue\n9007199254740993.123456789012345679\n"
+    "[1, ok, false]\nok\n5\n2\nnone\n7\nzero"
 )
 
 expected["flr"] = "\n".join((
@@ -109,11 +114,11 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 levels.append("-O3")
             if case == "optimizer":
                 levels += ["-O1", "-O2", "-O3"]
-            if case in ("const_variables", "real_output", "multype_return", "multype_scalar", "flr"):
+            if case in ("const_variables", "real_output", "multype_return", "multype_scalar", "multype_dynamic", "flr"):
                 levels.append("-O2")
             for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
-                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "multype_scalar", "flr") and target != "cpp" else []
+                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "multype_scalar", "multype_dynamic", "flr") and target != "cpp" else []
                 subprocess.run([str(compiler), str(source), "--backend",
                                 target, opt, *toolchain, "-o", output.name], cwd=tmp, check=True)
                 if case == "optimizer" and target != "cpp":
@@ -262,9 +267,11 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
 
     # Check that a consumer decodes the same tags across a native module boundary.
     Path(tmp, "mixed_library.thv").write_text(
-        '<multype> func export_mix() { return 42, "library", true }\n', encoding="utf-8")
+        '<multype> func export_mix() { return 42, "library", true }\n'
+        '<multype> func export_number() { return 2.5 }\n', encoding="utf-8")
     Path(tmp, "mixed_consumer.thv").write_text(
-        '@dlattach "mixed_library"\n<multype> value = export_mix()\ncons.out(value)\ncons.out(value[1])\n',
+        '@dlattach "mixed_library"\n<multype> value = export_mix()\ncons.out(value)\ncons.out(value[1])\n'
+        '<multype> number = export_number()\ncons.out(number)\n',
         encoding="utf-8")
     for target in targets:
         if target == "cpp" or (target == "pe-arm64" and not run_windows_arm64):
@@ -279,4 +286,4 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
         runner = ["qemu-aarch64"] if target == "arm64" else []
         result = subprocess.run(runner + [str(binary)], cwd=tmp, check=True,
                                 capture_output=True, encoding="utf-8", timeout=15)
-        assert result.stdout.splitlines()[:2] == ["[42, library, true]", "library"], (target, result.stdout)
+        assert result.stdout.splitlines()[:3] == ["[42, library, true]", "library", "2.5"], (target, result.stdout)

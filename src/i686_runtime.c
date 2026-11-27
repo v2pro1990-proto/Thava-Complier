@@ -416,6 +416,13 @@ typedef struct { u64 bits; u32 kind; } Value;
 typedef struct { Value key, value; } Entry;
 typedef struct { u32 length, capacity; Entry *entries; } Collection;
 
+// Scalar boxes retain the Collection pointer ABI without being indexable lists.
+#define SCALAR_BOX (~0u)
+
+static int is_scalar_box(const Collection *value) {
+    return value && value->capacity == SCALAR_BOX;
+}
+
 typedef struct { const char *name; u32 offset, kind; } ObjectField;
 typedef struct { const char *signature; void *entry; const char *public_name; void *boxed_entry; } ObjectMethod;
 typedef struct ObjectType {
@@ -436,7 +443,7 @@ Collection *rt_collection_new(Allocate allocate, u32 image) {
 }
 
 static int reserve(Collection *list, Allocate allocate, u32 image) {
-    if (!list) return 0;
+    if (!list || is_scalar_box(list)) return 0;
     if (list->length < list->capacity) return 1;
     u32 cap = list->capacity ? 2 * list->capacity : 8;
     if (cap <= list->length || cap > ~0u / sizeof(Entry)) return 0;
@@ -453,7 +460,7 @@ static i64 position(Collection *list, i64 index) {
 }
 
 u32 rt_collection_len(Collection *list) { return list ? list->length : 0; }
-void rt_collection_clear(Collection *list) { if (list) list->length = 0; }
+void rt_collection_clear(Collection *list) { if (list && !is_scalar_box(list)) list->length = 0; }
 
 static const Value empty_value = {0, VALUE_NONE};
 
@@ -463,14 +470,26 @@ Value *rt_value_new(Value value, Allocate allocate, u32 image) {
     return copy;
 }
 
+void rt_mark_multype_scalar(Collection *value) {
+    if (value && value->length == 1) value->capacity = SCALAR_BOX;
+}
+
+const Value *rt_multype_singleton(Collection *value) {
+    return value && value->length == 1 ? &value->entries[0].value : 0;
+}
+
+int rt_is_multype_scalar(Collection *value) {
+    return is_scalar_box(value);
+}
+
 static const Value *list_item(Collection *list, i64 index) {
-    if (!list) return 0;
+    if (!list || is_scalar_box(list)) return 0;
     index = position(list, index);
     return index >= 0 && index < list->length ? &list->entries[(u32)index].value : 0;
 }
 
 void rt_list_set(Collection *list, i64 index, Value value) {
-    if (!list) return;
+    if (!list || is_scalar_box(list)) return;
     index = position(list, index);
     if (index >= 0 && index < list->length) list->entries[(u32)index].value = value;
 }
@@ -525,7 +544,7 @@ static void erase(Collection *list, u32 index) {
 }
 
 void rt_list_remove_at(Collection *list, i64 index) {
-    if (!list) return;
+    if (!list || is_scalar_box(list)) return;
     index = position(list, index);
     if (index >= 0 && index < list->length) erase(list, (u32)index);
 }
@@ -537,6 +556,7 @@ int rt_list_find(Collection *list, Value value) {
 }
 
 void rt_list_remove_value(Collection *list, Value value) {
+    if (is_scalar_box(list)) return;
     int index = rt_list_find(list, value);
     if (index >= 0) erase(list, (u32)index);
 }
@@ -752,6 +772,8 @@ static const char *format_collection(Collection *collection, int dict, const For
                                      u32 depth, Allocate allocate, u32 image) {
     for (const FormatPath *p = parent; p; p = p->parent) if (p->collection == collection) return "...";
     const FormatPath path = {collection, parent};
+    if (is_scalar_box(collection))
+        return format_value(collection->entries[0].value, &path, depth + 1, allocate, image);
     u32 length = rt_collection_len(collection), size = 3;
     if (length > (~0u / 2) / sizeof(const char *)) return "";
     const char **pieces = length ? (const char **)allocate(length * 2 * sizeof(*pieces), image) : 0;
@@ -785,6 +807,7 @@ static const char *format_collection(Collection *collection, int dict, const For
 
 static const char *format_value(Value value, const FormatPath *path, u32 depth, Allocate allocate, u32 image) {
     switch (value.kind) {
+        case VALUE_DECIMAL:
         case VALUE_STRING: return (const char *)(u32)value.bits;
         case VALUE_REAL: return rt_format_float(value.bits, allocate, image);
         case VALUE_BOOL: return value.bits ? "true" : "false";
