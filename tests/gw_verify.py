@@ -37,7 +37,7 @@ expected["multype_dynamic"] = (
 )
 
 expected["multype_mutation"] = (
-    "[7, 99, old text, 5]\n4\n5\nboxed\n[]\n[4]\nscalar rejected\n42\n[7]\nout of range\n[7]"
+    "[7, 99, old text, 5]\n4\n5\nboxed\n[]\n[4]\nscalar rejected\n42\n[7]\nout of range\n[7]\ntrue\nfalse"
 )
 
 expected["flr"] = "\n".join((

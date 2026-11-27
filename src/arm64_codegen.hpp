@@ -851,12 +851,16 @@ public:
         enc.str_imm(capacity, handle, 16);
     }
 
-    void mutateMultype(const std::string& name, ListMutation mutation) {
-        using namespace arm64;
+    void ensureMultypeMutation() {
         if (!mutationEntry) {
             mutationEntry = enc.createLabel();
             mutationAllocator = enc.createLabel();
         }
+    }
+
+    void mutateMultype(const std::string& name, ListMutation mutation) {
+        using namespace arm64;
+        ensureMultypeMutation();
         enc.sub_rri(SP, SP, 64);
         loadCollectionPtr(name, lookupVar(name), X0);
         enc.str_imm(X0, SP, 0);
@@ -2468,21 +2472,36 @@ public:
 
         // 19. 'item in list/string'
         if (auto inN = dynamic_cast<InNode*>(node)) {
+            using namespace arm64;
             ThavaType itemT = compileExpression(inN->left.get());
-            enc.sub_rri(arm64::SP, arm64::SP, 16);
-            enc.str_imm(arm64::X0, arm64::SP, 0);
+            enc.sub_rri(SP, SP, 64);
+            if (itemT == ThavaType::BOXED) {
+                enc.ldr_imm(X10, X0, 8);
+                enc.ldr_imm(X0, X0, 0);
+            } else enc.movz(X10, native_multype::tagFor(itemT), 0);
+            enc.str_imm(X0, SP, 24);
+            enc.str_imm(X10, SP, 32);
             ThavaType contT = compileExpression(inN->listExpr.get());
+            if (contT == ThavaType::MULTYPE) {
+                ensureMultypeMutation();
+                enc.str_imm(X0, SP, 0);
+                enc.str_imm(XZR, SP, 16);
+                emitMultypeMutationCall(THAVA_LIST_CONTAINS);
+                enc.ldr_imm(X0, SP, 48);
+                enc.add_rri(SP, SP, 64);
+                return ThavaType::BOOL;
+            }
             if (contT == ThavaType::STRING) {
                 // X0 = haystack (container), X1 = needle (item)
-                enc.ldr_imm(arm64::X1, arm64::SP, 0);
-                enc.add_rri(arm64::SP, arm64::SP, 16);
+                enc.ldr_imm(arm64::X1, arm64::SP, 24);
+                enc.add_rri(arm64::SP, arm64::SP, 64);
                 enc.bl(runtime.lblStrFind);
                 enc.cmp_ri(arm64::X0, 0);
                 enc.cset(arm64::X0, arm64::GE);
                 return ThavaType::BOOL;
             }
-            enc.ldr_imm(arm64::X1, arm64::SP, 0);
-            enc.add_rri(arm64::SP, arm64::SP, 16);
+            enc.ldr_imm(arm64::X1, arm64::SP, 24);
+            enc.add_rri(arm64::SP, arm64::SP, 64);
             enc.movz(arm64::X2, itemT == ThavaType::STRING ? 1 : 0, 0);
             // X0 = container, X1 = item, X2 = isStr
             if (contT == ThavaType::DICT) {

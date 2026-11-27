@@ -155,8 +155,21 @@ static int combine(Entry *result, Entry left, Entry right, const Mutation *reque
 CALL int thava_multype_mutate(Mutation *request) {
     Handle *list = request->list;
     Block *block = items(list);
+    const Index op = request->operation;
+    if (op == THAVA_LIST_CONTAINS) {
+        request->previous.bits = 0;
+        if (block && block->count >= 0) {
+            for (Index i = 0; i < block->count; ++i) {
+                if (equal(block->entries[i], request->value, 32)) {
+                    request->previous.bits = 1;
+                    break;
+                }
+            }
+        }
+        return THAVA_LIST_OK;
+    }
     if (!block || block->count < 0) return THAVA_LIST_NOT_SEQUENCE;
-    const Index op = request->operation, count = block->count;
+    const Index count = block->count;
     Index i = request->index;
     if (i < 0) i += count;
     if (op == THAVA_LIST_READ) {

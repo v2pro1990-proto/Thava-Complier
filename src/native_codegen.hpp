@@ -2415,12 +2415,16 @@ public:
         enc.mov_mr(handle, 16, capacity);
     }
 
-    void mutateMultype(const std::string& name, ListMutation mutation) {
-        using namespace x86;
+    void ensureMultypeMutation() {
         if (!mutationEntry) {
             mutationEntry = enc.createLabel();
             mutationAllocator = enc.createLabel();
         }
+    }
+
+    void mutateMultype(const std::string& name, ListMutation mutation) {
+        using namespace x86;
+        ensureMultypeMutation();
         const auto saved = currentFrameOffset;
         currentFrameOffset -= 64;
         const auto request = currentFrameOffset;
@@ -3496,13 +3500,35 @@ public:
         }
 
         if (auto inNode = dynamic_cast<InNode*>(node)) {
+            using namespace x86;
+            const auto saved = currentFrameOffset;
             ThavaType itemType = emitExpr(inNode->left.get());
-            currentFrameOffset -= 8;
-            if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;
-            int32_t itemSlot = currentFrameOffset;
-            enc.mov_mr_rbp(itemSlot, x86::RAX);
-
+            currentFrameOffset -= 64;
+            const auto request = currentFrameOffset;
+            maxFrameOffset = std::min(maxFrameOffset, request);
+            const auto itemSlot = request + 24;
+            if (itemType == ThavaType::BOXED) {
+                enc.mov_rm(R10, RAX, 8);
+                enc.mov_rm(RAX, RAX, 0);
+                enc.mov_mr_rbp(itemSlot, RAX);
+            } else {
+                if (itemType == ThavaType::FLOAT || itemType == ThavaType::DOUBLE)
+                    enc.movsd_mr_rbp(itemSlot, XMM0);
+                else enc.mov_mr_rbp(itemSlot, RAX);
+                enc.mov_ri64(R10, native_multype::tagFor(itemType));
+            }
+            enc.mov_mr_rbp(request + 32, R10);
             ThavaType contType = emitExpr(inNode->listExpr.get());
+            if (contType == ThavaType::MULTYPE) {
+                ensureMultypeMutation();
+                enc.mov_mr_rbp(request, RAX);
+                enc.xor_rr(R10, R10);
+                enc.mov_mr_rbp(request + 16, R10);
+                emitMultypeMutationCall(request, THAVA_LIST_CONTAINS);
+                enc.mov_rm_rbp(RAX, request + 48);
+                currentFrameOffset = saved;
+                return ThavaType::BOOL;
+            }
             if (contType == ThavaType::DICT) {
                 currentFrameOffset -= 8;
                 if (currentFrameOffset < maxFrameOffset) maxFrameOffset = currentFrameOffset;

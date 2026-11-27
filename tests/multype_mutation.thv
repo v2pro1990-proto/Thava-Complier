@@ -49,3 +49,6 @@ try {
     cons.out("out of range")
 }
 cons.out(values)
+
+cons.out(7 in values)
+cons.out(99 in values)
