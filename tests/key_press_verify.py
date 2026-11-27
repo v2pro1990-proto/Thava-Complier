@@ -28,7 +28,7 @@ def verify_key_press(compiler, work, backend, runner=()):
         output = subprocess.check_output(
             [sys.executable, str(fixtures / "windows_console.py"), "--key-records", *command],
             cwd=work, input=json.dumps(keys).encode(), timeout=20,
-        ).decode("utf-8")
+        ).replace(b"\r\r\n", b"\r\n").decode("utf-8")
     else:
         output = _verify_pty(command, work)
 

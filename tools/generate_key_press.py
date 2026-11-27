@@ -9,7 +9,7 @@ def run(*args):
     return subprocess.check_output(args, text=True)
 
 targets = {
-    "x64": ("", "-m64", "elf_x86_64", ["-mstackrealign"]),
+    "x64": ("", "-m64", "elf_x86_64", ["-mno-sse", "-mno-sse2", "-mno-mmx"]),
     "i686": ("", "-m32", "elf_i386", ["-march=i686", "-mno-sse", "-mno-mmx",
                                     "-mpreferred-stack-boundary=2", "-mincoming-stack-boundary=2"]),
     "arm64": ("aarch64-linux-gnu-", "-march=armv8-a", "aarch64linux", ["-ffixed-x18"]),

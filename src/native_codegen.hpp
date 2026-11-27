@@ -2178,10 +2178,11 @@ public:
         // use single-argument string formats supported by the Linux runtime.
         enc.and_ri(x86::RSP, -16);
         enc.sub_rsp(48);
-        enc.mov_mr(x86::RSP, 32, x86::RAX);
+        enc.mov_rr(x86::RBP, x86::RSP);
+        enc.mov_mr_rbp(32, x86::RAX);
         enc.lea_rip_rdata(x86::RDX, pe.addStringLiteralOffset("[Runtime Exception]: "));
         emitCallPrintf(offFmtStr, x86::RDX, true);
-        enc.mov_rm(x86::RDX, x86::RSP, 32);
+        enc.mov_rm_rbp(x86::RDX, 32);
         emitCallPrintf(offFmtStrNL, x86::RDX, true);
         enc.mov_ri64(x86::RCX, 1);
         enc.call_iat_func("exit");
@@ -2833,6 +2834,14 @@ public:
             enc.mov_ri64(RCX, -10);
             enc.call_iat_func("GetStdHandle");
             enc.mov_mr_rbp(request + 16, RAX);
+            enc.mov_rr(RCX, RAX);
+            enc.lea_rm_rbp(RDX, request + 24);
+            enc.call_iat_func("GetConsoleMode");
+            const auto console = enc.createLabel();
+            enc.test_rr(RAX, RAX);
+            enc.jne(console);
+            emitThrowCall(nullptr, nullptr, keyPressErrors[THAVA_KEY_TERMINAL]);
+            enc.bindLabel(console);
             enc.lea_rip_label(RAX, keyReadEvent);
             enc.mov_mr_rbp(request + 24, RAX);
         }
@@ -8295,9 +8304,13 @@ public:
         if (keyPressEntry) {
             if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
                 enc.bindLabel(keyReadEvent);
-                enc.sub_rsp(40);
+                enc.push(x86::RBP);
+                enc.mov_rr(x86::RBP, x86::RSP);
+                enc.and_ri(x86::RSP, -16);
+                enc.sub_rsp(32);
                 enc.call_iat_func("ReadConsoleInputW");
-                enc.add_rsp(40);
+                enc.mov_rr(x86::RSP, x86::RBP);
+                enc.pop(x86::RBP);
                 enc.ret();
             }
             constexpr size_t alignment = 16;
