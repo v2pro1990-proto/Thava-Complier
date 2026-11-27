@@ -4631,7 +4631,8 @@ public:
         std::set<std::string> dllNames;
         for (const auto& path : g_dlLibraries) {
             const auto library = g_dlLibraryInfos.find(path);
-            if (library == g_dlLibraryInfos.end() || library->second.machine != "arm64-pe" ||
+            if (library == g_dlLibraryInfos.end() || (library->second.machine != "arm64-pe" &&
+                 library->second.machine != "arm64-pe-multype-v2") ||
                 !library->second.hasPEInitializer) {
                 std::cerr << "[Thava Compiler] Error: '" << path
                           << "' is not a Windows ARM64 Thava DLL; rebuild it with --target win-arm64 --lib.\n";
@@ -4643,8 +4644,6 @@ public:
                 std::cerr << "[Thava Compiler] Error: multiple attached libraries named '" << key << "'.\n";
                 exit(1);
             }
-            if (library->second.machine != "arm64-pe" && library->second.machine != "arm64-pe-multype-v2")
-                diag::fail("Incompatible Windows ARM64 module '" + library->second.path + "'.", {});
             if (library->second.machine == "arm64-pe") {
                 for (const auto& [name, signature] : g_dlFunctions) {
                     if (signature.libPath == library->second.path &&
