@@ -404,6 +404,7 @@ public:
     size_t lblThrow = 0;
     std::optional<size_t> decimalEntry;
     std::optional<size_t> keyPressEntry;
+    size_t keyConsoleHandle = 0, keyReadEvent = 0;
     std::optional<size_t> mutationEntry;
     size_t mutationAllocator = 0;
     size_t lblBoxedToString = 0;
@@ -1212,7 +1213,11 @@ public:
         constexpr bool windows = std::is_same_v<TEmitter, PeEmitter>;
         if (!keyPressEntry) {
             keyPressEntry = enc.createLabel();
-            if constexpr (windows) emitter.addImport("kernel32.dll", "ReadConsoleInputW");
+            if constexpr (windows) {
+                emitter.addImport("kernel32.dll", "ReadConsoleInputW");
+                keyConsoleHandle = enc.createLabel();
+                keyReadEvent = enc.createLabel();
+            }
         }
 
         enc.sub_rri(SP, SP, 48);
@@ -1225,12 +1230,9 @@ public:
         enc.str_imm(X0, SP, 8);
         if constexpr (windows) {
             enc.mov_ri64(X0, -10);
-            enc.adr_data(X16, emitter.getFuncIatOffsetInRdata("GetStdHandle"));
-            enc.ldr_imm(X16, X16, 0);
-            enc.blr(X16);
+            enc.bl(keyConsoleHandle);
             enc.str_imm(X0, SP, 16);
-            enc.adr_data(X16, emitter.getFuncIatOffsetInRdata("ReadConsoleInputW"));
-            enc.ldr_imm(X0, X16, 0);
+            enc.adr(X0, keyReadEvent);
             enc.str_imm(X0, SP, 24);
         }
         enc.movz(X0, node.filterKind(), 0);
@@ -5004,7 +5006,20 @@ public:
             enc.code.insert(enc.code.end(), entry, std::end(multype_mutation::arm64));
         }
         runtime.emitHelpers();
-        if constexpr (peTarget) emitPELibraryThunks();
+        if constexpr (peTarget) {
+            if (keyPressEntry) {
+                // The IAT offsets are known only after the Windows runtime lays out .rdata.
+                for (const auto& [label, name] : {
+                         std::pair{keyConsoleHandle, "GetStdHandle"},
+                         std::pair{keyReadEvent, "ReadConsoleInputW"}}) {
+                    enc.bindLabel(label);
+                    enc.adr_data(arm64::X16, emitter.getFuncIatOffsetInRdata(name));
+                    enc.ldr_imm(arm64::X16, arm64::X16, 0);
+                    enc.br(arm64::X16);
+                }
+            }
+            emitPELibraryThunks();
+        }
 
         // 6. Resolve all branch and data offset fixups. The .data RVA depends on the
         // final .text size, so the code has to be handed over first; the metadata
