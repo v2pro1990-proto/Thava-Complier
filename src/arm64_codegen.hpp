@@ -974,7 +974,7 @@ public:
         exit(1);
     }
 
-    ThavaType emitUnbox(ThavaType expected) {
+    ThavaType emitUnbox(ThavaType expected, bool strictString = false) {
         // A pointer tag alone cannot establish a class/struct's nominal type
         // or turn tagged entries into the plain list/tuple representation.
         if (expected == ThavaType::CUSTOM || expected == ThavaType::LIST ||
@@ -986,7 +986,7 @@ public:
         }
         using namespace arm64;
         using namespace native_multype;
-        if (expected == ThavaType::STRING) {
+        if (expected == ThavaType::STRING && !strictString) {
             emitBoxedString();
             return expected;
         }
@@ -1678,6 +1678,19 @@ public:
             ThavaType baseT = compileExpression(idxn->base.get());
             if (baseT == ThavaType::BOXED) baseT = emitUnbox(ThavaType::MULTYPE);
             if (baseT == ThavaType::MULTYPE) {
+                if (idxn->singletonType != ThavaType::UNKNOWN) {
+                    const auto invalid = enc.createLabel();
+                    const auto single = enc.createLabel();
+                    enc.cbz(X0, invalid);
+                    enc.ldr_imm(X10, X0, 0);
+                    enc.cmp_ri(X10, 1);
+                    enc.b_cond(EQ, single);
+                    enc.bindLabel(invalid);
+                    emitThrowCall(nullptr, nullptr, "Expected exactly one <multype> element");
+                    enc.bindLabel(single);
+                    enc.add_rri(X0, X0, countSize);
+                    return emitUnbox(idxn->singletonType, true);
+                }
                 enc.sub_rri(SP, SP, 16);
                 enc.str_imm(X0, SP, 0);
                 if (compileExpression(idxn->indexExpr.get(), ThavaType::INT) != ThavaType::INT) {

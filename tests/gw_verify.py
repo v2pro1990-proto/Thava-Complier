@@ -26,6 +26,11 @@ expected = {"gw": "4 3 AB new 9", "gw_dict": "1 8", "strings_arm64": "[ABC-19][a
                            "1000001 -12345678.125\n1000000 999999999999.25\n2.5",
             "interpolation": "Trần Minh có 42 điểm\nthứ 1\n2 / 3\n[đúng] true, 2.5\n@{name}\nTrần? Nhập: chào"}
 
+expected["multype_scalar"] = (
+    "7\nKhông thể chia cho 0\n1.5\n[5.5]\nIncompatible <multype> element type\n"
+    "Expected exactly one <multype> element\nExpected exactly one <multype> element"
+)
+
 expected["flr"] = "\n".join((
     "0.3 true 0",
     "246913578024691357802469135780.24",
@@ -104,11 +109,11 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
                 levels.append("-O3")
             if case == "optimizer":
                 levels += ["-O1", "-O2", "-O3"]
-            if case in ("const_variables", "real_output", "multype_return", "flr"):
+            if case in ("const_variables", "real_output", "multype_return", "multype_scalar", "flr"):
                 levels.append("-O2")
             for opt in levels:
                 source = (Path(tmp) if case == "stack_arm64" else fixtures) / (case + ".thv")
-                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "flr") and target != "cpp" else []
+                toolchain = ["--cxx", "missing-compiler"] if case in ("multype_return", "multype_scalar", "flr") and target != "cpp" else []
                 subprocess.run([str(compiler), str(source), "--backend",
                                 target, opt, *toolchain, "-o", output.name], cwd=tmp, check=True)
                 if case == "optimizer" and target != "cpp":

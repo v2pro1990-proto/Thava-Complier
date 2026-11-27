@@ -1613,6 +1613,34 @@ class Codegen {
         if (auto index = dynamic_cast<IndexNode*>(node)) {
             const auto type = expression(index->base.get());
             if (type == ThavaType::STRING) return substring(nullptr, index->indexExpr.get(), nullptr, true);
+            if (index->singletonType != ThavaType::UNKNOWN) {
+                enc.push(EAX);
+                enc.push(EAX);
+                callRuntime(runtime::rt_collection_len, 4);
+                enc.alu(Cmp, EAX, 1);
+                enc.pop(EAX);
+                const auto single = enc.label();
+                enc.jump(Equal, single);
+                LiteralNode sizeError("Expected exactly one <multype> element", ThavaType::STRING);
+                raiseException(&sizeError);
+                enc.bind(single);
+                collectionGet(type, index->indexExpr.get());
+
+                const auto valueType = index->singletonType;
+                const auto valid = enc.label();
+                enc.load(ECX, EAX, 8);
+                enc.alu(Cmp, ECX, valueKind(valueType));
+                enc.jump(Equal, valid);
+                if (floating(valueType) || valueType == ThavaType::INT) {
+                    enc.alu(Cmp, ECX, valueType == ThavaType::INT ? VALUE_REAL : VALUE_INT);
+                    enc.jump(Equal, valid);
+                }
+                LiteralNode typeError("Incompatible <multype> element type", ThavaType::STRING);
+                raiseException(&typeError);
+                enc.bind(valid);
+                normalize(valueType, "int64", ThavaType::UNKNOWN);
+                return valueType;
+            }
             if (collection(type) || type == ThavaType::UNKNOWN) return collectionGet(type, index->indexExpr.get());
             unsupported("Indexing this type");
         }

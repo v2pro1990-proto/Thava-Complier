@@ -1,0 +1,41 @@
+<multype> func chia_so(<dbl> a, <dbl> b) {
+    if b != 0 {
+        return a / b
+    }
+    return "Không thể chia cho 0"
+}
+
+<multype> func two() {
+    return 1, 2
+}
+
+<multype> func empty() {
+    return []
+}
+
+<dbl> quotient = chia_so(21, 3)
+<str> message = chia_so(21, 0)
+cons.out(quotient)
+cons.out(message)
+quotient = chia_so(3, 2)
+cons.out(quotient)
+<multype> packet = chia_so(11, 2)
+cons.out(packet)
+try {
+    <dbl> bad_type = chia_so(21, 0)
+    cons.out(bad_type)
+} except RuntimeError as err {
+    cons.out(err)
+}
+try {
+    <dbl> bad_count = two()
+    cons.out(bad_count)
+} except RuntimeError as err {
+    cons.out(err)
+}
+try {
+    <dbl> missing = empty()
+    cons.out(missing)
+} except RuntimeError as err {
+    cons.out(err)
+}

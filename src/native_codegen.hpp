@@ -2555,7 +2555,7 @@ public:
         exit(1);
     }
 
-    ThavaType emitUnbox(ThavaType expected) {
+    ThavaType emitUnbox(ThavaType expected, bool strictString = false) {
         // A pointer tag alone cannot establish a class/struct's nominal type
         // or turn tagged entries into the plain list/tuple representation.
         if (expected == ThavaType::CUSTOM || expected == ThavaType::LIST ||
@@ -2567,7 +2567,7 @@ public:
         }
         using namespace x86;
         using namespace native_multype;
-        if (expected == ThavaType::STRING) {
+        if (expected == ThavaType::STRING && !strictString) {
             emitBoxedString();
             return expected;
         }
@@ -4356,6 +4356,20 @@ public:
             ThavaType baseT = emitExpr(idxNode->base.get());
             if (baseT == ThavaType::BOXED) baseT = emitUnbox(ThavaType::MULTYPE);
             if (baseT == ThavaType::MULTYPE) {
+                if (idxNode->singletonType != ThavaType::UNKNOWN) {
+                    const auto invalid = enc.createLabel();
+                    const auto single = enc.createLabel();
+                    enc.test_rr(RAX, RAX);
+                    enc.je(invalid);
+                    enc.mov_rm(R10, RAX, 0);
+                    enc.cmp_ri32(R10, 1);
+                    enc.je(single);
+                    enc.bindLabel(invalid);
+                    emitMultypeError("Expected exactly one <multype> element");
+                    enc.bindLabel(single);
+                    enc.add_ri32(RAX, countSize);
+                    return emitUnbox(idxNode->singletonType, true);
+                }
                 const auto saved = currentFrameOffset;
                 currentFrameOffset -= 8;
                 const auto slot = currentFrameOffset;

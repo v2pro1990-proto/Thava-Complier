@@ -523,7 +523,18 @@ func compute_arrow(<int> a, <int> b) -> <int> {
 
 #### Returning mixed values with `<multype>`
 
-A `<multype>` function can return a list or tuple with elements of different types. Use `return a, b, c` as shorthand for `return [a, b, c]`. The caller receives one collection and can index its elements from zero.
+A `<multype>` function can return a list or tuple with elements of different types. Use `return a, b, c` as shorthand for `return [a, b, c]`. The caller receives one collection and can index its elements from zero. A single `<int>`, `<fl>`, `<dbl>`, `<bl>`, `<str>`, or `none` return is stored as one tagged element.
+
+```thava
+<multype> func divide(<dbl> a, <dbl> b) {
+    if b != 0 { return a / b }
+    return "Cannot divide by zero"
+}
+<dbl> quotient = divide(21, 3)
+<str> message = divide(21, 0)
+```
+
+When a scalar type is expected, Thava extracts the single element and checks its runtime type. An empty result, multiple elements, or an incompatible type raises `RuntimeError`. Use a `<multype>` variable if you need to retain the collection.
 
 ```thava
 <multype> func report() {

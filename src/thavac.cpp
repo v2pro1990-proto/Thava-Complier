@@ -237,6 +237,11 @@ inline std::string cppParamTypeNameFor(ThavaType type, const std::string& custom
     }
 }
 
+static bool multypeScalar(ThavaType type) {
+    return type == ThavaType::INT || type == ThavaType::FLOAT || type == ThavaType::DOUBLE ||
+           type == ThavaType::BOOL || type == ThavaType::STRING;
+}
+
 inline bool isCompatible(ThavaType dest, ThavaType src) {
     if (dest == src) return true;
     if (dest == ThavaType::DECIMAL || src == ThavaType::DECIMAL) return false;
@@ -2512,14 +2517,34 @@ class IndexNode : public ASTNode {
 public:
     ASTPtr base;
     ASTPtr indexExpr;
+    ThavaType singletonType = ThavaType::UNKNOWN;
+
     IndexNode(ASTPtr b, ASTPtr i) : base(std::move(b)), indexExpr(std::move(i)) {}
 
     std::string generateCode() override {
+        if (singletonType != ThavaType::UNKNOWN) {
+            const auto type = cppTypeNameFor(singletonType, "int64");
+            return "static_cast<" + type + ">(_thava_multype_singleton(" +
+                   base->generateCode() + ", " + std::to_string(native_multype::tagFor(singletonType)) + "))";
+        }
         return "_thava_index(" + base->generateCode() + ", " + indexExpr->generateCode() + ")";
     }
 
-    ThavaType getType(std::shared_ptr<Environment>) override { return ThavaType::UNKNOWN; }
+    ThavaType getType(std::shared_ptr<Environment>) override { return singletonType; }
 };
+
+static ThavaType checkScalarContext(ASTPtr& expr, ThavaType expected,
+                                    const std::shared_ptr<Environment>& env) {
+    const auto actual = expr->getType(env);
+    if (actual != ThavaType::MULTYPE || !multypeScalar(expected)) return actual;
+
+    const auto span = expr->span;
+    auto element = std::make_unique<IndexNode>(std::move(expr), std::make_unique<LiteralNode>("0", ThavaType::INT));
+    element->span = span;
+    element->singletonType = expected;
+    expr = std::move(element);
+    return expected;
+}
 
 // AST node for array index assignment: arr[i] = expr
 class IndexAssignNode : public ASTNode {
@@ -3248,7 +3273,7 @@ public:
             if (args.size() == expectedTypes.size()) {
                 for (size_t i = 0; i < args.size(); ++i) {
                     if (expectedTypes[i] == ThavaType::DECIMAL) coerceDecimal(args[i], env);
-                    ThavaType actual = args[i]->getType(env);
+                    ThavaType actual = checkScalarContext(args[i], expectedTypes[i], env);
                     if (!isCompatible(expectedTypes[i], actual) && actual != ThavaType::UNKNOWN) {
                         diag::Scope argument(args[i]->span);
                         std::cerr << "[Static Type Error]: Argument #" << (i + 1)
@@ -3289,7 +3314,8 @@ public:
         diag::Scope location(span);
         if (targetType == ThavaType::DECIMAL) {
             coerceDecimal(expr, env, true);
-        } else if (expr && expr->getType(env) == ThavaType::DECIMAL && targetType != ThavaType::STRING) {
+        } else if (expr && checkScalarContext(expr, targetType, env) == ThavaType::DECIMAL &&
+                   targetType != ThavaType::STRING) {
             std::cerr << "[Static Type Error]: Convert <flr> to <str> before converting to another numeric type.\n";
             exit(1);
         }
@@ -6293,7 +6319,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
         if (varDecl->initExpr) {
             if (varDecl->varType == ThavaType::DECIMAL) coerceDecimal(varDecl->initExpr, env);
-            ThavaType exprType = varDecl->initExpr->getType(env);
+            ThavaType exprType = checkScalarContext(varDecl->initExpr, varDecl->varType, env);
             if (!isCompatible(varDecl->varType, exprType) && exprType != ThavaType::UNKNOWN) {
                 diag::Scope initializer(varDecl->initExpr->span);
                 std::cerr << "[Static Type Error]: Variable '" << varDecl->varName 
@@ -6342,7 +6368,7 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
             }
             coerceDecimal(assign->expr, env);
         }
-        ThavaType exprType = assign->expr->getType(env);
+        ThavaType exprType = checkScalarContext(assign->expr, varType, env);
         if (!isCompatible(varType, exprType) && exprType != ThavaType::UNKNOWN && exprType != ThavaType::NONE) {
             diag::Scope value(assign->expr->span);
             std::cerr << "[Static Type Error]: Cannot assign expression of type <" << typeToString(exprType)
@@ -6447,7 +6473,15 @@ void checkTypes(ASTNode* node, std::shared_ptr<Environment> env,
         }
         if (ret->expr) {
             if (currentFuncRetType == ThavaType::DECIMAL) coerceDecimal(ret->expr, env);
-            ThavaType retType = ret->expr->getType(env);
+            ThavaType retType = checkScalarContext(ret->expr, currentFuncRetType, env);
+            if (currentFuncRetType == ThavaType::MULTYPE &&
+                (multypeScalar(retType) || retType == ThavaType::NONE)) {
+                const auto span = ret->expr->span;
+                std::vector<ASTPtr> values;
+                values.push_back(std::move(ret->expr));
+                ret->expr = located(span, std::make_unique<CollectionNode>(std::move(values), false));
+                retType = ThavaType::LIST;
+            }
             if (currentFuncRetType == ThavaType::VOID) {
                 std::cerr << "[Static Type Error]: Function '" << currentFuncName
                           << "' is a void function and cannot return a value!\n";
@@ -8180,6 +8214,13 @@ inline std::string _thava_read_console_line() {
               << "        throw ThavaException(\"RuntimeError\", \"Index out of range for list/tuple!\");\n"
               << "    }\n"
               << "    return vec[(size_t)i];\n"
+              << "}\n\n"
+              << "inline const ThavaValue& _thava_multype_singleton(const std::vector<ThavaValue>& vec, int expected) {\n"
+              << "    if (vec.size() != 1) throw ThavaException(\"RuntimeError\", \"Expected exactly one <multype> element\");\n"
+              << "    const auto& value = vec.front();\n"
+              << "    if (value.type != expected && !(expected == 1 && value.type == 2) && !(expected == 2 && value.type == 1))\n"
+              << "        throw ThavaException(\"RuntimeError\", \"Incompatible <multype> element type\");\n"
+              << "    return value;\n"
               << "}\n\n"
               << "inline std::string _thava_index(const std::string& s, long long idx) {\n"
               << "    long long n = (long long)s.size();\n"
