@@ -106,6 +106,8 @@ class Codegen {
     size_t allocateLabel = enc.label();
     bool allocatorUsed = false;
     std::optional<size_t> decimalEntry;
+    std::optional<size_t> keyPressEntry;
+    size_t keyReadEvent = 0;
     std::vector<DataFixup> textFixups;
     std::map<uint32_t, size_t> runtimeCalls;
 
@@ -1439,6 +1441,54 @@ class Codegen {
         return ThavaType::CUSTOM;
     }
 
+    ThavaType emitKeyPress(KeyPressNode& node) {
+        if (!keyPressEntry) {
+            keyPressEntry = enc.label();
+            keyReadEvent = enc.label();
+            if (windows) pe.addImport("kernel32.dll", "ReadConsoleInputW");
+        }
+        allocatorUsed = true;
+        enc.alu(Sub, ESP, 20);
+        if (node.filter) expression(node.filter.get());
+        else enc.alu(Xor, EAX, EAX);
+        enc.store(ESP, 0, EAX);
+        enc.push(EBX);
+        enc.pushImm(THAVA_KEY_BUFFER);
+        enc.call(allocateLabel);
+        enc.alu(Add, ESP, 8);
+        enc.store(ESP, 4, EAX);
+        if (windows) {
+            enc.pushImm(-10);
+            callWindows("GetStdHandle");
+            enc.store(ESP, 8, EAX);
+            codeAddress(EAX, keyReadEvent);
+            enc.store(ESP, 12, EAX);
+        }
+        enc.imm(EAX, node.filterKind());
+        enc.store(ESP, 16, EAX);
+        enc.push(ESP);
+        enc.call(*keyPressEntry);
+        enc.alu(Add, ESP, 4);
+        enc.load(EDX, ESP, 4);
+        enc.alu(Add, ESP, 20);
+
+        const auto success = enc.label();
+        enc.alu(Cmp, EAX, 0);
+        enc.jump(Equal, success);
+        for (size_t i = 1; i < std::size(keyPressErrors); ++i) {
+            const auto next = enc.label();
+            enc.alu(Cmp, EAX, static_cast<uint32_t>(i));
+            enc.jump(NotEqual, next);
+            LiteralNode message(keyPressErrors[i], ThavaType::STRING);
+            raiseException(&message);
+            enc.bind(next);
+        }
+        enc.bind(success);
+        enc.mov(EAX, EDX);
+        enc.alu(Xor, EDX, EDX);
+        return ThavaType::STRING;
+    }
+
     ThavaType emitDecimalOperation(int op, ASTNode* left, ASTNode* right = nullptr) {
         if (!decimalEntry) decimalEntry = enc.label();
         const bool comparison = decimalComparison(op);
@@ -1632,6 +1682,7 @@ class Codegen {
             const auto right = expression(op->right.get());
             return emitBinary(op->op, left, right);
         }
+        if (auto press = dynamic_cast<KeyPressNode*>(node)) return emitKeyPress(*press);
         if (auto input = dynamic_cast<InputNode*>(node)) {
             readString(input->prompt.get());
             parseScalar(input->inputType);
@@ -3395,6 +3446,34 @@ public:
             const auto base = enc.code.size();
             for (const auto& [offset, label] : runtimeCalls) enc.bindAt(label, base + offset);
             enc.code.insert(enc.code.end(), std::begin(runtime::code), std::end(runtime::code));
+        }
+        if (keyPressEntry) {
+            if (windows) {
+                enc.bind(keyReadEvent);
+                // The freestanding C caller can use EBX for its own GOT.
+                enc.push(EBX);
+                const auto pc = enc.label();
+                enc.call(pc);
+                enc.bind(pc);
+                enc.pop(EBX);
+                enc.alu(Sub, EBX, 0x12345678);
+                textFixups.push_back({enc.code.size() - 4, static_cast<uint32_t>(pc)});
+                for (int i = 0; i < 4; ++i) {
+                    enc.load(EAX, ESP, 20);
+                    enc.push(EAX);
+                }
+                callWindows("ReadConsoleInputW");
+                enc.pop(EBX);
+                enc.ret();
+            }
+            constexpr size_t alignment = 16;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            const bool windowsKeys = windows;
+            const auto* first = windowsKeys ? key_press_runtime::i686Windows : key_press_runtime::i686Linux;
+            const auto size = windowsKeys ? sizeof(key_press_runtime::i686Windows) : sizeof(key_press_runtime::i686Linux);
+            const auto offset = windowsKeys ? key_press_runtime::i686WindowsEntry : key_press_runtime::i686LinuxEntry;
+            enc.bindAt(*keyPressEntry, enc.code.size() + offset);
+            enc.code.insert(enc.code.end(), first, first + size);
         }
         if (decimalEntry) {
             constexpr size_t alignment = 16;

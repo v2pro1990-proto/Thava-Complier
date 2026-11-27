@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 
+from key_press_verify import verify_key_press
+
 sys.stdout.reconfigure(encoding="utf-8")
 fixtures = Path(__file__).resolve().parent
 windows = os.name == "nt"
@@ -100,6 +102,8 @@ assert b'machine:arm64-pe\\npe-dll:1\\n' in metadata()
 """], cwd=tmp, check=True)
         expected["thdl_arm64_consumer"] = "42 43 44 5.5 thdl\n45 4.5 2 9"
     for target in targets:
+        if target != "pe-arm64" or run_windows_arm64:
+            verify_key_press(compiler, tmp, target, ["qemu-aarch64"] if target == "arm64" else [])
         cases = dict(expected)
         if target in ("arm64", "pe-arm64", "cpp"):
             cases["weighted_arm64"] = "pick 7 fallback"

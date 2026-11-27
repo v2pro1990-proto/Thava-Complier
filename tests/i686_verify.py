@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 
+from key_press_verify import verify_key_press
+
 
 compiler = Path(sys.argv[1]).resolve()
 source = Path(__file__).with_name("i686.thv").resolve()
@@ -43,6 +45,9 @@ with tempfile.TemporaryDirectory() as tmp:
     print(target, "executable format and runtime output OK")
 
     if not arm64:
+        verify_key_press(compiler, tmp, "pe-i686" if windows else "elf-i686",
+                         [] if windows else ["qemu-i386", "-r", "4.20.69-ish"])
+
         fixture = source.with_name("i686_native.thv")
         # Keep Windows PATH for thavac's own DLLs, but pass an invalid --cxx.
         env = dict(os.environ)

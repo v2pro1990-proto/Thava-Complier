@@ -761,6 +761,7 @@ cons.out("Interpolated: @{name} has @{count * 2} items")
 ```
 
 ### `key` (Keyboard Input)
+* `key.press()` waits for the next recognized key in the console and returns a `<str>` key name immediately. The key does not need to be followed by Enter, and it is not echoed. Pass `"KEY_ENTER"` to wait for one key or `["KEY_LEFT", "KEY_RIGHT"]` to wait for one of several keys. Keys outside the filter are consumed while the call continues to wait. ASCII letters use uppercase names such as `KEY_A`. Other printable characters use `KEY_` followed by the character. Named keys include `KEY_ESCAPE`, `KEY_ENTER`, `KEY_SPACE`, `KEY_TAB`, `KEY_BACKSPACE`, the arrow keys, Home, End, Insert, Delete, Page Up/Down, and F1–F12 when the terminal sends them. The console reports only keys it delivers to the program. A standalone modifier or a system shortcut may not produce a key. Invalid or empty filters and redirected standard input raise `RuntimeError`. `key.input()` can read a line after the call returns.
 * `key.input(<type>, prompt)`: Displays `prompt` to standard output and reads input from standard input, parsing it into the requested type `<int>`, `<fl>`, `<dbl>`, `<flr>`, `<bl>`, or `<str>`.
 * `key.input.upper(<str>, prompt)`: Reads a line of input and converts all characters to uppercase.
 * `key.input.lower(<str>, prompt)`: Reads a line of input and converts all characters to lowercase.

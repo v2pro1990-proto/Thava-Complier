@@ -1,0 +1,11 @@
+#pragma once
+
+enum ThavaKeyFilter {
+    THAVA_KEY_ANY, THAVA_KEY_ONE, THAVA_KEY_LIST
+};
+
+enum ThavaKeyStatus {
+    THAVA_KEY_OK, THAVA_KEY_FILTER, THAVA_KEY_TERMINAL, THAVA_KEY_INTERRUPTED
+};
+
+enum { THAVA_KEY_BUFFER = 24 };

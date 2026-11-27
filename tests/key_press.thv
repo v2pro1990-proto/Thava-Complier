@@ -1,0 +1,25 @@
+cons.out("ready")
+<str> any = key.press()
+cons.out(any)
+<str> target = "KEY_ENTER"
+<str> single = key.press(target)
+cons.out(single)
+<lst> allowed = ["KEY_LEFT", "KEY_RIGHT"]
+<str> filtered = key.press(allowed)
+cons.out(filtered)
+<str> unicode = key.press(["KEY_ầ", "KEY_Z"])
+cons.out(unicode)
+<str> escape = key.press("KEY_ESCAPE")
+cons.out(escape)
+<str> name = key.input(<str>, "name: ")
+cons.out(name)
+try {
+    key.press([])
+} except RuntimeError {
+    cons.out("empty rejected")
+}
+try {
+    key.press("KEY_UNKNOWN")
+} except RuntimeError {
+    cons.out("unknown rejected")
+}

@@ -403,6 +403,7 @@ public:
     std::string currentBaseClassName;
     size_t lblThrow = 0;
     std::optional<size_t> decimalEntry;
+    std::optional<size_t> keyPressEntry;
     std::optional<size_t> mutationEntry;
     size_t mutationAllocator = 0;
     size_t lblBoxedToString = 0;
@@ -1204,6 +1205,53 @@ public:
             exit(1);
         }
         return actual;
+    }
+
+    ThavaType emitKeyPress(KeyPressNode& node) {
+        using namespace arm64;
+        constexpr bool windows = std::is_same_v<TEmitter, PeEmitter>;
+        if (!keyPressEntry) {
+            keyPressEntry = enc.createLabel();
+            if constexpr (windows) emitter.addImport("kernel32.dll", "ReadConsoleInputW");
+        }
+
+        enc.sub_rri(SP, SP, 48);
+        if (node.filter)
+            compileExpression(node.filter.get(), node.listFilter ? ThavaType::MULTYPE : ThavaType::STRING);
+        else enc.movz(X0, 0, 0);
+        enc.str_imm(X0, SP, 0);
+        enc.movz(X0, THAVA_KEY_BUFFER, 0);
+        enc.bl(runtime.lblMalloc);
+        enc.str_imm(X0, SP, 8);
+        if constexpr (windows) {
+            enc.mov_ri64(X0, -10);
+            enc.adr_data(X16, emitter.getFuncIatOffsetInRdata("GetStdHandle"));
+            enc.ldr_imm(X16, X16, 0);
+            enc.blr(X16);
+            enc.str_imm(X0, SP, 16);
+            enc.adr_data(X16, emitter.getFuncIatOffsetInRdata("ReadConsoleInputW"));
+            enc.ldr_imm(X0, X16, 0);
+            enc.str_imm(X0, SP, 24);
+        }
+        enc.movz(X0, node.filterKind(), 0);
+        enc.str_imm(X0, SP, 32);
+        enc.add_rri(X0, SP, 0);
+        enc.bl(*keyPressEntry);
+        enc.ldr_imm(X11, SP, 8);
+        enc.add_rri(SP, SP, 48);
+
+        const auto success = enc.createLabel();
+        enc.cbz(X0, success);
+        for (size_t i = 1; i < std::size(keyPressErrors); ++i) {
+            const auto next = enc.createLabel();
+            enc.cmp_ri(X0, i);
+            enc.b_cond(NE, next);
+            emitThrowCall(nullptr, nullptr, keyPressErrors[i]);
+            enc.bindLabel(next);
+        }
+        enc.bindLabel(success);
+        enc.mov_rr(X0, X11);
+        return ThavaType::STRING;
     }
 
     ThavaType emitDecimalOperation(int op, ASTNode* left, ASTNode* right = nullptr) {
@@ -2254,6 +2302,7 @@ public:
         }
 
         // 14. Console input
+        if (auto press = dynamic_cast<KeyPressNode*>(node)) return emitKeyPress(*press);
         if (auto inp = dynamic_cast<InputNode*>(node)) {
             compileExpression(inp->prompt.get());
             // mode 1 lowercases the line, which lets the bool parser below
@@ -4931,6 +4980,17 @@ public:
             enc.code.insert(enc.code.end(), first, entry);
             enc.bindLabel(*decimalEntry);
             enc.code.insert(enc.code.end(), entry, last);
+        }
+        if (keyPressEntry) {
+            constexpr size_t alignment = 4096;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            constexpr bool windowsKeys = std::is_same_v<TEmitter, PeEmitter>;
+            const auto* first = windowsKeys ? key_press_runtime::arm64Windows : key_press_runtime::arm64Linux;
+            const auto size = windowsKeys ? sizeof(key_press_runtime::arm64Windows) : sizeof(key_press_runtime::arm64Linux);
+            const auto offset = windowsKeys ? key_press_runtime::arm64WindowsEntry : key_press_runtime::arm64LinuxEntry;
+            enc.code.insert(enc.code.end(), first, first + offset);
+            enc.bindLabel(*keyPressEntry);
+            enc.code.insert(enc.code.end(), first + offset, first + size);
         }
         if (mutationEntry) {
             enc.bindLabel(mutationAllocator);

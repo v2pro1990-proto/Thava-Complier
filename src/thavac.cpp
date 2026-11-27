@@ -12,6 +12,8 @@
 #include <sstream>
 #include "decimal_spec.h"
 #include "decimal_runtime_data.hpp"
+#include "key_press.h"
+#include "key_press_data.hpp"
 #include <fstream>
 #include <cstdlib>
 #include <cctype>
@@ -30,7 +32,7 @@ enum class TokenType {
     EQ, NOT_EQ, AND, OR, NOT, BAND, BOR, BXOR, BNOT, BSHL, BSHR,
     LBRACKET, RBRACKET, LBRACE, RBRACE, LPAREN, RPAREN, DOT,
     COMMA, COLON, LESS, LESS_EQ, GREATER, GREATER_EQ, ARROW,
-    IF, ELIF, ELSE, WHILE, FOR, IN, FUNC, FDFUNC, CFUNC, CLASS, ENUM, STRUCT, LOCVAR, PARVAR, RETURN, BREAK, CONTINUE, CONS_OUT, CONS_CLEAR, KEY_INPUT, AS, FILE_OPEN, TRY, EXCEPT, THROW, RAISE_ERROR, INLINE, DEFER, PUBLIC, PRIVATE, PROTECTED, EOF_TOKEN
+    IF, ELIF, ELSE, WHILE, FOR, IN, FUNC, FDFUNC, CFUNC, CLASS, ENUM, STRUCT, LOCVAR, PARVAR, RETURN, BREAK, CONTINUE, CONS_OUT, CONS_CLEAR, KEY_INPUT, KEY_PRESS, AS, FILE_OPEN, TRY, EXCEPT, THROW, RAISE_ERROR, INLINE, DEFER, PUBLIC, PRIVATE, PROTECTED, EOF_TOKEN
 };
 
 struct SourceSpan {
@@ -940,6 +942,7 @@ public:
                 };
                 if (text == "cons" && tryConsumeLiteral(".out")) text = "cons.out";
                 else if (text == "cons" && tryConsumeLiteral(".clear")) text = "cons.clear";
+                else if (text == "key" && tryConsumeLiteral(".press")) text = "key.press";
                 else if (text == "key" && tryConsumeLiteral(".input")) {
                     text = "key.input";
                     if (tryConsumeLiteral(".upper")) text = "key.input.upper";
@@ -1012,6 +1015,7 @@ public:
                 else if (text == "cons.out") tokens.push_back({TokenType::CONS_OUT, text, line});
                 else if (text == "cons.clear") tokens.push_back({TokenType::CONS_CLEAR, text, line});
                 else if (text == "key.input") tokens.push_back({TokenType::KEY_INPUT, text, line});
+                else if (text == "key.press") tokens.push_back({TokenType::KEY_PRESS, text, line});
                 else if (text == "file.open") {
                     tokens.push_back({TokenType::FILE_OPEN, text, line});
                     g_hasFileOpen = true;
@@ -2367,6 +2371,41 @@ public:
 inline std::string thavaCppReadLineStmt() {
     return "std::string _l = _thava_read_console_line(); ";
 }
+
+static bool g_usesKeyPress = false;
+
+static constexpr const char* keyPressErrors[] = {
+    nullptr,
+    "key.press() expects a valid KEY_ name or a non-empty list of key names",
+    "key.press() requires interactive console input",
+    "key.press() was interrupted",
+};
+
+class KeyPressNode : public ASTNode {
+public:
+    ASTPtr filter;
+    bool listFilter = false;
+
+    explicit KeyPressNode(ASTPtr value) : filter(std::move(value)) { g_usesKeyPress = true; }
+
+    int filterKind() const {
+        return !filter ? THAVA_KEY_ANY : listFilter ? THAVA_KEY_LIST : THAVA_KEY_ONE;
+    }
+
+    std::string generateCode() override {
+        return "_thava_key_press(" + (filter ? filter->generateCode() : "") + ")";
+    }
+
+    ThavaType getType(std::shared_ptr<Environment> env) override {
+        if (filter) {
+            const auto type = filter->getType(env);
+            listFilter = type == ThavaType::LIST || type == ThavaType::TUPLE || type == ThavaType::MULTYPE;
+            if (!listFilter && type != ThavaType::STRING)
+                diag::fail("key.press() expects a <str> key name or a list of key names.", filter->span);
+        }
+        return ThavaType::STRING;
+    }
+};
 
 class InputNode : public ASTNode {
 public:
@@ -4043,6 +4082,11 @@ inline void checkExpr(ASTNode* expr, std::shared_ptr<Environment> env,
         }
         return;
     }
+    if (auto press = dynamic_cast<KeyPressNode*>(expr)) {
+        press->getType(env);
+        checkExpr(press->filter.get(), env, currentClassName, currentBaseClassName);
+        return;
+    }
     if (auto input = dynamic_cast<InputNode*>(expr)) {
         checkExpr(input->prompt.get(), env, currentClassName, currentBaseClassName);
         return;
@@ -4573,6 +4617,14 @@ class Parser {
 
         if (match(TokenType::IDENTIFIER)) return std::make_unique<VarNode>(tokens[current-1].lexeme);
         
+        if (match(TokenType::KEY_PRESS)) {
+            if (!match(TokenType::LPAREN)) diag::fail("Missing '(' in key.press", peek().span);
+            ASTPtr filter;
+            if (!check(TokenType::RPAREN)) filter = expression();
+            if (!match(TokenType::RPAREN))
+                diag::fail("Expected ')' after the optional key.press filter", peek().span);
+            return std::make_unique<KeyPressNode>(std::move(filter));
+        }
         if (match(TokenType::KEY_INPUT)) {
             if (!match(TokenType::LPAREN)) { std::cerr << "Parser Error: Missing '(' after key.input at line " << peek().line << "\n"; exit(1); }
 
@@ -8657,6 +8709,53 @@ inline std::string _thava_read_console_line() {
             cppOutput << ");\n";
         }
         cppOutput << "}\n\n";
+    }
+
+    if (g_usesKeyPress) {
+        cppOutput << R"key_wrapper(
+#ifdef _WIN32
+#define THAVA_KEY_WINDOWS
+#endif
+)key_wrapper" << key_press_runtime::cppSource << R"key_wrapper(
+#ifdef _WIN32
+static int _thava_read_key_event(void* console, KeyRecord* record, unsigned int count, unsigned int* received) {
+    DWORD read = 0;
+    static_assert(sizeof(KeyRecord) == sizeof(INPUT_RECORD), "Windows console record layout");
+    const auto ok = ReadConsoleInputW(console, reinterpret_cast<INPUT_RECORD*>(record), count, &read);
+    *received = read;
+    return ok;
+}
+#endif
+
+static std::string _thava_wait_key(int kind, const void* filter) {
+    char output[THAVA_KEY_BUFFER];
+    KeyRequest request{filter, output, nullptr, nullptr, static_cast<KeyWord>(kind)};
+#ifdef _WIN32
+    request.console = GetStdHandle(STD_INPUT_HANDLE);
+    request.read = _thava_read_key_event;
+#endif
+    std::cout.flush();
+    switch (thava_key_press(&request)) {
+        case THAVA_KEY_OK: return output;
+        case THAVA_KEY_FILTER:
+            throw ThavaException("RuntimeError", "key.press() expects a valid KEY_ name or a non-empty list of key names");
+        case THAVA_KEY_INTERRUPTED:
+            throw ThavaException("RuntimeError", "key.press() was interrupted");
+        default:
+            throw ThavaException("RuntimeError", "key.press() requires interactive console input");
+    }
+}
+
+static std::string _thava_key_press() { return _thava_wait_key(THAVA_KEY_ANY, nullptr); }
+static std::string _thava_key_press(const std::string& key) { return _thava_wait_key(THAVA_KEY_ONE, key.c_str()); }
+static std::string _thava_key_press(const std::vector<ThavaValue>& keys) {
+    std::vector<std::string> names;
+    if (!_thava_scalar_box(keys)) {
+        for (const auto& key : keys) names.push_back(key.type == 4 ? key.sVal : "");
+    }
+    return _thava_wait_key(THAVA_KEY_LIST, &names);
+}
+)key_wrapper";
     }
 
     // Separate top-level function declarations from statement flow:

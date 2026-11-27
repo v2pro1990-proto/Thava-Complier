@@ -104,6 +104,8 @@ public:
     size_t lblFileReadLines = 0;
     size_t lblThrow = 0;
     std::optional<size_t> decimalEntry;
+    std::optional<size_t> keyPressEntry;
+    size_t keyReadEvent = 0;
     std::optional<size_t> mutationEntry;
     size_t mutationAllocator = 0;
     size_t lblBoxedToString = 0;
@@ -2801,6 +2803,54 @@ public:
         return actual;
     }
 
+    ThavaType emitKeyPress(KeyPressNode& node) {
+        using namespace x86;
+        constexpr bool windows = std::is_same_v<TEmitter, PeEmitter>;
+        if (!keyPressEntry) {
+            keyPressEntry = enc.createLabel();
+            keyReadEvent = enc.createLabel();
+            if constexpr (windows) pe.addImport("kernel32.dll", "ReadConsoleInputW");
+        }
+
+        const auto saved = currentFrameOffset;
+        currentFrameOffset -= 40;
+        const auto request = currentFrameOffset;
+        maxFrameOffset = std::min(maxFrameOffset, request);
+        if (node.filter)
+            emitExpr(node.filter.get(), node.listFilter ? ThavaType::MULTYPE : ThavaType::STRING);
+        else enc.xor_rr(RAX, RAX);
+        enc.mov_mr_rbp(request, RAX);
+        enc.mov_ri64(RCX, THAVA_KEY_BUFFER);
+        enc.call_iat_func("malloc");
+        enc.mov_mr_rbp(request + 8, RAX);
+        if constexpr (windows) {
+            enc.mov_ri64(RCX, -10);
+            enc.call_iat_func("GetStdHandle");
+            enc.mov_mr_rbp(request + 16, RAX);
+            enc.lea_rip_label(RAX, keyReadEvent);
+            enc.mov_mr_rbp(request + 24, RAX);
+        }
+        enc.mov_ri64(RAX, node.filterKind());
+        enc.mov_mr_rbp(request + 32, RAX);
+        enc.lea_rm_rbp(RCX, request);
+        enc.call_label(*keyPressEntry);
+
+        const auto success = enc.createLabel();
+        enc.test_rr(RAX, RAX);
+        enc.je(success);
+        for (size_t i = 1; i < std::size(keyPressErrors); ++i) {
+            const auto next = enc.createLabel();
+            enc.cmp_ri32(RAX, i);
+            enc.jne(next);
+            emitThrowCall(nullptr, nullptr, keyPressErrors[i]);
+            enc.bindLabel(next);
+        }
+        enc.bindLabel(success);
+        enc.mov_rm_rbp(RAX, request + 8);
+        currentFrameOffset = saved;
+        return ThavaType::STRING;
+    }
+
     ThavaType emitDecimalOperation(int op, ASTNode* left, ASTNode* right = nullptr) {
         using namespace x86;
         if (!decimalEntry) decimalEntry = enc.createLabel();
@@ -4473,6 +4523,7 @@ public:
             return fi.returnType;
         }
 
+        if (auto press = dynamic_cast<KeyPressNode*>(node)) return emitKeyPress(*press);
         if (auto inp = dynamic_cast<InputNode*>(node)) {
             emitExpr(inp->prompt.get());
             enc.mov_rr(x86::RCX, x86::RAX);
@@ -8235,6 +8286,24 @@ public:
             enc.code.insert(enc.code.end(), entry, last);
         }
 
+        if (keyPressEntry) {
+            if constexpr (std::is_same_v<TEmitter, PeEmitter>) {
+                enc.bindLabel(keyReadEvent);
+                enc.sub_rsp(40);
+                enc.call_iat_func("ReadConsoleInputW");
+                enc.add_rsp(40);
+                enc.ret();
+            }
+            constexpr size_t alignment = 16;
+            enc.code.resize((enc.code.size() + alignment - 1) & ~(alignment - 1));
+            constexpr bool windowsKeys = std::is_same_v<TEmitter, PeEmitter>;
+            const auto* first = windowsKeys ? key_press_runtime::x64Windows : key_press_runtime::x64Linux;
+            const auto size = windowsKeys ? sizeof(key_press_runtime::x64Windows) : sizeof(key_press_runtime::x64Linux);
+            const auto offset = windowsKeys ? key_press_runtime::x64WindowsEntry : key_press_runtime::x64LinuxEntry;
+            enc.code.insert(enc.code.end(), first, first + offset);
+            enc.bindLabel(*keyPressEntry);
+            enc.code.insert(enc.code.end(), first + offset, first + size);
+        }
         if (mutationEntry) {
             enc.bindLabel(mutationAllocator);
             // Keep MS ABI nonvolatile registers intact around the Linux heap helper.
