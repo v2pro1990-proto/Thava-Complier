@@ -2174,9 +2174,15 @@ public:
         enc.jne(hasMsg);
         enc.lea_rip_rdata(x86::RAX, pe.addStringLiteralOffset("Runtime Error!"));
         enc.bindLabel(hasMsg);
-        enc.mov_rr(x86::RDX, x86::RAX);
-        enc.lea_rip_rdata(x86::RCX, pe.addStringLiteralOffset("[Runtime Exception]: %s\n"));
-        enc.call_iat_func("printf");
+        // This path never returns. Realign the stack for the Windows CRT and
+        // use single-argument string formats supported by the Linux runtime.
+        enc.and_ri(x86::RSP, -16);
+        enc.sub_rsp(48);
+        enc.mov_mr(x86::RSP, 32, x86::RAX);
+        enc.lea_rip_rdata(x86::RDX, pe.addStringLiteralOffset("[Runtime Exception]: "));
+        emitCallPrintf(offFmtStr, x86::RDX, true);
+        enc.mov_rm(x86::RDX, x86::RSP, 32);
+        emitCallPrintf(offFmtStrNL, x86::RDX, true);
         enc.mov_ri64(x86::RCX, 1);
         enc.call_iat_func("exit");
     }
